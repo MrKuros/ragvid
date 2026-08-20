@@ -85,9 +85,11 @@ class Session:
             raise SessionNotFound(str(Path(root or Path.cwd())))
         try:
             raw = json.loads(path.read_text())
+            # An empty spec list is a legitimate state, not damage: a clip is
+            # open and nothing is graded yet, which is what Project.reset()
+            # leaves behind. Project.spec raises NoGrade for it, so the old
+            # "reject empty" guard would now reject a state the API creates.
             specs = [GradeSpec(**s) for s in raw["specs"]]
-            if not specs:  # .spec would IndexError later, far from the cause
-                raise ValueError("session has no specs")
             return cls(source=raw["source"], stats=ClipStats(**raw["stats"]), specs=specs)
         # ValueError covers JSONDecodeError and pydantic's ValidationError; TypeError
         # covers a session.json whose shape is wrong rather than merely incomplete.

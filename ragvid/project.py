@@ -172,6 +172,20 @@ class Project:
         """
         return self._push(spec)
 
+    def reset(self) -> bool:
+        """Discard every grade, back to the ungraded clip. False if there was
+        nothing to discard.
+
+        Distinct from undo, which steps back one edit. This is the "start over"
+        a user reaches for when the look has wandered somewhere they don't want
+        and stepping back one at a time is not worth it.
+        """
+        if not self.session.specs:
+            return False
+        self.session.specs.clear()
+        self.save()
+        return True
+
     def undo(self) -> bool:
         """Step back one grade. False if already at the first."""
         if not self.session.pop():

@@ -289,6 +289,69 @@ def r_close(req, q):
         return _mutated()
 
 
+def r_reset(req, q):
+    """Discard every grade, keep the clip. The 'start over' button.
+
+    Distinct from undo (one step) and from close (drops the clip entirely).
+    """
+    with LOCK:
+        _project().reset()
+        return _mutated()
+
+
+def _listing(path: Path) -> dict:
+    """One directory, split into folders and openable media."""
+    dirs, files = [], []
+    try:
+        entries = sorted(path.iterdir(), key=lambda e: e.name.lower())
+    except (PermissionError, OSError) as exc:
+        raise InputError(str(path), f"cannot list ({exc.__class__.__name__})") from exc
+
+    for e in entries:
+        if e.name.startswith("."):
+            continue                      # dotfiles are noise in a picker
+        try:
+            if e.is_dir():
+                dirs.append({"name": e.name, "path": str(e)})
+            elif e.suffix.lower() in VIDEO_EXT | IMAGE_EXT:
+                files.append({
+                    "name": e.name,
+                    "path": str(e),
+                    "kind": "video" if e.suffix.lower() in VIDEO_EXT else "image",
+                    "size": e.stat().st_size,
+                })
+        except OSError:
+            continue                      # a broken symlink shouldn't kill the listing
+    return {"dirs": dirs, "files": files}
+
+
+def r_browse(req, q):
+    """Directory listing, so the UI can offer a visual picker instead of
+    asking someone to type a path.
+
+    A browser file input cannot give us a real path and cannot pick a folder at
+    all, so for a local tool this is the only way to open a large clip in place
+    rather than uploading a copy of it.
+    """
+    raw = _param(q, "path", "") or str(Path.home())
+    path = Path(raw).expanduser()
+    if not path.is_dir():
+        path = path.parent if path.parent.is_dir() else Path.home()
+    path = path.resolve()
+
+    # Breadcrumb trail, so the UI can offer one click per ancestor.
+    trail = [{"name": p.name or str(p), "path": str(p)}
+             for p in reversed([path, *path.parents])]
+    body = {
+        "path": str(path),
+        "parent": str(path.parent) if path.parent != path else None,
+        "home": str(Path.home()),
+        "trail": trail,
+        **_listing(path),
+    }
+    return 200, "application/json", json.dumps(body).encode()
+
+
 def _param(q, key, default):
     return q.get(key, [default])[0]
 
@@ -383,6 +446,8 @@ ROUTES = {
     ("POST", "/api/spec"): r_spec,
     ("POST", "/api/undo"): r_undo,
     ("POST", "/api/close"): r_close,
+    ("POST", "/api/reset"): r_reset,
+    ("GET", "/api/browse"): r_browse,
     ("POST", "/api/export"): r_export,
 }
 

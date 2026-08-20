@@ -55,6 +55,25 @@ All return the same state object as `GET /api/state`.
 | `POST` | `/api/spec` | `{"spec": {...}}` | The slider path. Fast, no network. Full spec object. |
 | `POST` | `/api/undo` | — | `409` if already at the first grade. |
 | `POST` | `/api/close` | — | Drops the project; back to the empty state. |
+| `POST` | `/api/reset` | — | Discards every grade, keeps the clip open. The "start over" button — distinct from undo (one step) and close (drops the clip). |
+
+## Browsing — a visual picker
+
+`GET /api/browse?path=<dir>` → `200`
+
+```json
+{"path": "/home/me/clips", "parent": "/home/me", "home": "/home/me",
+ "trail": [{"name":"/","path":"/"}, {"name":"home","path":"/home"}, ...],
+ "dirs":  [{"name":"raw","path":"/home/me/clips/raw"}],
+ "files": [{"name":"a.mp4","path":"/home/me/clips/a.mp4","kind":"video","size":812634}]}
+```
+
+`kind` is `video` or `image`; other files and dotfiles are omitted. A path that
+points at a file lists its containing folder instead. Defaults to `$HOME`.
+
+This exists because a browser file input cannot report a real path and cannot
+pick a folder at all — so for a local tool it is the only way to open a large
+clip in place rather than uploading a copy of it.
 
 ## Frames — the check-before-you-render path
 
