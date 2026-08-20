@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ragvid import looks
 from ragvid.spec import GradeSpec
 
 if TYPE_CHECKING:  # probe imports nothing from us; this keeps the dependency one-way
@@ -74,10 +75,19 @@ def plan_vibe(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
 
         provider = get_provider()
 
-    user = (
-        f"{format_stats(stats)}\n\n"
-        f'The look the user asked for: "{vibe}"\n\n'
-        "Grade this specific footage toward that look, starting from identity and moving "
-        "only what the look requires. Return the full spec."
+    # Retrieval, additive: measured neighbouring looks from the corpus. Goes in
+    # the USER message, not SYSTEM -- the hits depend on `vibe`, so putting them
+    # in the system prompt would make it un-cacheable and mix data into
+    # instructions. Empty string when nothing in the corpus overlaps the vibe.
+    examples = looks.ground(vibe)
+
+    user = "\n\n".join(
+        part for part in (
+            format_stats(stats),
+            f'The look the user asked for: "{vibe}"',
+            examples,
+            "Grade this specific footage toward that look, starting from identity and moving "
+            "only what the look requires. Return the full spec.",
+        ) if part
     )
     return provider.plan(SYSTEM, user).sanitize()

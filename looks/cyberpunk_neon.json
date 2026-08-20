@@ -1,0 +1,122 @@
+{
+  "name": "cyberpunk neon",
+  "tags": [
+    "neon",
+    "magenta",
+    "purple",
+    "futuristic",
+    "night",
+    "city",
+    "electric",
+    "synthwave",
+    "vivid"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "colorbalance=rh=0.2:bh=0.25:gs=-0.1,eq=saturation=1.5:contrast=1.2:brightness=-0.04",
+    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.6966002746003993,
+        "g": 0.43367205655406627,
+        "b": 0.4786838121819841
+      },
+      "std": {
+        "r": 0.2731108390211323,
+        "g": 0.18732594524746993,
+        "b": 0.24306680947507037
+      },
+      "saturation": 0.4829279095078167,
+      "dominant_hue": 349.7781144945512
+    },
+    "fit_error": {
+      "rmse_cv": 7.845057518216727,
+      "mean_cv": 5.168028034161356,
+      "std_cv": 1.1987531373869555,
+      "rmse_cv_cdl_only": 9.15774615720358
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 1.4537548272760896,
+      "g": 1.1788900117923955,
+      "b": 1.531641915441649
+    },
+    "offset": {
+      "r": -0.19546882314162517,
+      "g": -0.14069836623509385,
+      "b": -0.11158615448900006
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 1.3543869643246769,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": 0.00925687367585391,
+      "g": 0.00036055686354561495,
+      "b": -0.0308293852118333
+    },
+    "highlight_tint": {
+      "r": -0.004545481278682273,
+      "g": 0.011047152472365035,
+      "b": -0.09604645607185071
+    },
+    "shadow_lift": -0.024326704092700532,
+    "highlight_lift": 0.012135966138308812,
+    "hue_red": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_yellow": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_green": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: cooler, brighter, more saturated."
+  }
+}

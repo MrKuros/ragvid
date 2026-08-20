@@ -1,0 +1,122 @@
+{
+  "name": "underwater",
+  "tags": [
+    "cyan",
+    "aqua",
+    "underwater",
+    "deep",
+    "cool",
+    "submerged",
+    "blue",
+    "green",
+    "murky"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "colorbalance=bm=0.18:gm=0.12:rm=-0.16,eq=saturation=1.1:brightness=-0.05",
+    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.48961544571531684,
+        "g": 0.4413020265975555,
+        "b": 0.3170578249820348
+      },
+      "std": {
+        "r": 0.21330697065993337,
+        "g": 0.14588359253901043,
+        "b": 0.13192869105684904
+      },
+      "saturation": 0.4364652678146088,
+      "dominant_hue": 43.43670146023922
+    },
+    "fit_error": {
+      "rmse_cv": 6.0645067623880085,
+      "mean_cv": 1.2632317135849778,
+      "std_cv": 0.37778156357413895,
+      "rmse_cv_cdl_only": 6.60703252350664
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 1.1354219385797546,
+      "g": 0.9180827028601574,
+      "b": 0.8313249904765234
+    },
+    "offset": {
+      "r": -0.17407588484986902,
+      "g": -0.0178143055197576,
+      "b": 0.017653347433024436
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 1.2240809807638935,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": -0.001714413794803556,
+      "g": 0.00047671872312587526,
+      "b": 0.00032597149578407567
+    },
+    "highlight_tint": {
+      "r": -0.1163526927305267,
+      "g": 0.02740179427823383,
+      "b": 0.07117478125647013
+    },
+    "shadow_lift": 0.0077038476078179615,
+    "highlight_lift": 0.008259977696250673,
+    "hue_red": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_yellow": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_green": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: warmer, darker, more saturated."
+  }
+}

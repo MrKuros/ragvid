@@ -1,0 +1,122 @@
+{
+  "name": "vintage film",
+  "tags": [
+    "faded",
+    "retro",
+    "nostalgic",
+    "seventies",
+    "analog",
+    "grainy",
+    "old",
+    "warm",
+    "milky"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "curves=preset=vintage",
+    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.6310525372186664,
+        "g": 0.48176775826072554,
+        "b": 0.39046254311910356
+      },
+      "std": {
+        "r": 0.1553447512149489,
+        "g": 0.158704136176322,
+        "b": 0.07882340475286453
+      },
+      "saturation": 0.40170015404070386,
+      "dominant_hue": 22.509957338189786
+    },
+    "fit_error": {
+      "rmse_cv": 1.716841584512672,
+      "mean_cv": 1.159698364146744,
+      "std_cv": 0.37860729511277236,
+      "rmse_cv_cdl_only": 2.7357812426224855
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 0.8268920515207417,
+      "g": 0.9987656580151871,
+      "b": 0.49669155117491326
+    },
+    "offset": {
+      "r": 0.14002650848104348,
+      "g": -0.015130396251831879,
+      "b": 0.21093040690775455
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 1.1265810931375417,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": -0.022668551753209747,
+      "g": 0.00867823278695904,
+      "b": -0.019215207569261948
+    },
+    "highlight_tint": {
+      "r": -0.033432122108523726,
+      "g": 0.004001880339879923,
+      "b": 0.05880227619376765
+    },
+    "shadow_lift": 0.00287674223514632,
+    "highlight_lift": 0.003053624467724657,
+    "hue_red": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_yellow": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_green": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: warmer, brighter, more saturated."
+  }
+}

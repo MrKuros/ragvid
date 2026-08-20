@@ -1,0 +1,123 @@
+{
+  "name": "golden hour",
+  "tags": [
+    "warm",
+    "sunny",
+    "amber",
+    "golden",
+    "summer",
+    "nostalgic",
+    "soft",
+    "romantic",
+    "evening",
+    "sunset"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "colortemperature=temperature=4200,eq=saturation=1.12:brightness=0.03",
+    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.6039373638347343,
+        "g": 0.43127904865646255,
+        "b": 0.2517573302470123
+      },
+      "std": {
+        "r": 0.19351856102687282,
+        "g": 0.12972034541463806,
+        "b": 0.10568602667837301
+      },
+      "saturation": 0.5995700299879135,
+      "dominant_hue": 30.546546217868435
+    },
+    "fit_error": {
+      "rmse_cv": 4.266837186062676,
+      "mean_cv": 1.7326874271925752,
+      "std_cv": 2.123117770398451,
+      "rmse_cv_cdl_only": 7.520804001844674
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 1.0300892607142946,
+      "g": 0.8163632610183866,
+      "b": 0.6659615464845381
+    },
+    "offset": {
+      "r": -0.0507297742379853,
+      "g": 0.032443043424581985,
+      "b": 0.07588203533917631
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 1.6815135692675094,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": 0.1021010664786807,
+      "g": -0.022994677984586577,
+      "b": -0.07286555455389469
+    },
+    "highlight_tint": {
+      "r": -0.15547404255529523,
+      "g": 0.030644578292256412,
+      "b": 0.15424901734950117
+    },
+    "shadow_lift": 0.0005942851337363006,
+    "highlight_lift": 0.004443950758062198,
+    "hue_red": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_yellow": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_green": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: warmer, darker, more saturated."
+  }
+}

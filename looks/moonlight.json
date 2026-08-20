@@ -1,0 +1,122 @@
+{
+  "name": "moonlight",
+  "tags": [
+    "cool",
+    "blue",
+    "night",
+    "moody",
+    "dark",
+    "nocturnal",
+    "cold",
+    "lonely",
+    "dream"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "colortemperature=temperature=12000,eq=brightness=-0.09:saturation=0.8:gamma=0.85",
+    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.2525556803740897,
+        "g": 0.2516829951889408,
+        "b": 0.22264500499290193
+      },
+      "std": {
+        "r": 0.1282581446497696,
+        "g": 0.1223840686100105,
+        "b": 0.13107106944142097
+      },
+      "saturation": 0.2383011501866718,
+      "dominant_hue": 58.65507261704633
+    },
+    "fit_error": {
+      "rmse_cv": 2.849544004371632,
+      "mean_cv": 0.7432443575801442,
+      "std_cv": 2.843921174760377,
+      "rmse_cv_cdl_only": 3.420681340753634
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 0.6827114500118768,
+      "g": 0.7701941975856934,
+      "b": 0.8259208416475853
+    },
+    "offset": {
+      "r": -0.13995531134612038,
+      "g": -0.132728404532644,
+      "b": -0.11110875563907702
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 0.6683232943097922,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": -0.0009462966116020686,
+      "g": 0.0012686923724549177,
+      "b": -0.009780971262509125
+    },
+    "highlight_tint": {
+      "r": 0.0,
+      "g": 0.0,
+      "b": 0.0
+    },
+    "shadow_lift": -0.008208989016055993,
+    "highlight_lift": 0.0,
+    "hue_red": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_yellow": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_green": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: cooler, darker, less saturated."
+  }
+}
