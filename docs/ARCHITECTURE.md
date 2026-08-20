@@ -25,7 +25,14 @@ Read this before building a front end.
                                  │
                                  ▼
                           spec.GradeSpec
-                     (14 numbers — the only currency)
+             (43 numbers + a rationale — the only currency)
+                                 │
+          37 colour numbers ─────┴───── 6 spatial effects
+                    │                          │
+                    ▼                          ▼
+              lut.bake_cube               render.py filtergraph
+              33³ .cube (65³ if a         denoise · glow · softness ·
+              hue band is in use)         grain · vignette · fringe
 ```
 
 Three rules hold the whole thing together:
@@ -114,12 +121,102 @@ That branch, and every other place the three platforms disagree, lives in
 The cached `ClipStats` is load-bearing: `refine` never re-probes the video, and
 that is the entire reason the refine loop is sub-second rather than seconds.
 
+## The `.cube` is colour-only — a seam you can see from outside
+
+`GradeSpec.apply()`, and therefore the baked LUT, implements 37 of the 43
+numbers. The six `effects` fields are spatial. A 3D LUT maps one RGB triple to
+one RGB triple with no knowledge of the neighbouring pixel, so blur, grain,
+vignette, glow and chromatic fringing cannot be expressed in one at all — not
+approximately, structurally. They live in `render.py` as ffmpeg filters wrapped
+around `lut3d`, and `apply()` ignores `spec.effects` completely.
+
+That matters the moment a `.cube` leaves this tool. Take one into Resolve,
+Premiere or OBS and you get the entire colour transform, exactly: exposure,
+CDL, white balance, saturation, the six hue qualifiers, the shadow/highlight
+split, the highlight shoulder, the contrast S-curve and `look_mix`, in that
+order. You get **none** of `effects`. So a spec with `grain` or `vignette` set
+renders differently in Resolve than ragvid's own export of the same spec, and
+nothing in the file says so — a `.cube` has no place to record what it left
+out. Read `effects` out of `session.json` before assuming a `.cube` round-trips
+the look, and rebuild those six with the host's own nodes.
+
+Second surprise for a host application: the LUT is 33³ normally but **65³
+whenever any hue band is off identity** (see the gotcha below), which takes the
+file from 0.97 MB to 7.4 MB, measured. Anything that caps LUT size or uploads
+LUTs will notice.
+
 ## Gotchas worth knowing before you touch the internals
 
 - **`spec.py` documents an evaluation order and the order is load-bearing:**
-  CDL → white balance → saturation → contrast. `lut.py` bakes by calling
-  `spec.apply()` rather than reimplementing it, and a test asserts every other
-  permutation differs materially.
+
+  ```
+  0 src captured → 1 exposure → 2 CDL → 3 white balance → 4 saturation
+  → 5 hue qualifiers → 6 tonal split → 7 highlight rolloff → 8 contrast
+  → 9 look_mix → 10 clip to [0,1]
+  ```
+
+  `lut.py` bakes by calling `spec.apply()` rather than reimplementing it, and a
+  test asserts every other permutation differs materially. Three of those
+  placements are counter-intuitive and each has a reason:
+
+  - **Exposure before the CDL**, so `offset` stays an *absolute* lift instead
+    of being scaled by the exposure move.
+  - **Rolloff at 7, not at the end.** `_smoothstep(u) = u²(3-2u)` has
+    derivative `6u(1-u)`, which is negative for `u > 1` — feed the contrast
+    S-curve an out-of-range value and it is non-monotonic, i.e. brighter input
+    maps to *darker* output, baked into the `.cube` forever. That is why
+    `_s_curve` clips its input and why the clip is not removable. Everything
+    that can exceed 1 must therefore sit before the shoulder, and the shoulder
+    immediately before contrast. A shoulder at the final return would leave the
+    clip that actually destroys highlights — the one inside step 8 — untouched.
+  - **Hue qualifiers before the tonal split.** A qualifier reads a hue angle, so
+    if the split injected its tint first, "teal shadows" would make the cyan
+    qualifier fire on every shadow in the frame. A feedback loop, avoided by
+    ordering rather than by a special case.
+
+- **Highlight clipping was silently eating every "brighter" prompt.** Measured
+  on a 4096-step ramp: `slope=1.3` — inside the 0.7–1.4 range `vibe.py` tells
+  the model is sane — pins **23.1%** of the ramp at pure white; `slope=1.6`
+  pins 37.5%. `highlight_rolloff` replaces that hard clip with an
+  extended-Reinhard shoulder at step 7; the same ramp at `rolloff=0.3` pins
+  **0.0%**. The price is not avoidable and is not a bug: no monotone `f` with
+  `f(x) = x` on `[0,1]` and `f ≤ 1` can also roll off, so a real shoulder must
+  pull legal white down. Measured `f(1)` = 0.976 / 0.928 / 0.856 / 0.760 at
+  rolloff 0.1 / 0.3 / 0.6 / 1.0. Hence the default is 0, and 0 inserts *no
+  code at all* rather than an "identity" shoulder.
+
+- **Smoothstepped hue bands are necessary but not sufficient for 33³.** The six
+  band weights are an exact partition of unity (measured within 2e-15 of 1 over
+  1e4 hues), so adjacent band settings interpolate C1 and no hue is unweighted
+  or double-counted. That buys smoothness in *hue*; it buys nothing in *RGB*.
+  `hue()` and `chroma()` have gradient kinks on the planes r=g, g=b, r=b, so a
+  qualifier's output is C0-but-not-C1 inside the cube and trilinear
+  reconstruction is only first-order accurate there — error ~1/n, not 1/n².
+  Measured max error against exact `apply()` over 3×10⁵ random points, in 8-bit
+  code values:
+
+  | Grade | 33³ | 65³ |
+  |---|---|---|
+  | full stack, no qualifiers | 1.68 | 0.82 |
+  | mild qualifiers (sat .82–1.15) | 1.66 | 0.77 |
+  | strong (sat .65–1.30) | 1.80 | 0.88 |
+  | extreme (sat .30–1.60) | 3.52 | 1.19 |
+
+  So `bake_cube` escalates to 65³ when — and only when — a band is off identity.
+  Widening the bands does not help; the kinks are intrinsic to hue selection.
+  Raising the default instead would 8× every `.cube` for grades that never touch
+  a qualifier.
+
+- **The identity LUT is a bit-for-bit gate, not an `atol` one.**
+  `GradeSpec.identity().apply(_grid(33))` must hash to
+  `517467be3ba6b7a8afe71a05c847061dc597f0ea92e41b422164b579fbc74291`. Every
+  step added since is wrapped in an explicit identity check that skips it
+  entirely, because `L + (x-L)*1.0` and `src + (x-src)*1.0` are not bitwise
+  identities in floating point (~1 ulp). An unguarded step would still pass
+  `test_lut`'s `atol=1e-6` assertion while shifting every saved grade. Add a
+  field, add its guard — and add it to `is_identity()`, or
+  `GradeSpec(exposure=3).is_identity()` returns True and the tests assert
+  nothing. `python -m ragvid.spec` runs that gate plus the order's invariants.
 - **`.cube` varies RED fastest.** Reversing it produces a plausible-looking file
   that grades channels wrongly.
 - **Statistics are display-space, not linear.** `spec.apply()`, the LUT and

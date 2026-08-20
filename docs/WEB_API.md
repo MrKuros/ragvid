@@ -39,7 +39,16 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
   "version": 7,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,
-            "contrast": 0, "pivot": 0.435, "rationale": "..." },
+            "contrast": 0, "pivot": 0.435,
+            "exposure": 0, "look_mix": 1.0, "highlight_rolloff": 0,
+            "shadow_tint": {"r":0,"g":0,"b":0}, "highlight_tint": {...},
+            "shadow_lift": 0, "highlight_lift": 0,
+            "hue_red": {"sat":1.0,"lum":0}, "hue_yellow": {...},
+            "hue_green": {...}, "hue_cyan": {...}, "hue_blue": {...},
+            "hue_magenta": {...},
+            "effects": {"denoise":0,"glow":0,"softness":0,
+                        "grain":0,"vignette":0,"fringe":0},
+            "rationale": "..." },
   "stats": { "mean": {"r":0.2,"g":0.15,"b":0.15}, "saturation": 0.48,
              "width": 720, "height": 405, "frames_sampled": 10 },
   "providers": ["groq", "anthropic"],
@@ -49,6 +58,46 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
 
 When nothing is open: `{"open": false, "providers": [...], "provider": "groq"}`.
 When open but not yet graded: `"planned": false`, `"spec": null`.
+
+### The spec object
+
+23 keys: 43 numbers and a `rationale` string. Every value shown above **is** the
+identity value, so a client can render "is this field moved?" by comparing
+against the literal defaults rather than tracking a baseline.
+
+| Group | Keys | Notes for a UI |
+|---|---|---|
+| CDL core | `slope` `offset` `power` `saturation` `temperature` `tint` `contrast` `pivot` | unchanged since api_version 1 |
+| Tone | `exposure` `look_mix` `highlight_rolloff` | `exposure` in stops; `look_mix` 0–1 fades the whole look back to source; `highlight_rolloff` 0 = hard clip |
+| Tonal split | `shadow_tint` `highlight_tint` `shadow_lift` `highlight_lift` | tints are luma-stripped, so a tint slider never changes brightness and a lift slider never changes colour — the two axes are independent by construction, and a UI can show them as such |
+| Hue qualifiers | `hue_red` `hue_yellow` `hue_green` `hue_cyan` `hue_blue` `hue_magenta` | each `{"sat": 1.0, "lum": 0.0}`, centred at 0/60/120/180/240/300° |
+| Effects | `effects` | six spatial filters — **not** part of the colour transform |
+
+`slope`/`offset`/`power` and both tints are `{"r","g","b"}` objects, and hue
+bands are `{"sat","lum"}` objects, never arrays. That is not style: Groq's
+strict `json_schema` does not enforce array `minItems` during constrained
+generation, models reliably emit 1-element arrays, and the request then fails
+validation. Do not "simplify" them client-side either — `POST /api/spec` feeds
+straight into the same pydantic model.
+
+**`effects` never reaches the LUT.** `GradeSpec.apply()` ignores it and
+`bake_cube` never sees it; ffmpeg applies those six as filters at render time.
+So `GET /media/cube` is a *colour-only* file — a "download LUT" button should
+say so when any `effects` value is non-zero, or the user takes a `.cube` into
+Resolve and quietly loses their grain and vignette.
+
+Two more consequences of the wider spec, both easy to get wrong:
+
+- **`POST /api/spec` takes the whole object, not a patch.** Missing keys fall
+  back to pydantic defaults, which are the *identity* values — not the current
+  ones. Posting `{"spec": {"saturation": 1.1}}` therefore resets exposure,
+  contrast, every hue band and every effect to identity. Send the `spec` you
+  got from `/api/state` with your one field changed. Unknown keys are ignored
+  rather than rejected, so a typo'd field name silently does nothing.
+- **`api_version` moves whenever this shape moves.** The spec grew from 8 keys
+  to 23, so a client written against the older contract will render a grade it
+  cannot fully represent and will round-trip identity into every new field the
+  moment it posts. Check `api_version` before trusting `spec`.
 
 ## Mutations
 
@@ -60,7 +109,7 @@ All return the same state object as `GET /api/state`.
 | `POST` | `/api/vibe` | `{"vibe": "gloomy"}` | Needs a provider key. Slow (network). |
 | `POST` | `/api/reference` | multipart `file`, or `{"path": "..."}` | Offline, no key, fast. |
 | `POST` | `/api/refine` | `{"instruction": "less blue"}` | Requires `planned`. Slow (network). |
-| `POST` | `/api/spec` | `{"spec": {...}}` | The slider path. Fast, no network. Full spec object. |
+| `POST` | `/api/spec` | `{"spec": {...}}` | The slider path. Fast, no network. Full spec object — omitted keys reset to identity, this is not a patch. |
 | `POST` | `/api/undo` | — | Steps back one, *including* undoing the first grade back to the ungraded clip. `409` only when there is nothing left. |
 | `POST` | `/api/close` | — | Drops the project; back to the empty state. |
 | `POST` | `/api/revert` | `{"index": 0}` | Jump back to any step. `-1` is the ungraded clip. Undo is `revert` to the previous index. |
@@ -94,6 +143,8 @@ to call on every scrubber drag. `graded=0` works even before anything is planned
 This exists so a full export is never how someone finds out a grade is wrong.
 
 `GET /media/cube?v=<version>` → the `.cube` LUT, `text/plain`, for download.
+Colour only — see above — and 33³ or 65³ depending on whether the grade uses a
+hue qualifier, so the response is ~1 MB or ~7.4 MB. Do not assume a fixed size.
 
 ## Export
 
@@ -112,6 +163,12 @@ Runs on a worker thread. Poll:
 
 Poll every ~300ms. Only one export runs at a time; a second `POST` while one is
 running returns `409`.
+
+`gpu` swaps in a hardware H.264 encoder and falls back to libx264 with a warning
+when none works. It is worth far less than a UI checkbox implies once `effects`
+are in play: measured at 1080p30, the full effect stack runs 0.42× realtime on
+libx264 and 0.48× on NVENC, because the filters — not the encoder — are the
+ceiling. Colour-only exports run 1.38×. Size the progress bar's ETA accordingly.
 
 ## Errors
 
