@@ -1,0 +1,122 @@
+{
+  "name": "film noir",
+  "tags": [
+    "monochrome",
+    "black",
+    "white",
+    "dramatic",
+    "contrast",
+    "shadows",
+    "crime",
+    "classic",
+    "stark"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "eq=saturation=0.05:contrast=1.5,curves=preset=strong_contrast",
+    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.4879709626905176,
+        "g": 0.49785390568263066,
+        "b": 0.4734257784131402
+      },
+      "std": {
+        "r": 0.2758136209101825,
+        "g": 0.2747500703518722,
+        "b": 0.2725443372959844
+      },
+      "saturation": 0.0770173430554094,
+      "dominant_hue": 84.25417861922338
+    },
+    "fit_error": {
+      "rmse_cv": 8.709168334760605,
+      "mean_cv": 3.043056180177964,
+      "std_cv": 2.721577568107504,
+      "rmse_cv_cdl_only": 10.260735059276046
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 1.4681415950527326,
+      "g": 1.7290723570041873,
+      "b": 1.7173892713707184
+    },
+    "offset": {
+      "r": -0.38092173180000655,
+      "g": -0.35324395327420355,
+      "b": -0.2672139823114166
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 0.21599763320260076,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": 0.0013914136681536515,
+      "g": -0.00037800575288325644,
+      "b": -0.0003526984956698301
+    },
+    "highlight_tint": {
+      "r": 0.006184077182309681,
+      "g": -0.003335582693658287,
+      "b": 0.014832048941071603
+    },
+    "shadow_lift": -0.03741978688456879,
+    "highlight_lift": 0.024877033954014777,
+    "hue_red": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_yellow": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_green": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: cooler, darker, less saturated."
+  }
+}

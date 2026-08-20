@@ -1,0 +1,122 @@
+{
+  "name": "teal and orange",
+  "tags": [
+    "cinematic",
+    "blockbuster",
+    "action",
+    "punchy",
+    "contrast",
+    "teal",
+    "orange",
+    "trailer",
+    "hollywood"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "colorbalance=rs=-0.12:bs=0.18:rh=0.18:bh=-0.14,eq=saturation=1.25:contrast=1.15",
+    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.6892145629084562,
+        "g": 0.496327932099077,
+        "b": 0.2494046046661584
+      },
+      "std": {
+        "r": 0.26464736835038244,
+        "g": 0.18102091754022326,
+        "b": 0.12817653531527287
+      },
+      "saturation": 0.6648431997763978,
+      "dominant_hue": 33.75090504577966
+    },
+    "fit_error": {
+      "rmse_cv": 9.526004768726922,
+      "mean_cv": 5.961205485294234,
+      "std_cv": 3.016922966787586,
+      "rmse_cv_cdl_only": 13.285350771737479
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 1.4087042119756832,
+      "g": 1.139210862284686,
+      "b": 0.8076814538724337
+    },
+    "offset": {
+      "r": -0.20223212223353793,
+      "g": -0.06291793435356707,
+      "b": 0.06142934688743501
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 1.8645742881474223,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": 0.06386986942731897,
+      "g": -0.01338620514994599,
+      "b": -0.05546981048485656
+    },
+    "highlight_tint": {
+      "r": -0.04814551663557513,
+      "g": -0.005796263683602532,
+      "b": 0.19918593660991413
+    },
+    "shadow_lift": -0.013841937339413116,
+    "highlight_lift": 0.03441079956444695,
+    "hue_red": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_yellow": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_green": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: warmer, darker, more saturated."
+  }
+}

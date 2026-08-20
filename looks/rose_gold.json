@@ -1,0 +1,122 @@
+{
+  "name": "rose gold",
+  "tags": [
+    "pink",
+    "rose",
+    "warm",
+    "soft",
+    "romantic",
+    "blush",
+    "feminine",
+    "gentle",
+    "glow"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "colorbalance=rm=0.12:rh=0.14:bm=0.06:gm=-0.04,eq=saturation=1.05:brightness=0.04",
+    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.6955294344590626,
+        "g": 0.5324437863107853,
+        "b": 0.40916030092575123
+      },
+      "std": {
+        "r": 0.20195348376784203,
+        "g": 0.16299535589222164,
+        "b": 0.15118500715240654
+      },
+      "saturation": 0.4313180635393979,
+      "dominant_hue": 25.738734955440556
+    },
+    "fit_error": {
+      "rmse_cv": 3.2993673596982322,
+      "mean_cv": 1.619631619152933,
+      "std_cv": 1.022556623450549,
+      "rmse_cv_cdl_only": 3.4920174536558783
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 1.0749879168655287,
+      "g": 1.025771399557276,
+      "b": 0.9526652134902891
+    },
+    "offset": {
+      "r": 0.05151360223376378,
+      "g": 0.023674613529523825,
+      "b": 0.0655506960105629
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 1.2096454796553184,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": -0.014276562846935048,
+      "g": 0.005017264289421267,
+      "b": -0.007661359536505525
+    },
+    "highlight_tint": {
+      "r": -0.003770647151066098,
+      "g": -0.0006800213289235755,
+      "b": 0.017839208293113487
+    },
+    "shadow_lift": -0.00846948072444041,
+    "highlight_lift": 0.00039446153952800173,
+    "hue_red": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_yellow": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_green": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: warmer, brighter, more saturated."
+  }
+}

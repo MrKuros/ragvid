@@ -1,0 +1,121 @@
+{
+  "name": "punchy commercial",
+  "tags": [
+    "vivid",
+    "bold",
+    "punchy",
+    "saturated",
+    "clean",
+    "crisp",
+    "advertising",
+    "energetic"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "eq=saturation=1.4:contrast=1.25,curves=preset=medium_contrast",
+    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.5787650009079008,
+        "g": 0.4758838394153836,
+        "b": 0.2922623797204062
+      },
+      "std": {
+        "r": 0.25566762194886866,
+        "g": 0.21574510541179376,
+        "b": 0.17999043747552967
+      },
+      "saturation": 0.5426998153705821,
+      "dominant_hue": 38.63582682907877
+    },
+    "fit_error": {
+      "rmse_cv": 5.882199166354579,
+      "mean_cv": 5.094236167806752,
+      "std_cv": 0.8379786105524462,
+      "rmse_cv_cdl_only": 8.647988008508253
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 1.360905487744509,
+      "g": 1.35773904424751,
+      "b": 1.1341774675512628
+    },
+    "offset": {
+      "r": -0.2387448457888991,
+      "g": -0.2004940064430648,
+      "b": -0.08163739918034318
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 1.5220192103381178,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": 0.02208200779813995,
+      "g": -0.0021752011764042158,
+      "b": -0.04347549828975428
+    },
+    "highlight_tint": {
+      "r": -0.03240324672274465,
+      "g": -0.0018565693990907732,
+      "b": 0.11380538348317501
+    },
+    "shadow_lift": -0.009261889771128632,
+    "highlight_lift": 0.017640145761825037,
+    "hue_red": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_yellow": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_green": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: warmer, darker, more saturated."
+  }
+}

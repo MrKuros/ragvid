@@ -1,0 +1,122 @@
+{
+  "name": "cold steel",
+  "tags": [
+    "cold",
+    "clinical",
+    "sterile",
+    "blue",
+    "grey",
+    "modern",
+    "corporate",
+    "hard",
+    "technical"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "colortemperature=temperature=9000,eq=saturation=0.6:contrast=1.2",
+    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.43641192356581004,
+        "g": 0.4233644698618443,
+        "b": 0.3853988970588451
+      },
+      "std": {
+        "r": 0.1770541655724254,
+        "g": 0.16818205000514613,
+        "b": 0.1757585915455413
+      },
+      "saturation": 0.1748467262044028,
+      "dominant_hue": 45.37261966421757
+    },
+    "fit_error": {
+      "rmse_cv": 1.5746219656108842,
+      "mean_cv": 0.21372362419232932,
+      "std_cv": 0.6952249184305346,
+      "rmse_cv_cdl_only": 2.2642055593374
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 0.9424501378736466,
+      "g": 1.0584125901615535,
+      "b": 1.1075112492384491
+    },
+    "offset": {
+      "r": -0.0938113949937735,
+      "g": -0.10623689468145403,
+      "b": -0.08358451146495915
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 0.49036330695286934,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": -0.005860437590899865,
+      "g": 0.0033448828406469787,
+      "b": -0.0158771630997979
+    },
+    "highlight_tint": {
+      "r": 0.01323497103636133,
+      "g": -0.006161229930961226,
+      "b": 0.022060343549765243
+    },
+    "shadow_lift": -0.007511247266754022,
+    "highlight_lift": 0.008617066088656656,
+    "hue_red": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_yellow": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_green": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: cooler, darker, less saturated."
+  }
+}

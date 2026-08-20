@@ -1,0 +1,121 @@
+{
+  "name": "sickly green",
+  "tags": [
+    "green",
+    "eerie",
+    "sickly",
+    "institutional",
+    "uneasy",
+    "horror",
+    "clinical",
+    "toxic"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "colorbalance=gm=0.18:gh=0.12:rm=-0.08,eq=saturation=0.9:contrast=1.1",
+    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.5607087304830007,
+        "g": 0.5882282702432855,
+        "b": 0.39652179783940944
+      },
+      "std": {
+        "r": 0.21173921245157443,
+        "g": 0.18198566460887847,
+        "b": 0.17359334722233752
+      },
+      "saturation": 0.3743337099287354,
+      "dominant_hue": 68.18731815289439
+    },
+    "fit_error": {
+      "rmse_cv": 3.7624544655525263,
+      "mean_cv": 1.2437230055509767,
+      "std_cv": 0.703771542127446,
+      "rmse_cv_cdl_only": 4.031265461307276
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 1.127076842971055,
+      "g": 1.1452822619599479,
+      "b": 1.0938673503871288
+    },
+    "offset": {
+      "r": -0.08919020400156585,
+      "g": 0.014261813536605716,
+      "b": -0.01951387506122798
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 1.0498310142221503,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": 0.021808828460690315,
+      "g": -0.006791652083394051,
+      "b": 0.0030586238130285923
+    },
+    "highlight_tint": {
+      "r": 0.004188264117152275,
+      "g": -0.0032432628830010597,
+      "b": 0.01979441360963689
+    },
+    "shadow_lift": -0.021785377322978545,
+    "highlight_lift": -0.009119208031985914,
+    "hue_red": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_yellow": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_green": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: warmer, brighter, more saturated."
+  }
+}
