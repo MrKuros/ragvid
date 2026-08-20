@@ -14,7 +14,13 @@
   "provenance": {
     "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
     "reference": "eq=contrast=0.6:saturation=0.75:brightness=0.05",
-    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "derived_by": [
+      "match.match_reference(probe_image(base), probe_image(reference))",
+      "build_looks.fit_hue_bands (12-unknown lstsq on the post-CDL residual)",
+      "build_looks.fit_tonal_split (per-band closed form on the residual)",
+      "build_looks.recover_effect: not run, no spatial stimulus (effects stay at identity)",
+      "build_looks.factor_exposure (exact slope -> exposure re-parameterisation)"
+    ],
     "measured_base": {
       "mean": {
         "r": 0.57695310230574,
@@ -43,17 +49,18 @@
       "dominant_hue": 42.70958979383103
     },
     "fit_error": {
-      "rmse_cv": 3.129870817524511,
-      "mean_cv": 0.33690514097010016,
-      "std_cv": 1.5512656049694895,
-      "rmse_cv_cdl_only": 3.327018740117786
+      "rmse_cv": 2.8306452365886354,
+      "mean_cv": 0.9343156932359422,
+      "std_cv": 0.9658202703274478,
+      "rmse_cv_cdl_only": 3.327018740117786,
+      "rmse_cv_after_hue": 3.0624121030538927
     }
   },
   "spec": {
     "slope": {
-      "r": 0.6187895720591828,
-      "g": 0.5950463366037348,
-      "b": 0.6054580456646848
+      "r": 1.0205094813575475,
+      "g": 0.9813520714811058,
+      "b": 0.9985230909901732
     },
     "offset": {
       "r": 0.2698514457184326,
@@ -70,32 +77,32 @@
     "tint": 0.0,
     "contrast": 0.0,
     "pivot": 0.435,
-    "exposure": 0.0,
+    "exposure": -0.721768796658459,
     "look_mix": 1.0,
     "highlight_rolloff": 0.0,
     "shadow_tint": {
-      "r": -0.052769178549869275,
-      "g": 0.009058990083319098,
-      "b": 0.06564733590183366
+      "r": -0.05679668385463267,
+      "g": 0.008557518843271012,
+      "b": 0.08247420375051909
     },
     "highlight_tint": {
-      "r": 0.017854178684545596,
-      "g": -0.0029707070178482294,
-      "b": -0.02314610428212383
+      "r": 0.009832438851862394,
+      "g": -0.0025238039165448034,
+      "b": -0.00395224291957205
     },
-    "shadow_lift": 0.005110624214853535,
-    "highlight_lift": -0.0016323074678271197,
+    "shadow_lift": 0.01819257156233258,
+    "highlight_lift": -0.008263435144904097,
     "hue_red": {
-      "sat": 1.0,
-      "lum": 0.0
+      "sat": 0.9895940446784339,
+      "lum": 0.021225428084802097
     },
     "hue_yellow": {
-      "sat": 1.0,
-      "lum": 0.0
+      "sat": 1.0683176909722498,
+      "lum": -0.005531768189985527
     },
     "hue_green": {
-      "sat": 1.0,
-      "lum": 0.0
+      "sat": 1.0005035639746085,
+      "lum": -0.00289651263535512
     },
     "hue_cyan": {
       "sat": 1.0,

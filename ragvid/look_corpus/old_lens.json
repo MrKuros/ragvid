@@ -1,0 +1,137 @@
+{
+  "name": "old lens",
+  "tags": [
+    "vintage",
+    "lens",
+    "falloff",
+    "dark",
+    "corners",
+    "tunnel",
+    "antique",
+    "portrait",
+    "heirloom"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "colortemperature=temperature=4600,eq=saturation=0.95",
+    "derived_by": [
+      "match.match_reference(probe_image(base), probe_image(reference))",
+      "build_looks.fit_hue_bands (12-unknown lstsq on the post-CDL residual)",
+      "build_looks.fit_tonal_split (per-band closed form on the residual)",
+      "build_looks.recover_effect (metric ratio inverted through calibrate_effects' measured ladder)",
+      "build_looks.factor_exposure (exact slope -> exposure re-parameterisation)"
+    ],
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.5656209377267594,
+        "g": 0.4348397217683873,
+        "b": 0.290117000272612
+      },
+      "std": {
+        "r": 0.1860549193321897,
+        "g": 0.13734327495093773,
+        "b": 0.1201718739272581
+      },
+      "saturation": 0.5090221090434558,
+      "dominant_hue": 31.475935520882
+    },
+    "fit_error": {
+      "rmse_cv": 2.743211037584878,
+      "mean_cv": 1.1929221977669675,
+      "std_cv": 1.0006418726688184,
+      "rmse_cv_cdl_only": 4.941766828725893,
+      "rmse_cv_after_hue": 4.168049092226783
+    },
+    "effect_stimulus": "vignette=a=0.4320",
+    "effect_roundtrip": {
+      "vignette": {
+        "stimulus": 0.55,
+        "recovered": 0.5448028285878606,
+        "error": 0.00519717141213949
+      }
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 1.1443438424062145,
+      "g": 0.9987249526762072,
+      "b": 0.8749788639047797
+    },
+    "offset": {
+      "r": -0.03974281048709705,
+      "g": 0.007574760433288363,
+      "b": 0.04500330976261602
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 1.427568992117553,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": -0.20849465907375622,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.0,
+    "shadow_tint": {
+      "r": 0.05056205872841495,
+      "g": -0.00987923333860896,
+      "b": -0.05102307481839187
+    },
+    "highlight_tint": {
+      "r": -0.03540357088600092,
+      "g": 0.005672059471552849,
+      "b": 0.048062911860238214
+    },
+    "shadow_lift": -0.0019328296640249245,
+    "highlight_lift": 0.005183592264180886,
+    "hue_red": {
+      "sat": 0.9777576387223338,
+      "lum": -0.011463540211695399
+    },
+    "hue_yellow": {
+      "sat": 0.8994275752057848,
+      "lum": 0.008835477137828437
+    },
+    "hue_green": {
+      "sat": 1.001142898594813,
+      "lum": 0.003286366255637784
+    },
+    "hue_cyan": {
+      "sat": 0.982751350740642,
+      "lum": -0.01768703397840351
+    },
+    "hue_blue": {
+      "sat": 0.9861744805786375,
+      "lum": -0.02610481673692669
+    },
+    "hue_magenta": {
+      "sat": 0.9999616211122354,
+      "lum": -0.02632438120641168
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.5448028285878606,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: warmer, darker, more saturated."
+  }
+}

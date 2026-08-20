@@ -1,0 +1,130 @@
+{
+  "name": "autumn leaves",
+  "tags": [
+    "autumn",
+    "fall",
+    "october",
+    "red",
+    "orange",
+    "leaves",
+    "harvest",
+    "woodland",
+    "crisp",
+    "turning"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "selectivecolor=reds=0.2 -0.15 -0.2 0:yellows=0.15 -0.1 -0.25 0:greens=-0.1 0.05 0.3 0.05,eq=saturation=1.1",
+    "derived_by": [
+      "match.match_reference(probe_image(base), probe_image(reference))",
+      "build_looks.fit_hue_bands (12-unknown lstsq on the post-CDL residual)",
+      "build_looks.fit_tonal_split (per-band closed form on the residual)",
+      "build_looks.recover_effect: not run, no spatial stimulus (effects stay at identity)",
+      "build_looks.factor_exposure (exact slope -> exposure re-parameterisation)"
+    ],
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.5437990196075688,
+        "g": 0.5267150508351759,
+        "b": 0.415057132806766
+      },
+      "std": {
+        "r": 0.18221217368987924,
+        "g": 0.16366038643584935,
+        "b": 0.16290067868665936
+      },
+      "saturation": 0.2778314702837034,
+      "dominant_hue": 52.471612232072566
+    },
+    "fit_error": {
+      "rmse_cv": 1.9274090305880336,
+      "mean_cv": 0.177087304675696,
+      "std_cv": 0.19271481251683487,
+      "rmse_cv_cdl_only": 2.239083123976267,
+      "rmse_cv_after_hue": 1.970735624695316
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 0.9618232706945261,
+      "g": 1.0213734997699622,
+      "b": 1.017935203790485
+    },
+    "offset": {
+      "r": -0.009694516200919212,
+      "g": 0.012640757721750995,
+      "b": -0.013401503842278673
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 0.7791873574151258,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.01207302314242959,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.02129868216110231,
+    "shadow_tint": {
+      "r": -0.010492047039337109,
+      "g": 0.003006236066547109,
+      "b": 0.0011156394150772524
+    },
+    "highlight_tint": {
+      "r": 0.003326548866291099,
+      "g": -0.0015071692089182408,
+      "b": 0.005134392371812161
+    },
+    "shadow_lift": 0.0031432607791502597,
+    "highlight_lift": -0.0009490336812797115,
+    "hue_red": {
+      "sat": 0.9752964063599585,
+      "lum": 0.021790560884116187
+    },
+    "hue_yellow": {
+      "sat": 1.017318527535069,
+      "lum": -0.001524191359332341
+    },
+    "hue_green": {
+      "sat": 1.017036034693917,
+      "lum": -0.03574491044422146
+    },
+    "hue_cyan": {
+      "sat": 0.9994803710040825,
+      "lum": -0.006737970604741414
+    },
+    "hue_blue": {
+      "sat": 1.0000045406985985,
+      "lum": 4.1671749034981685e-05
+    },
+    "hue_magenta": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: cooler, brighter, less saturated."
+  }
+}

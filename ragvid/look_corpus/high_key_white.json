@@ -13,7 +13,13 @@
   "provenance": {
     "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
     "reference": "eq=brightness=0.18:contrast=0.8:saturation=0.9,curves=preset=lighter",
-    "derived_by": "match.match_reference(probe_image(base), probe_image(reference))",
+    "derived_by": [
+      "match.match_reference(probe_image(base), probe_image(reference))",
+      "build_looks.fit_hue_bands (12-unknown lstsq on the post-CDL residual)",
+      "build_looks.fit_tonal_split (per-band closed form on the residual)",
+      "build_looks.recover_effect: not run, no spatial stimulus (effects stay at identity)",
+      "build_looks.factor_exposure (exact slope -> exposure re-parameterisation)"
+    ],
     "measured_base": {
       "mean": {
         "r": 0.57695310230574,
@@ -42,17 +48,18 @@
       "dominant_hue": 43.64310719709375
     },
     "fit_error": {
-      "rmse_cv": 5.033101365783492,
-      "mean_cv": 0.5671006755179198,
-      "std_cv": 2.5230713941113803,
-      "rmse_cv_cdl_only": 5.098768264599003
+      "rmse_cv": 4.4498031222735746,
+      "mean_cv": 0.6430036278845036,
+      "std_cv": 1.9747501901940259,
+      "rmse_cv_cdl_only": 5.098768264599003,
+      "rmse_cv_after_hue": 4.501996790641841
     }
   },
   "spec": {
     "slope": {
-      "r": 0.6470134441425422,
-      "g": 0.6624433851475244,
-      "b": 0.7524142354019336
+      "r": 0.9434964695628144,
+      "g": 0.9659969214399101,
+      "b": 1.0971954001532804
     },
     "offset": {
       "r": 0.4854901059882799,
@@ -69,7 +76,7 @@
     "tint": 0.0,
     "contrast": 0.0,
     "pivot": 0.435,
-    "exposure": 0.0,
+    "exposure": -0.5442214295091284,
     "look_mix": 1.0,
     "highlight_rolloff": 0.06625177506541102,
     "shadow_tint": {
@@ -78,23 +85,23 @@
       "b": 0.0
     },
     "highlight_tint": {
-      "r": 0.0083064522995725,
-      "g": -0.002317915291556681,
-      "b": -0.0014983205314096303
+      "r": 0.006110811285007121,
+      "g": -0.0026168152330044497,
+      "b": 0.007927808524269636
     },
     "shadow_lift": 0.0,
-    "highlight_lift": 0.0013165270519935684,
+    "highlight_lift": -0.0034873906785101516,
     "hue_red": {
-      "sat": 1.0,
-      "lum": 0.0
+      "sat": 0.9683745595462053,
+      "lum": 0.0639268867883262
     },
     "hue_yellow": {
-      "sat": 1.0,
-      "lum": 0.0
+      "sat": 1.0965679606224552,
+      "lum": -0.013726836755339991
     },
     "hue_green": {
-      "sat": 1.0,
-      "lum": 0.0
+      "sat": 1.0000398428121497,
+      "lum": -0.00010248058228165161
     },
     "hue_cyan": {
       "sat": 1.0,

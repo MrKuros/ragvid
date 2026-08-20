@@ -11,9 +11,14 @@ spec this large tractable at 20B parameters.
 WHERE THE NUMBERS COME FROM. Not from a model, and not from a human: every
 corpus spec is the output of `match.match_reference(probe(base), probe(ref))`,
 the existing closed-form matcher, run over a reference still by
-scripts/build_looks.py. Hand-authored numbers would reproduce exactly the
-hallucination the corpus exists to prevent. Each entry carries the ffmpeg chain
-that produced its reference still, so every claim is re-derivable from pixels.
+scripts/build_looks.py, plus three more solvers in the same script that pick up
+what a global CDL cannot see: six hue qualifiers by least squares, the tonal
+split in closed form, and the spatial effects from a pair of stills. Exposure
+is an exact re-parameterisation of the solved slope, not a fit.
+
+Hand-authored numbers would reproduce exactly the hallucination the corpus
+exists to prevent. Each entry carries the ffmpeg chain that produced its
+reference still, so every claim is re-derivable from pixels.
 `ragvid/look_corpus/*.json` is a build artifact; scripts/build_looks.py is the source.
 
 RETRIEVAL IS DELIBERATELY DUMB: token overlap over the name and mood words. No
@@ -21,7 +26,7 @@ embedding model, no vector DB, no new dependency. This is a few dozen JSON
 files, and the query is a mood word — a cosine similarity over a 384-dim
 sentence embedding would rank the same handful of entries at a hundred times
 the cost and a new install. Measured on the shipped corpus (`_self_check`,
-corpus mean warmth +0.013): the top-2 hits for "warm" render mid grey +0.211
+corpus mean warmth +0.0154): the top-2 hits for "warm" render mid grey +0.166
 warmer in (r - b), for "cold night" -0.146. The gap is an order of magnitude
 wider than the noise, which is all a corpus this size needs to carry.
 
@@ -124,7 +129,8 @@ def format_examples(entries: list[dict]) -> str:
         return ""
     out = [
         "REFERENCE LOOKS from the corpus. These specs were MEASURED from real "
-        "reference stills by a closed-form matcher, not written by a model, so "
+        "reference stills by closed-form and least-squares solvers, not written "
+        "by a model, so "
         "the numbers are known-good. Use the closest one as your starting point "
         "and adjust it to this footage and this request -- do not copy it "
         "verbatim, and do not re-derive every field from scratch.",

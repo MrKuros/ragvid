@@ -1,0 +1,137 @@
+{
+  "name": "super 8",
+  "tags": [
+    "grainy",
+    "super8",
+    "home",
+    "movie",
+    "amateur",
+    "retro",
+    "seventies",
+    "memory",
+    "flicker"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "curves=preset=vintage,eq=saturation=0.9:contrast=1.05",
+    "derived_by": [
+      "match.match_reference(probe_image(base), probe_image(reference))",
+      "build_looks.fit_hue_bands (12-unknown lstsq on the post-CDL residual)",
+      "build_looks.fit_tonal_split (per-band closed form on the residual)",
+      "build_looks.recover_effect (metric ratio inverted through calibrate_effects' measured ladder)",
+      "build_looks.factor_exposure (exact slope -> exposure re-parameterisation)"
+    ],
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.6068144630538052,
+        "g": 0.48660955655423055,
+        "b": 0.38794403594746113
+      },
+      "std": {
+        "r": 0.1620678044853223,
+        "g": 0.16471890109180112,
+        "b": 0.09265051011625887
+      },
+      "saturation": 0.37734262289998766,
+      "dominant_hue": 26.840601125720777
+    },
+    "fit_error": {
+      "rmse_cv": 2.1507066172167573,
+      "mean_cv": 1.008843793570684,
+      "std_cv": 0.5055765823599897,
+      "rmse_cv_cdl_only": 2.9386950515248715,
+      "rmse_cv_after_hue": 2.327122622358592
+    },
+    "effect_stimulus": "noise=alls=18:allf=t+u",
+    "effect_roundtrip": {
+      "grain": {
+        "stimulus": 0.45,
+        "recovered": 0.4603697704772095,
+        "error": 0.010369770477209495
+      }
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 1.0713546489645747,
+      "g": 1.2873690619249807,
+      "b": 0.725042849065023
+    },
+    "offset": {
+      "r": 0.10348567288457244,
+      "g": -0.03103818806581299,
+      "b": 0.1679866281471668
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 1.0582696081091858,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": -0.31254120066482094,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.002789960791325319,
+    "shadow_tint": {
+      "r": -0.016837541849855822,
+      "g": 0.005244587349262735,
+      "b": -0.0023721256913207733
+    },
+    "highlight_tint": {
+      "r": -0.01613601162891807,
+      "g": 0.003297986167132857,
+      "b": 0.014844825007957927
+    },
+    "shadow_lift": 0.008029353485470491,
+    "highlight_lift": -0.00137980908970772,
+    "hue_red": {
+      "sat": 1.0683926750167605,
+      "lum": -0.0045097739760813355
+    },
+    "hue_yellow": {
+      "sat": 0.9022991127094853,
+      "lum": 0.004727146409088598
+    },
+    "hue_green": {
+      "sat": 0.9999950178565812,
+      "lum": 0.0005784995690816307
+    },
+    "hue_cyan": {
+      "sat": 1.0,
+      "lum": 0.0
+    },
+    "hue_blue": {
+      "sat": 0.9976002133825402,
+      "lum": -0.0065443807756132635
+    },
+    "hue_magenta": {
+      "sat": 0.9114730745387122,
+      "lum": -0.005996268838968121
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.4603697704772095,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: warmer, brighter, more saturated."
+  }
+}

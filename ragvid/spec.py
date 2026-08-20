@@ -23,6 +23,8 @@ EVALUATION ORDER IS LOAD-BEARING. Reviewers and reimplementations must match:
     2. CDL         x*slope + offset; clip(x, 0, None); x **= clip(power, 1e-6, None)
     3. white bal   temperature/tint applied as per-channel gains
     4. saturation  luma + (x - luma) * saturation
+                   (1-4 also live behind `through_saturation`, so a solver can
+                   fit against the exact array step 5 receives)
     5. hue qualifiers  six smoothstep bands, chroma-gated, luma-preserving
     6. tonal split shadow/highlight masks; tints are luma-stripped so tint and
                    lift are exactly independent axes
@@ -266,27 +268,8 @@ class GradeSpec(BaseModel):
         # 0. Keep the input for the look_mix lerp at step 9.
         src = x
 
-        # 1. Exposure, in stops, before the CDL so `offset` stays an absolute lift.
-        # _ID_TOL, not _TOL: the guard must agree with is_identity(), or there
-        # is a window (1e-12 < |exposure| < 1e-9) where is_identity() says True
-        # while apply() no longer reproduces the identity grid bit-for-bit --
-        # exactly the silent hash-gate corruption class.
-        if abs(self.exposure) > _ID_TOL:
-            x = x * (2.0 ** self.exposure)
-
-        # 2. CDL. Clamp before the power step: a fractional power of a negative
-        #    number is NaN, and offset can legitimately push values below zero.
-        x = x * self.slope.as_array() + self.offset.as_array()
-        x = np.clip(x, 0.0, None)
-        power = np.clip(self.power.as_array(), 1e-6, None)
-        x = np.power(x, power)
-
-        # 3. White balance as channel gains.
-        x = x * self._wb_gains()
-
-        # 4. Saturation around Rec.709 luma.
-        luma = np.sum(x * LUMA, axis=-1, keepdims=True)
-        x = luma + (x - luma) * self.saturation
+        # 1-4. Exposure, CDL, white balance, saturation.
+        x = self.through_saturation(x)
 
         # 5. Hue qualifiers. Guarded: the luma round trip inside costs ~1 ulp,
         #    so an unguarded pass would break the identity hash silently.
@@ -326,6 +309,39 @@ class GradeSpec(BaseModel):
             x = s + (x - s) * self.look_mix
 
         return np.clip(x, 0.0, 1.0)
+
+    def through_saturation(self, rgb: np.ndarray) -> np.ndarray:
+        """Steps 1-4 of apply(): exposure, CDL, white balance, saturation.
+
+        Split out of apply() so a solver can see the exact array apply() hands
+        to the hue qualifiers at step 5 -- scripts/build_looks.py fits the six
+        bands against it. A re-implementation of these four steps in the solver
+        would be free to drift out of step with the renderer, and the corpus
+        would then describe a look the renderer does not produce.
+        """
+        x = np.asarray(rgb, dtype=np.float64)
+
+        # 1. Exposure, in stops, before the CDL so `offset` stays an absolute lift.
+        # _ID_TOL, not _TOL: the guard must agree with is_identity(), or there
+        # is a window (1e-12 < |exposure| < 1e-9) where is_identity() says True
+        # while apply() no longer reproduces the identity grid bit-for-bit --
+        # exactly the silent hash-gate corruption class.
+        if abs(self.exposure) > _ID_TOL:
+            x = x * (2.0 ** self.exposure)
+
+        # 2. CDL. Clamp before the power step: a fractional power of a negative
+        #    number is NaN, and offset can legitimately push values below zero.
+        x = x * self.slope.as_array() + self.offset.as_array()
+        x = np.clip(x, 0.0, None)
+        power = np.clip(self.power.as_array(), 1e-6, None)
+        x = np.power(x, power)
+
+        # 3. White balance as channel gains.
+        x = x * self._wb_gains()
+
+        # 4. Saturation around Rec.709 luma.
+        luma = np.sum(x * LUMA, axis=-1, keepdims=True)
+        return luma + (x - luma) * self.saturation
 
     def _wb_gains(self) -> np.ndarray:
         t = self.temperature / TEMP_FULL

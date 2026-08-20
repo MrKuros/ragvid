@@ -1,0 +1,130 @@
+{
+  "name": "sodium street lamp",
+  "tags": [
+    "night",
+    "street",
+    "urban",
+    "sodium",
+    "lamp",
+    "orange",
+    "grimy",
+    "city",
+    "sidewalk",
+    "late"
+  ],
+  "provenance": {
+    "base": "test_files/test.mp4 -> select='not(mod(n,90))',scale=320:-2,tile=3x2",
+    "reference": "selectivecolor=yellows=-0.3 -0.1 0.45 -0.05:reds=-0.15 0 0.25 0:blues=0.25 0.1 -0.3 0.15:cyans=0.2 0.05 -0.2 0.1,eq=contrast=1.1",
+    "derived_by": [
+      "match.match_reference(probe_image(base), probe_image(reference))",
+      "build_looks.fit_hue_bands (12-unknown lstsq on the post-CDL residual)",
+      "build_looks.fit_tonal_split (per-band closed form on the residual)",
+      "build_looks.recover_effect: not run, no spatial stimulus (effects stay at identity)",
+      "build_looks.factor_exposure (exact slope -> exposure re-parameterisation)"
+    ],
+    "measured_base": {
+      "mean": {
+        "r": 0.57695310230574,
+        "g": 0.5003410834242311,
+        "b": 0.38779882670661653
+      },
+      "std": {
+        "r": 0.1878658174658391,
+        "g": 0.15890027345524607,
+        "b": 0.15869689058815165
+      },
+      "saturation": 0.35656568043580794
+    },
+    "measured_ref": {
+      "mean": {
+        "r": 0.6188760666305242,
+        "g": 0.514552378358821,
+        "b": 0.33424130809732844
+      },
+      "std": {
+        "r": 0.205164642351942,
+        "g": 0.17749272846960829,
+        "b": 0.1541886260987352
+      },
+      "saturation": 0.48661602836513745,
+      "dominant_hue": 37.995832681842195
+    },
+    "fit_error": {
+      "rmse_cv": 3.3513105599155235,
+      "mean_cv": 1.2668903028717176,
+      "std_cv": 0.4964328282845071,
+      "rmse_cv_cdl_only": 4.884648576782818,
+      "rmse_cv_after_hue": 3.7954362934342916
+    }
+  },
+  "spec": {
+    "slope": {
+      "r": 1.031945004954643,
+      "g": 1.0554987499635016,
+      "b": 0.9180909861086969
+    },
+    "offset": {
+      "r": -0.036636035020170876,
+      "g": -0.04188389400755288,
+      "b": 0.008096286321268076
+    },
+    "power": {
+      "r": 1.0,
+      "g": 1.0,
+      "b": 1.0
+    },
+    "saturation": 1.3647304131187754,
+    "temperature": 0.0,
+    "tint": 0.0,
+    "contrast": 0.0,
+    "pivot": 0.435,
+    "exposure": 0.0817134438839054,
+    "look_mix": 1.0,
+    "highlight_rolloff": 0.037561586722358875,
+    "shadow_tint": {
+      "r": 0.012679450844577358,
+      "g": -0.0008196524758200729,
+      "b": -0.02921656231095056
+    },
+    "highlight_tint": {
+      "r": -0.017303470885257344,
+      "g": 0.0024404484314691456,
+      "b": 0.026777135623531564
+    },
+    "shadow_lift": -0.000318909177966996,
+    "highlight_lift": -0.006445367888464403,
+    "hue_red": {
+      "sat": 0.9869698801930591,
+      "lum": -0.03561882731731329
+    },
+    "hue_yellow": {
+      "sat": 0.9712737388473159,
+      "lum": 0.019956418275857566
+    },
+    "hue_green": {
+      "sat": 0.9962282581218042,
+      "lum": 0.017243628842598058
+    },
+    "hue_cyan": {
+      "sat": 0.9999491111398707,
+      "lum": -0.018565964429448814
+    },
+    "hue_blue": {
+      "sat": 0.9983188954539426,
+      "lum": -0.04875375530857803
+    },
+    "hue_magenta": {
+      "sat": 0.9973139005056739,
+      "lum": -0.07558756497310144
+    },
+    "effects": {
+      "denoise": 0.0,
+      "glow": 0.0,
+      "softness": 0.0,
+      "grain": 0.0,
+      "vignette": 0.0,
+      "fringe": 0.0
+    },
+    "rationale": "Matched reference: warmer, brighter, more saturated."
+  }
+}
