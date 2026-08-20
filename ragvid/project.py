@@ -108,7 +108,37 @@ class Project:
 
     @property
     def can_undo(self) -> bool:
-        return len(self.session.specs) > 1
+        # Any grade at all can be undone, including the first -- undoing back to
+        # the ungraded clip is exactly what someone means by "undo that".
+        return len(self.session.specs) > 0
+
+    @property
+    def steps(self) -> list[dict]:
+        """What the user asked for, oldest first. A UI renders this as history.
+
+        Each entry is what *they* typed, not the model's rationale -- that is
+        what someone recognises when scanning back over what they tried.
+        """
+        return [
+            {"index": i,
+             "label": self.session.labels[i] if i < len(self.session.labels) else "",
+             "rationale": spec.rationale,
+             "current": i == len(self.session.specs) - 1}
+            for i, spec in enumerate(self.session.specs)
+        ]
+
+    def revert_to(self, index: int) -> bool:
+        """Drop every step after `index`. -1 goes back to the ungraded clip.
+
+        This is what clicking an entry in the history does; undo is just
+        revert_to(len - 2).
+        """
+        if index < -1 or index >= len(self.session.specs):
+            return False
+        del self.session.specs[index + 1:]
+        del self.session.labels[index + 1:]
+        self.save()
+        return True
 
     @property
     def is_planned(self) -> bool:
@@ -146,7 +176,7 @@ class Project:
         """Ask the LLM for a grade matching `vibe`, calibrated to this clip."""
         from .vibe import plan_vibe
 
-        return self._push(plan_vibe(vibe, self.stats, provider=provider))
+        return self._push(plan_vibe(vibe, self.stats, provider=provider), label=vibe)
 
     def plan_from_reference(self, image: str | Path) -> GradeSpec:
         """Match a reference image. Closed form — no model, no network."""
@@ -156,21 +186,23 @@ class Project:
         image = Path(image).expanduser()
         if not image.exists():
             raise InputError(str(image), "no such file")
-        return self._push(match_reference(self.stats, probe_image(str(image))))
+        return self._push(match_reference(self.stats, probe_image(str(image))),
+                          label=f"photo: {image.name}")
 
     def refine(self, instruction: str, provider=None) -> GradeSpec:
         """Adjust the current grade in words. Uses cached stats, never re-probes."""
         from .refine import refine_spec
 
-        return self._push(refine_spec(self.spec, instruction, self.stats, provider=provider))
+        return self._push(refine_spec(self.spec, instruction, self.stats, provider=provider),
+                          label=instruction)
 
-    def set_spec(self, spec: GradeSpec) -> GradeSpec:
+    def set_spec(self, spec: GradeSpec, label: str = "manual adjustment") -> GradeSpec:
         """Set the grade directly — the path a slider or numeric field uses.
 
         Pushes onto the history like any other edit, so undo works the same for
         a dragged slider as for a refine.
         """
-        return self._push(spec)
+        return self._push(spec, label=label)
 
     def reset(self) -> bool:
         """Discard every grade, back to the ungraded clip. False if there was
@@ -183,6 +215,7 @@ class Project:
         if not self.session.specs:
             return False
         self.session.specs.clear()
+        self.session.labels.clear()
         self.save()
         return True
 
@@ -193,8 +226,8 @@ class Project:
         self.save()
         return True
 
-    def _push(self, spec: GradeSpec) -> GradeSpec:
-        self.session.push(spec)
+    def _push(self, spec: GradeSpec, label: str = "") -> GradeSpec:
+        self.session.push(spec, label)
         self.save()
         return spec
 
@@ -281,6 +314,7 @@ class Project:
             "duration": self.duration,
             "spec": self.spec.model_dump() if self.is_planned else None,
             "history_depth": len(self.session.specs),
+            "steps": self.steps,
             "can_undo": self.can_undo,
             "stats": self.stats.model_dump(),
             "cube": str(self.cube_path),

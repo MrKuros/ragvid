@@ -33,19 +33,32 @@ class Session:
     source: str
     stats: "ClipStats"
     specs: list[GradeSpec] = field(default_factory=list)
+    # What the user actually asked for, one per spec. The spec's own `rationale`
+    # is the model explaining itself; this is the person's own words, which is
+    # what they recognise when scanning back through what they tried.
+    labels: list[str] = field(default_factory=list)
 
     @property
     def spec(self) -> GradeSpec:
         return self.specs[-1]
 
-    def push(self, spec: GradeSpec) -> None:
+    def push(self, spec: GradeSpec, label: str = "") -> None:
         self.specs.append(spec)
+        self.labels.append(label)
 
     def pop(self) -> bool:
-        """Step back one spec. False if there is nothing left to step back to."""
-        if len(self.specs) <= 1:
+        """Step back one step. False only when there is nothing left.
+
+        Popping the *first* grade is allowed and lands on the ungraded clip.
+        The old floor of one spec meant undo did nothing after a first grade --
+        exactly when someone is most likely to want it -- and it only existed
+        because an empty spec list used to be treated as corruption.
+        """
+        if not self.specs:
             return False
         self.specs.pop()
+        if self.labels:
+            self.labels.pop()
         return True
 
     # ---- persistence ------------------------------------------------------
@@ -67,6 +80,7 @@ class Session:
                     "source": self.source,
                     "stats": json.loads(self.stats.model_dump_json()),
                     "specs": [json.loads(s.model_dump_json()) for s in self.specs],
+                    "labels": self.labels,
                 },
                 indent=2,
             )
@@ -90,7 +104,12 @@ class Session:
             # leaves behind. Project.spec raises NoGrade for it, so the old
             # "reject empty" guard would now reject a state the API creates.
             specs = [GradeSpec(**s) for s in raw["specs"]]
-            return cls(source=raw["source"], stats=ClipStats(**raw["stats"]), specs=specs)
+            # labels arrived after the first sessions were written; backfill so
+            # an older session still loads.
+            labels = list(raw.get("labels") or [])
+            labels += [""] * (len(specs) - len(labels))
+            return cls(source=raw["source"], stats=ClipStats(**raw["stats"]),
+                       specs=specs, labels=labels[:len(specs)])
         # ValueError covers JSONDecodeError and pydantic's ValidationError; TypeError
         # covers a session.json whose shape is wrong rather than merely incomplete.
         # Distinguished from "missing" above because the advice differs: a corrupt

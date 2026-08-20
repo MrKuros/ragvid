@@ -237,8 +237,9 @@ def test_reference_plans_a_grade_offline(api):
     body = api.plan()
     assert body["planned"] is True
     assert body["history_depth"] == 1
-    assert body["can_undo"] is False
+    assert body["can_undo"] is True          # one grade is undoable
     assert body["spec"]["rationale"]
+    assert [s["label"] for s in body["steps"]] == ["photo: ref_warm.png"]
 
 
 def test_reference_upload(api):
@@ -279,7 +280,9 @@ def test_undo_steps_back(api):
     api.post("/api/spec", {"spec": first | {"contrast": 0.6}})
     body = api.post("/api/undo").json
     assert body["spec"] == first
-    assert body["history_depth"] == 1 and body["can_undo"] is False
+    # a single remaining grade is still undoable -- the old floor made undo a
+    # dead button exactly when someone most wants it
+    assert body["history_depth"] == 1 and body["can_undo"] is True
 
 
 def test_close_returns_to_the_empty_state(api):
@@ -555,9 +558,20 @@ def test_refine_without_a_grade_is_409_and_never_calls_the_provider(api):
     assert r.status == 409 and r.error["type"] == "NoGrade"
 
 
-def test_undo_at_the_first_grade_is_409(api):
+def test_undo_walks_back_off_the_first_grade_then_409s(api):
     api.open_clip()
     api.plan()
+
+    # undoing the only grade lands on the ungraded clip, it does not refuse
+    body = api.post("/api/undo").json
+    assert body["planned"] is False
+    assert body["history_depth"] == 0 and body["can_undo"] is False
+    assert body["spec"] is None
+
+    # the clip stays open, and an ungraded frame still renders
+    assert body["open"] is True
+
+    # only now is there nothing left to undo
     r = api.post("/api/undo")
     assert r.status == 409 and r.error["type"] == "NothingToUndo"
 

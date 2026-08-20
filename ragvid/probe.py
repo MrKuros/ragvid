@@ -27,6 +27,7 @@ import numpy as np
 from PIL import Image
 from pydantic import BaseModel
 
+from ragvid.platform import ffmpeg, ffprobe
 from ragvid.spec import RGB
 
 # sRGB piecewise transfer function constants (IEC 61966-2-1).
@@ -99,7 +100,7 @@ def _run(cmd: list[str], timeout: float = 60.0) -> bytes:
 
 def _ffprobe(path: str) -> tuple[int, int, float]:
     out = _run([
-        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        ffprobe(), "-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=width,height:format=duration",
         "-of", "json", path,
     ])
@@ -121,7 +122,7 @@ def _grab(path: str, t: float) -> np.ndarray | None:
     # size — scale=256:-2 gives a height we would otherwise have to predict.
     png = _run([
         # -nostdin: without it ffmpeg reads the terminal and eats the user's keystrokes.
-        "ffmpeg", "-v", "error", "-nostdin", "-ss", f"{t:.3f}", "-i", path,
+        ffmpeg(), "-v", "error", "-nostdin", "-ss", f"{t:.3f}", "-i", path,
         "-frames:v", "1", "-vf", f"scale={_ANALYSIS_WIDTH}:-2",
         "-f", "image2pipe", "-c:v", "png", "-",
     ])

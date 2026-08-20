@@ -26,7 +26,10 @@ def bake_cube(spec: GradeSpec, out_path: str, size: int = 33) -> str:
     d = os.path.dirname(out_path)
     if d:
         os.makedirs(d, exist_ok=True)
-    with open(out_path, "w") as f:
+    # newline="\n": a .cube is an interchange file. Text mode on Windows would
+    # emit CRLF -- harmless to ffmpeg and to read_cube, but it makes the same
+    # grade a different file on a different host for no reason at all.
+    with open(out_path, "w", newline="\n") as f:
         f.write(
             f'TITLE "ragvid"\nLUT_3D_SIZE {size}\nDOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\n'
         )

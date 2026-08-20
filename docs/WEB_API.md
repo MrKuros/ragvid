@@ -28,6 +28,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
   "planned": true,
   "can_undo": true,
   "history_depth": 3,
+  "steps": [{"index":0,"label":"warm and nostalgic","rationale":"...","current":false}],
   "version": 7,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,
@@ -53,8 +54,9 @@ All return the same state object as `GET /api/state`.
 | `POST` | `/api/reference` | multipart `file`, or `{"path": "..."}` | Offline, no key, fast. |
 | `POST` | `/api/refine` | `{"instruction": "less blue"}` | Requires `planned`. Slow (network). |
 | `POST` | `/api/spec` | `{"spec": {...}}` | The slider path. Fast, no network. Full spec object. |
-| `POST` | `/api/undo` | — | `409` if already at the first grade. |
+| `POST` | `/api/undo` | — | Steps back one, *including* undoing the first grade back to the ungraded clip. `409` only when there is nothing left. |
 | `POST` | `/api/close` | — | Drops the project; back to the empty state. |
+| `POST` | `/api/revert` | `{"index": 0}` | Jump back to any step. `-1` is the ungraded clip. Undo is `revert` to the previous index. |
 | `POST` | `/api/reset` | — | Discards every grade, keeps the clip open. The "start over" button — distinct from undo (one step) and close (drops the clip). |
 
 ## Browsing — a visual picker

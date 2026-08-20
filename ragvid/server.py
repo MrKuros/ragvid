@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .errors import InputError, RagvidError, SessionNotFound
+from .platform import data_dir, is_windows
 from .project import Project, available_providers
 from .session import Session
 from .spec import GradeSpec
@@ -115,8 +116,9 @@ LOCK = threading.RLock()
 
 
 def _work_dir() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
-    return Path(base) / "ragvid" / "work"
+    # XDG on Linux, ~/Library/Application Support on macOS, %APPDATA% on Windows
+    # -- see ragvid.platform.data_dir.
+    return data_dir() / "work"
 
 
 def _provider_name() -> str:
@@ -141,6 +143,7 @@ def _state_json() -> dict:
         "planned": p.is_planned,
         "can_undo": p.can_undo,
         "history_depth": len(p.history),
+        "steps": p.steps,
         "spec": p.spec.model_dump() if p.is_planned else None,
         "stats": stats.model_dump(),
         **base,
@@ -286,6 +289,22 @@ def r_undo(req, q):
 def r_close(req, q):
     with LOCK:
         S.project = None
+        return _mutated()
+
+
+def r_revert(req, q):
+    """Jump back to any point in the history. -1 is the ungraded clip.
+
+    Clicking an entry in the history list is just a multi-step undo.
+    """
+    body = _json_body(req)
+    try:
+        index = int(body.get("index"))
+    except (TypeError, ValueError) as exc:
+        raise InputError("<index>", "expected an integer index") from exc
+    with LOCK:
+        if not _project().revert_to(index):
+            raise InputError("<index>", f"no step {index} to go back to")
         return _mutated()
 
 
@@ -447,6 +466,7 @@ ROUTES = {
     ("POST", "/api/undo"): r_undo,
     ("POST", "/api/close"): r_close,
     ("POST", "/api/reset"): r_reset,
+    ("POST", "/api/revert"): r_revert,
     ("GET", "/api/browse"): r_browse,
     ("POST", "/api/export"): r_export,
 }
@@ -499,13 +519,32 @@ class Handler(BaseHTTPRequestHandler):
         print(f"  {self.command} {self.path} -> {args[1] if len(args) > 1 else ''}")
 
 
+class _Server(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a platform-correct SO_REUSEADDR."""
+
+    def server_bind(self):
+        # On POSIX, SO_REUSEADDR only waives TIME_WAIT -- exactly what we want,
+        # so a restart does not have to wait out the previous socket. On Windows
+        # it means something else entirely: it lets bind() SUCCEED on a port
+        # another process is actively LISTENING on, and the two then split
+        # incoming connections at random. That silently defeats the port walk
+        # below -- a second `ragvid serve` would report 8765 and steal half the
+        # first one's requests instead of moving to 8766. Windows already
+        # releases TIME_WAIT ports to a new listener, so it needs nothing here.
+        self.allow_reuse_address = not is_windows()
+        super().server_bind()
+
+
 def _bind(port: int) -> tuple[ThreadingHTTPServer, int]:
     """First free port at or after `port` — a second `ragvid serve` should work."""
     for candidate in range(port, port + 21):
         try:
-            return ThreadingHTTPServer((HOST, candidate), Handler), candidate
+            return _Server((HOST, candidate), Handler), candidate
         except OSError as exc:
-            if exc.errno != errno.EADDRINUSE:
+            # Windows raises WSAEADDRINUSE (10048); CPython maps it to
+            # EADDRINUSE on most builds but exposes the raw code as .winerror,
+            # so check both rather than re-raising a busy port as a hard failure.
+            if exc.errno != errno.EADDRINUSE and getattr(exc, "winerror", None) != 10048:
                 raise
     raise OSError(f"no free port in {port}..{port + 20}")
 

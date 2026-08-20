@@ -84,7 +84,11 @@ def _cmd_spec(args) -> int:
 def _cmd_reset(args) -> int:
     project = Project.open()
     if not project.undo():
-        print("already at the first grade — nothing to step back to")
+        print("nothing to step back to — the clip is ungraded")
+        return 0
+    if not project.is_planned:
+        # Stepped back off the first grade; there is no preview to render.
+        print("back to the original — no look applied")
         return 0
     return _report(project)
 

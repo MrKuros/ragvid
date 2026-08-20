@@ -93,6 +93,7 @@ swallowing a bug. Then branch:
 | `RateLimited` | show a countdown, retry | `retry_after` (seconds or None) |
 | `ProviderError` | show the message | `provider` |
 | `FFmpegError` | show the log, offer a bug report | `returncode`, `stderr` |
+| `FFmpegNotFound` | tell the user to install it, or point `RAGVID_FFMPEG` at it | `binary`, `env_var`, `hint` |
 
 Every field is populated at raise time so nothing has to be recovered by parsing
 a message string.
@@ -103,6 +104,12 @@ a message string.
 history), `current.cube`, `preview.png`. One folder per project; delete it to
 reset. `root` is explicit everywhere and defaults to the working directory,
 which is what the CLI wants and what a GUI must override.
+
+`ragvid serve` has no cwd to fall back on, so its default root is the per-user
+data directory: `~/.local/share/ragvid/work` on Linux (XDG), `~/Library/
+Application Support/ragvid/work` on macOS, `%APPDATA%\ragvid\work` on Windows.
+That branch, and every other place the three platforms disagree, lives in
+`ragvid/platform.py` — see it before adding a `sys.platform` check anywhere else.
 
 The cached `ClipStats` is load-bearing: `refine` never re-probes the video, and
 that is the entire reason the refine loop is sub-second rather than seconds.

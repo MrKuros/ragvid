@@ -14,14 +14,12 @@ import subprocess
 import warnings
 
 from .errors import FFmpegError
-
-FFMPEG = "ffmpeg"
-FFPROBE = "ffprobe"
+from .platform import ffmpeg, ffprobe, hw_encoders, is_windows
 
 
 def _run(args: list[str], timeout: float | None = 600) -> str:
     proc = subprocess.run(
-        [FFMPEG, "-hide_banner", "-nostdin", "-y", *args],
+        [ffmpeg(), "-hide_banner", "-nostdin", "-y", *args],
         capture_output=True, text=True, timeout=timeout,
     )
     if proc.returncode != 0:
@@ -40,7 +38,7 @@ def _run_with_progress(args: list[str], duration: float, progress) -> str:
         return _run(args)
 
     proc = subprocess.Popen(
-        [FFMPEG, "-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats", *args],
+        [ffmpeg(), "-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats", *args],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     assert proc.stdout is not None
@@ -76,8 +74,17 @@ def escape_path(path: str) -> str:
     then the filtergraph parser, where ``, ; [ ]`` separate filters. So the
     filtergraph specials get escaped twice over -- once as themselves, once as
     the backslash the first pass added.
+
+    On Windows the separators are flipped to ``/`` first. Win32 accepts forward
+    slashes in every file API, and it keeps a drive-letter path down to one
+    escaped colon (``C\\:/Users/...``, the form ffmpeg's own docs use) instead of
+    a run of eight backslashes per separator that then has to survive
+    subprocess.list2cmdline as well. Gated on the *host*, never on the shape of
+    the string: ``\\`` is an ordinary character in a POSIX filename and
+    rewriting it there would point ffmpeg at a file that does not exist.
     """
-    s = re.sub(r"([\\'])", r"\\\1", str(path))   # level 1: option value
+    raw = str(path).replace("\\", "/") if is_windows() else str(path)
+    s = re.sub(r"([\\'])", r"\\\1", raw)         # level 1: option value
     s = s.replace(":", r"\:")
     return re.sub(r"([\\'\[\],;])", r"\\\1", s)  # level 2: filtergraph
 
@@ -93,7 +100,7 @@ def _lut_filter(cube: str | None) -> str | None:
 def probe_duration(video: str) -> float:
     """Container duration in seconds, 0.0 if ffprobe can't say."""
     proc = subprocess.run(
-        [FFPROBE, "-v", "error", "-show_entries", "format=duration",
+        [ffprobe(), "-v", "error", "-show_entries", "format=duration",
          "-of", "default=nw=1:nk=1", video],
         capture_output=True, text=True,
     )
@@ -105,23 +112,16 @@ def probe_duration(video: str) -> float:
 
 # ---- hardware encoders ----------------------------------------------------
 
-# (encoder, args before -i, filter chain suffix). Ordered by preference.
-_HW_CANDIDATES: list[tuple[str, list[str], str]] = [
-    ("h264_nvenc", [], ""),
-    ("h264_qsv", [], ""),
-    ("h264_vaapi", ["-vaapi_device", "/dev/dri/renderD128"], "format=nv12,hwupload"),
-    ("h264_amf", [], ""),
-]
-
-
 @functools.lru_cache(maxsize=1)
 def detect_hw_encoder() -> str | None:
     """First hardware H.264 encoder that survives a 1-frame trial encode.
 
     `ffmpeg -encoders` lists everything compiled in, which says nothing about
-    the hardware actually being present, so we encode a real frame instead.
+    the hardware actually being present, so we encode a real frame instead. The
+    candidate list is platform-scoped (see platform.hw_encoders) so we never pay
+    for a trial encode that could not possibly work here.
     """
-    for enc, pre, vf in _HW_CANDIDATES:
+    for enc, pre, vf in hw_encoders():
         args = [*pre, "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1"]
         if vf:
             args += ["-vf", vf]
@@ -142,7 +142,7 @@ def _encoder_args(gpu: bool) -> tuple[list[str], str, str]:
     if enc is None:
         warnings.warn("no usable hardware encoder found; falling back to libx264", stacklevel=3)
         return [], "libx264", ""
-    pre, vf = next((p, v) for e, p, v in _HW_CANDIDATES if e == enc)
+    pre, vf = next(((p, v) for e, p, v in hw_encoders() if e == enc), ([], ""))
     return list(pre), enc, vf
 
 

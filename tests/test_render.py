@@ -144,7 +144,7 @@ def test_bad_cube_raises(tmp_path):
 
 def test_detect_hw_encoder_is_cached_and_usable(tmp_path):
     enc = render.detect_hw_encoder()
-    assert enc is None or enc in {e for e, _, _ in render._HW_CANDIDATES}
+    assert enc is None or enc in {e for e, _, _ in render.hw_encoders()}
     assert render.detect_hw_encoder() is enc  # cached: no second trial encode
     assert render.detect_hw_encoder.cache_info().hits >= 1
 

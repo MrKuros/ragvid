@@ -10,6 +10,11 @@
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   * { box-sizing:border-box; }
+  /* MUST come before any display: rule below. The `hidden` attribute is only
+     `display:none` from the UA stylesheet, so any id or class selector setting
+     display beats it -- which silently renders the empty state on top of a
+     loaded clip and shows the export bar before anything is exporting. */
+  [hidden] { display:none !important; }
   body { margin:0; background:var(--bg); color:var(--ink); height:100vh;
          display:flex; flex-direction:column; overflow:hidden; }
   button, input, select { font:inherit; color:inherit; }
@@ -39,14 +44,17 @@
 
   /* ---- work area ---- */
   #work { flex:1; display:flex; flex-direction:column; min-height:0; }
-  .stage { flex:1; min-height:0; display:flex; align-items:center;
-           justify-content:center; padding:16px 18px 8px; position:relative; }
-  .frame { position:relative; max-width:100%; max-height:100%;
+  .stage { flex:1; min-height:0; display:flex; padding:16px 18px 8px; }
+  /* Fill the stage and letterbox inside it. Sizing the frame to the image
+     instead makes max-height circular (the frame sizes to the image, the image
+     to the frame) and collapses to a strip. Both layers use the same
+     object-fit, so the compare overlay lines up exactly. */
+  .frame { position:relative; width:100%; height:100%;
            border-radius:var(--r); overflow:hidden; background:#000;
            border:1px solid var(--line); }
-  .frame img { display:block; max-width:100%; max-height:100%;
-               width:auto; height:auto; }
-  .frame img.under { position:absolute; inset:0; width:100%; height:100%; opacity:0; }
+  .frame img { position:absolute; inset:0; width:100%; height:100%;
+               object-fit:contain; }
+  .frame img.under { opacity:0; }
   .frame.compare img.under { opacity:1; }
   .hint { position:absolute; left:10px; bottom:10px; background:#000a;
           padding:4px 9px; border-radius:5px; font-size:11.5px; color:var(--ink);
@@ -78,6 +86,24 @@
   .said b { color:var(--ink); font-weight:500; }
 
   .row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+
+  /* ---- history ---- */
+  .hist { display:flex; flex-direction:column; gap:2px; max-height:104px;
+          overflow:auto; padding:2px 0; }
+  .hist .step { display:flex; gap:9px; align-items:baseline; width:100%;
+                text-align:left; background:none; border:0; padding:4px 8px;
+                border-radius:5px; font-size:13.5px; color:var(--dim); }
+  .hist .step:hover:not(:disabled) { background:#26262c; color:var(--ink); }
+  .hist .step .n { font-variant-numeric:tabular-nums; opacity:.55; flex:none;
+                   min-width:14px; }
+  .hist .step .lbl { flex:1; overflow:hidden; text-overflow:ellipsis;
+                     white-space:nowrap; }
+  .hist .step.now { color:var(--ink); background:#23272a; }
+  .hist .step.now .lbl { font-weight:500; }
+  .hist .step.now::after { content:"now"; font-size:11px; color:var(--accent);
+                           letter-spacing:.04em; }
+  .histhead { font-size:11.5px; letter-spacing:.07em; text-transform:uppercase;
+              color:var(--dim); padding:0 2px; }
 
   /* ---- manual ---- */
   details.manual { border-top:1px solid var(--line); padding-top:10px; }
@@ -180,6 +206,11 @@
 
     <p class="said" id="said"></p>
 
+    <div id="histWrap" hidden>
+      <div class="histhead">What you asked for</div>
+      <div class="hist" id="hist"></div>
+    </div>
+
     <div class="row">
       <button id="undoBtn" disabled>Undo</button>
       <button id="resetBtn" disabled>Start over</button>
@@ -206,6 +237,7 @@
   <div class="dfoot">
     <input type="text" id="pathInput" placeholder="…or paste a path">
     <button id="pathGo">Open</button>
+    <button id="saveGo" class="primary" hidden>Save here</button>
     <button id="browseClose">Cancel</button>
   </div>
 </dialog>
@@ -220,7 +252,9 @@ const $ = (id) => document.getElementById(id);
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
-let browseMode = "video";           // what the file browser is picking
+let browseMode = "video";           // "video" | "image" | "save"
+let currentDir = "";                // folder the browser is showing
+let suggestedName = "";             // prefilled file name when saving
 
 // ---- plumbing -------------------------------------------------------------
 
@@ -302,9 +336,43 @@ function render(state) {
   $("said").innerHTML = S.planned && S.spec && S.spec.rationale
     ? `<b>Applied:</b> ${escapeHtml(S.spec.rationale)}` : "";
 
+  buildHistory();
   buildSliders();
   syncEnabled();
   loadFrames();
+}
+
+// Past prompts, in the user's own words. Clicking one goes back to it --
+// which is all undo is, repeated.
+function buildHistory() {
+  const steps = S.steps || [];
+  $("histWrap").hidden = steps.length === 0;
+  const box = $("hist");
+  box.innerHTML = "";
+  if (!steps.length) return;
+
+  steps.forEach((s) => {
+    const b = document.createElement("button");
+    b.className = "step" + (s.current ? " now" : "");
+    b.type = "button";
+    b.innerHTML = `<span class="n"></span><span class="lbl"></span>`;
+    b.children[0].textContent = s.index + 1;
+    b.children[1].textContent = s.label || "manual adjustment";
+    b.title = s.rationale || s.label || "";
+    b.disabled = s.current || busy;
+    b.onclick = () => post("/api/revert", { index: s.index });
+    box.append(b);
+  });
+
+  // One more row to get all the way back to the untouched clip.
+  const orig = document.createElement("button");
+  orig.className = "step";
+  orig.type = "button";
+  orig.innerHTML = `<span class="n">0</span><span class="lbl">Original (no look)</span>`;
+  orig.disabled = busy;
+  orig.onclick = () => post("/api/revert", { index: -1 });
+  box.prepend(orig);
+  box.scrollTop = box.scrollHeight;
 }
 
 function syncEnabled() {
@@ -412,13 +480,24 @@ addEventListener("drop", (e) => {
 
 async function openBrowser(mode, path) {
   browseMode = mode;
+  const saving = mode === "save";
+  $("saveGo").hidden = !saving;
+  $("pathGo").hidden = saving;
+  $("pathInput").placeholder = saving ? "File name" : "…or paste a path";
   $("browser").showModal();
   await listDir(path);
+  if (saving) {
+    $("pathInput").value = suggestedName;
+    $("pathInput").focus();
+    // select the stem, leave the extension -- renaming is the common case
+    $("pathInput").setSelectionRange(0, suggestedName.lastIndexOf("."));
+  }
 }
 async function listDir(path) {
   try {
     const d = await call("/api/browse" + (path ? `?path=${encodeURIComponent(path)}` : ""));
-    $("pathInput").value = d.path;
+    currentDir = d.path;
+    if (browseMode !== "save") $("pathInput").value = d.path;
     $("crumbs").innerHTML = "";
     d.trail.slice(-6).forEach((c) => {
       const b = document.createElement("button");
@@ -426,16 +505,29 @@ async function listDir(path) {
       $("crumbs").append(b);
     });
     const list = $("dlist"); list.innerHTML = "";
+    const saving = browseMode === "save";
     const want = browseMode === "image" ? "image" : "video";
-    const files = d.files.filter((f) => f.kind === want);
+    const files = saving ? [] : d.files.filter((f) => f.kind === want);
+
     d.dirs.forEach((x) => list.append(entry("📁", x.name, "", () => listDir(x.path))));
     files.forEach((f) => list.append(entry(
       want === "image" ? "🖼" : "🎬", f.name, kb(f.size), () => choose(f.path))));
-    if (!d.dirs.length && !files.length) {
-      const p = document.createElement("p");
-      p.className = "empty-dir";
-      p.textContent = `No ${want}s in this folder.`;
-      list.append(p);
+
+    if (saving) {
+      // Existing videos shown as context so you can see what is already here,
+      // but not clickable -- you are choosing a folder, not opening a file.
+      d.files.filter((f) => f.kind === "video").forEach((f) => {
+        const e = entry("🎬", f.name, kb(f.size), null);
+        e.disabled = true; e.style.opacity = ".45";
+        list.append(e);
+      });
+      if (!d.dirs.length && !d.files.length) {
+        list.insertAdjacentHTML("beforeend",
+          `<p class="empty-dir">Empty folder — you can still save here.</p>`);
+      }
+    } else if (!d.dirs.length && !files.length) {
+      list.insertAdjacentHTML("beforeend",
+        `<p class="empty-dir">No ${want}s in this folder.</p>`);
     }
   } catch (e) { showError(e); }
 }
@@ -457,7 +549,19 @@ $("pathGo").onclick = () => {
   const v = $("pathInput").value.trim();
   if (v) choose(v);
 };
-$("pathInput").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("pathGo").click(); } });
+$("saveGo").onclick = () => {
+  let name = $("pathInput").value.trim();
+  if (!name) return;
+  if (!/\.[a-z0-9]{2,4}$/i.test(name)) name += ".mp4";   // an editor should not have to remember
+  const sep = currentDir.includes("\\") && !currentDir.includes("/") ? "\\" : "/";
+  $("browser").close();
+  startExport(currentDir.replace(/[/\\]$/, "") + sep + name);
+};
+$("pathInput").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  e.preventDefault();
+  (browseMode === "save" ? $("saveGo") : $("pathGo")).click();
+});
 $("browseClose").onclick = () => $("browser").close();
 
 // ---- manual sliders -------------------------------------------------------
@@ -497,11 +601,15 @@ const fmtNum = (v) => Math.abs(v) >= 100 ? Math.round(v) : (+v).toFixed(2);
 
 // The button and the progress readout are both permanent; only their
 // visibility swaps. Rebuilding the button's DOM would drop its handler.
-$("exportBtn").onclick = async () => {
+// Pick the destination folder in the same browser, then name the file there.
+// Nobody should have to know or type an absolute path to save something.
+$("exportBtn").onclick = () => {
   const dir = (S.source || "").replace(/[/\\][^/\\]*$/, "");
-  const name = (S.name || "clip").replace(/\.[^.]+$/, "") + "-graded.mp4";
-  const out = prompt("Save the graded video as:", dir ? `${dir}/${name}` : name);
-  if (!out) return;
+  suggestedName = (S.name || "clip").replace(/\.[^.]+$/, "") + "-graded.mp4";
+  openBrowser("save", dir || undefined);
+};
+
+async function startExport(out) {
   try {
     const { job } = await call("/api/export", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -509,7 +617,7 @@ $("exportBtn").onclick = async () => {
     });
     watchExport(job, out);
   } catch (e) { showError(e); }
-};
+}
 
 function showExporting(on) {
   $("exportBtn").hidden = on;

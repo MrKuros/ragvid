@@ -213,22 +213,25 @@ def test_history_is_a_copy_not_the_live_list(project):
     assert len(project.history) == 1
 
 
-def test_undo_steps_back_and_stops_at_the_floor(project, tmp_path):
-    assert project.can_undo is False
+def test_undo_steps_back_through_every_grade(project, tmp_path):
+    assert project.can_undo is False        # nothing graded yet
 
     project.set_spec(GradeSpec(contrast=0.4))
-    assert project.can_undo is False  # one grade: nothing to step back to
+    assert project.can_undo is True         # a single grade IS undoable
     project.set_spec(GradeSpec(contrast=0.5))
-    assert project.can_undo is True
 
     assert project.undo() is True
     assert project.spec.contrast == 0.4
     assert Project.open(tmp_path / "proj").spec.contrast == 0.4  # the undo persisted
 
-    # at the floor: refuses, keeps the last grade, does not raise
+    # undoing the first grade lands on the ungraded clip, and persists
+    assert project.undo() is True
+    assert project.is_planned is False
+    assert len(project.history) == 0
+    assert Project.open(tmp_path / "proj").is_planned is False
+
+    # only now is there nothing left; it refuses rather than raising
     assert project.undo() is False
-    assert project.spec.contrast == 0.4
-    assert len(project.history) == 1
 
 
 # ---- interop --------------------------------------------------------------

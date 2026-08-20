@@ -132,11 +132,17 @@ def test_reset_steps_back(calls, capsys):
     assert cli.main(["reset"]) == 0
     assert Session.load().spec.contrast == 0.4
 
-    # at the floor it says so and stays put, without failing
+    # stepping back off the last grade lands on the ungraded clip and says so,
+    # rather than trying to render a preview of nothing
+    capsys.readouterr()
+    assert cli.main(["reset"]) == 0
+    assert "back to the original" in capsys.readouterr().out
+    assert Session.load().specs == []
+
+    # only now is there nothing left
     capsys.readouterr()
     assert cli.main(["reset"]) == 0
     assert "nothing to step back to" in capsys.readouterr().out
-    assert Session.load().spec.contrast == 0.4
 
 
 def test_export(calls, capsys):

@@ -20,11 +20,13 @@ Everything below `Project` is a pure layer with no I/O policy of its own:
     lut       GradeSpec -> .cube
     render    ffmpeg: contact-sheet previews and full exports
     session   persistence
+    platform  the four things Linux, macOS and Windows disagree about
     errors    the typed failures a front end should branch on
 """
 
 from .errors import (
     FFmpegError,
+    FFmpegNotFound,
     InputError,
     NoGrade,
     ProviderError,
@@ -51,6 +53,7 @@ __all__ = [
     "SessionCorrupt",
     "NoGrade",
     "FFmpegError",
+    "FFmpegNotFound",
     "ProviderError",
     "ProviderNotConfigured",
     "RateLimited",

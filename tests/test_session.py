@@ -45,9 +45,12 @@ def test_push_pop_history():
     assert s.spec.contrast == 0.5
     assert s.pop() is True
     assert s.spec.is_identity()
-    # at the floor: one spec left, nothing to step back to
+    # popping the FIRST grade is allowed and lands on the ungraded clip -- the
+    # old floor of one spec made undo a no-op right after a first grade
+    assert s.pop() is True
+    assert s.specs == [] and s.labels == []
+    # only now is there nothing left
     assert s.pop() is False
-    assert len(s.specs) == 1
 
 
 def test_pop_survives_save_load():

@@ -69,6 +69,22 @@ class SessionCorrupt(RagvidError):
 # ---- rendering ------------------------------------------------------------
 
 
+class FFmpegNotFound(RagvidError):
+    """ffmpeg or ffprobe is not installed, or not visible to this process.
+
+    Distinct from FFmpegError: nothing ran, so there is no stderr to show and no
+    bug to report — the user has to install something. Common enough on macOS,
+    where an app launched from Finder never sees Homebrew's /opt/homebrew/bin,
+    that it deserves better than a bare FileNotFoundError.
+    """
+
+    def __init__(self, binary: str, env_var: str, hint: str) -> None:
+        self.binary = binary
+        self.env_var = env_var
+        self.hint = hint
+        super().__init__(f"{binary} not found — {hint}, or set {env_var} to its full path")
+
+
 class FFmpegError(RagvidError):
     """ffmpeg exited non-zero. Carries its stderr for display."""
 

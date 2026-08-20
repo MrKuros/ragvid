@@ -106,5 +106,8 @@ def test_cli_offline_round_trip(tmp_path, monkeypatch, capsys):
     assert _ffprobe_field(str(out), "a:0", "stream=codec_name") == "aac"
     assert _audio_md5(str(out)) == _audio_md5(SAMPLE)
 
-    # reset at the floor is a no-op, not an error
+    # reset steps off the only grade, back to the untouched clip
+    assert cli.main(["reset"]) == 0
+    assert Session.load().specs == []
+    # and again is a no-op, not an error
     assert cli.main(["reset"]) == 0
