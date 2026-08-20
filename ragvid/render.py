@@ -7,6 +7,7 @@ only escaping that matters is ffmpeg's own filtergraph syntax -- see
 
 from __future__ import annotations
 
+from pathlib import Path
 import functools
 import re
 import subprocess
@@ -138,8 +139,33 @@ def render_preview(video: str, cube: str | None, out_png: str, n_frames: int = 3
     return out_png
 
 
+def _render_gif(video: str, cube: str, out_path: str) -> str:
+    """Render to an animated GIF.
+
+    GIF is not just "another container": the encoder takes pal8, so the
+    -pix_fmt yuv420p pin that the H.264 path needs is an invalid argument here
+    and ffmpeg fails in the filter chain. It also has no audio, and a naive
+    encode quantizes to a fixed 256-colour palette, which wrecks exactly the
+    subtle tonal shifts a grading tool exists to produce.
+
+    So: derive an optimal palette from the *graded* frames (stats_mode=diff
+    weights pixels that actually change between frames) and map through it with
+    dithering, in one pass over the input.
+    """
+    lut = _lut_filter(cube)
+    fc = (
+        f"[0:v]{lut},split[g1][g2];"
+        "[g1]palettegen=stats_mode=diff[pal];"
+        "[g2][pal]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
+    )
+    _run(["-i", video, "-filter_complex", fc, "-loop", "0", "-an", out_path])
+    return out_path
+
+
 def render_video(video: str, cube: str, out_path: str, gpu: bool = False) -> str:
     """Full render. Audio is stream-copied, never re-encoded."""
+    if Path(out_path).suffix.lower() == ".gif":
+        return _render_gif(video, cube, out_path)
     pre, enc, vf_suffix = _encoder_args(gpu)
     vf = _lut_filter(cube)
     if vf_suffix:

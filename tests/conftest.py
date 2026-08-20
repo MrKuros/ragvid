@@ -34,6 +34,11 @@ FIXTURES = {
     "ref_bars.png": [
         "-f", "lavfi", "-i", "smptebars=size=320x240", "-frames:v", "1",
     ],
+    # An animated, audio-less, palette-based input. Guards the GIF export path
+    # and the no-audio case, neither of which sample.mp4 exercises.
+    "sample.gif": [
+        "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10:duration=1",
+    ],
 }
 
 

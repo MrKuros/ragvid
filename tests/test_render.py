@@ -158,3 +158,50 @@ def test_gpu_render_works_or_falls_back(tmp_path):
     else:
         render.render_video(SAMPLE, cube, out, gpu=True)
     assert [s for s in ffprobe(out)["streams"] if s["codec_type"] == "audio"]
+
+
+# ---- GIF / no-audio inputs ------------------------------------------------
+# Regression: exporting to .gif failed outright. render_video pinned
+# -pix_fmt yuv420p (needed so lut3d's yuv444p output doesn't produce H.264
+# files that hardware decoders reject), but the GIF encoder takes pal8, so
+# ffmpeg died with "Invalid argument" in the filter chain and left a 0-byte
+# file behind while still exiting 0 from the caller's point of view.
+
+SAMPLE_GIF = str(ROOT / "assets" / "sample.gif")
+
+
+def test_gif_input_renders_to_mp4(tmp_path):
+    """A GIF carries no audio; -map 0:a:0? must tolerate the missing stream."""
+    out = str(tmp_path / "out.mp4")
+    render.render_video(SAMPLE_GIF, identity_cube(tmp_path / "id.cube"), out)
+    assert Path(out).stat().st_size > 0
+    streams = ffprobe(out)["streams"]
+    assert [s["codec_type"] for s in streams] == ["video"]
+    assert streams[0]["pix_fmt"] == "yuv420p"
+
+
+def test_gif_output_is_a_real_animated_gif(tmp_path):
+    out = str(tmp_path / "out.gif")
+    render.render_video(SAMPLE_GIF, identity_cube(tmp_path / "id.cube"), out)
+    assert Path(out).stat().st_size > 0
+    assert ffprobe(out)["streams"][0]["codec_name"] == "gif"
+    with Image.open(out) as im:
+        assert getattr(im, "n_frames", 1) > 1, "collapsed to a single frame"
+
+
+def test_gif_output_still_applies_the_grade(tmp_path):
+    """The 256-colour palette pass must not quantize the grade away."""
+    from ragvid.lut import bake_cube
+    from ragvid.spec import GradeSpec, RGB
+
+    cube = bake_cube(GradeSpec(slope=RGB(r=1.6, g=1.0, b=1.0)), str(tmp_path / "red.cube"))
+    graded, plain = str(tmp_path / "g.gif"), str(tmp_path / "p.gif")
+    render.render_video(SAMPLE_GIF, cube, graded)
+    render.render_video(SAMPLE_GIF, identity_cube(tmp_path / "id.cube"), plain)
+
+    def mean_rgb(p):
+        with Image.open(p) as im:
+            return np.asarray(im.convert("RGB"), float).reshape(-1, 3).mean(axis=0)
+
+    g, pl = mean_rgb(graded), mean_rgb(plain)
+    assert g[0] > pl[0] + 2.0, f"red should survive the palette pass: {pl} -> {g}"
