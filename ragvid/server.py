@@ -34,6 +34,13 @@ DEFAULT_PORT = 8765
 MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # {"path": ...} body is the route for anything big, so 512MB is a cliff not a limit.
 
+# Bumped whenever the JSON contract changes shape. index.html carries the same
+# number; a mismatch means the browser has fresh HTML (re-read per request) but
+# the server is still running the Python it was started with -- which otherwise
+# shows up as fields silently missing and routes 404ing, with nothing on screen
+# to explain it.
+API_VERSION = 2
+
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -127,6 +134,7 @@ def _provider_name() -> str:
 
 def _state_json() -> dict:
     base = {
+        "api_version": API_VERSION,
         "version": S.version,
         "providers": list(available_providers()),
         "provider": _provider_name(),

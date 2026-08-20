@@ -11,6 +11,12 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
   own — it renders whatever `/api/state` returns. No client-side spec math.
 - **Every mutating call returns the new full state**, so the client never has to
   re-fetch or reconcile. One request, one render.
+- **`api_version` stamps the contract itself.** `index.html` carries the same
+  constant and warns when they differ. The HTML is re-read on every request but
+  the Python is imported once at startup, so an old `ragvid serve` will happily
+  serve a new page and then answer with a contract it does not implement —
+  fields silently missing, routes 404ing, and nothing on screen to explain it.
+  Bump it whenever the JSON shape changes.
 - **`version` increments on every mutation.** Append it to media URLs as a cache
   buster; without it the browser will happily show a stale frame after a refine,
   which is the single most confusing bug this UI can have.
@@ -29,6 +35,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
   "can_undo": true,
   "history_depth": 3,
   "steps": [{"index":0,"label":"warm and nostalgic","rationale":"...","current":false}],
+  "api_version": 2,
   "version": 7,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,

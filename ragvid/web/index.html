@@ -249,6 +249,10 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
+// Must match server.py's API_VERSION. The HTML is re-read on every request but
+// the Python is not, so an old `ragvid serve` will happily serve this file and
+// then answer with a contract it does not implement.
+const EXPECTED_API = 2;
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
@@ -320,6 +324,12 @@ const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(
 
 function render(state) {
   S = state;
+  if (state.api_version !== EXPECTED_API) {
+    $("bannerMsg").textContent =
+      "This page is newer than the running server. Stop it (Ctrl-C) and run "
+      + "`ragvid serve` again — until then, history and undo will not work.";
+    $("banner").classList.add("show");
+  }
   $("empty").hidden = S.open;
   $("work").hidden = !S.open;
   $("clipname").textContent = S.open ? S.name : "";
