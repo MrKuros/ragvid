@@ -72,7 +72,7 @@
     "pivot": 0.435,
     "exposure": 0.0,
     "look_mix": 1.0,
-    "highlight_rolloff": 0.0,
+    "highlight_rolloff": 0.011963368886744985,
     "shadow_tint": {
       "r": -0.005860437590899865,
       "g": 0.0033448828406469787,

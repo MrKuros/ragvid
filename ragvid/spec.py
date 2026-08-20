@@ -105,6 +105,10 @@ HUE_FIELDS = ("hue_red", "hue_yellow", "hue_green", "hue_cyan", "hue_blue", "hue
 SHOULDER_SPAN = 5.0
 
 _TOL = 1e-12
+# Everything that decides "is this field still at identity?" uses ONE tolerance,
+# so a value can never be identity-enough to skip a step but not identity-enough
+# to report as identity (or the reverse).
+_ID_TOL = 1e-9
 
 
 class RGB(BaseModel):
@@ -165,8 +169,8 @@ class GradeSpec(BaseModel):
     look_mix: float = Field(1.0, description="0..1 blend of the whole graded result back toward the source. 1.0 = full look.")
     highlight_rolloff: float = Field(0.0, description="Soft highlight shoulder, 0..1. 0 = hard clip. Higher rolls off sooner and pulls whites below 1.")
 
-    shadow_tint: RGB = Field(default_factory=lambda: RGB.of(0.0), description="Colour pushed into shadows only. 0 = none. Luma-stripped, so it never changes brightness.")
-    highlight_tint: RGB = Field(default_factory=lambda: RGB.of(0.0), description="Colour pushed into highlights only. 0 = none. Luma-stripped, so it never changes brightness.")
+    shadow_tint: RGB = Field(default_factory=lambda: RGB.of(0.0), description="Colour pushed into shadows only. 0 = none. Luma-stripped, so it changes colour and not brightness -- exactly, until a channel is driven outside [0,1] and the final clip truncates it.")
+    highlight_tint: RGB = Field(default_factory=lambda: RGB.of(0.0), description="Colour pushed into highlights only. 0 = none. Luma-stripped, so it changes colour and not brightness -- exactly, until a channel is driven outside [0,1] and the final clip truncates it.")
     shadow_lift: float = Field(0.0, description="Brightness offset applied to shadows only. 0 = unchanged.")
     highlight_lift: float = Field(0.0, description="Brightness offset applied to highlights only. 0 = unchanged.")
 
@@ -188,7 +192,7 @@ class GradeSpec(BaseModel):
         """A grade that must round-trip an image unchanged. Used as a test oracle."""
         return cls()
 
-    def is_identity(self, tol: float = 1e-9) -> bool:
+    def is_identity(self, tol: float = _ID_TOL) -> bool:
         i = GradeSpec.identity()
         # Plain field-wise comparison. Note look_mix == 0 also returns the
         # source, but a zero mix *with other fields set* is a state worth
@@ -201,6 +205,7 @@ class GradeSpec(BaseModel):
             and abs(self.temperature) < tol
             and abs(self.tint) < tol
             and abs(self.contrast) < tol
+            and abs(self.pivot - i.pivot) < tol
             and abs(self.exposure) < tol
             and abs(self.look_mix - 1.0) < tol
             and abs(self.highlight_rolloff) < tol
@@ -212,7 +217,24 @@ class GradeSpec(BaseModel):
             and self.effects == i.effects
         )
 
-    def has_hue_qualifiers(self, tol: float = 1e-9) -> bool:
+    def render_effects(self) -> EffectSpec:
+        """`self.effects` scaled by look_mix — what a renderer should actually apply.
+
+        look_mix is documented as "how much of the whole grade survives", and the
+        UI's always-visible Strength slider says "Strength of the whole look".
+        But effects are spatial: they live in the ffmpeg chain, not in apply(),
+        so the lerp inside apply() could never reach them. Measured before this
+        existed: Strength 0% still left a mean 42.9/255 deviation on screen and
+        in the export, with the vignette fully present. Scaling each effect's
+        magnitude is monotone in look_mix and reaches exactly the source at 0,
+        which is the whole contract of the knob.
+        """
+        m = self.look_mix
+        if m >= 1.0:
+            return self.effects
+        return EffectSpec(**{k: v * m for k, v in self.effects.model_dump().items()})
+
+    def has_hue_qualifiers(self, tol: float = _ID_TOL) -> bool:
         """True if any hue band is off identity. lut.py uses this to pick a
         LUT size; apply() uses it to skip the band pass entirely."""
         return any(
@@ -220,7 +242,7 @@ class GradeSpec(BaseModel):
             for b in (getattr(self, f) for f in HUE_FIELDS)
         )
 
-    def _has_tonal_split(self, tol: float = 1e-9) -> bool:
+    def _has_tonal_split(self, tol: float = _ID_TOL) -> bool:
         return (
             np.any(np.abs(self.shadow_tint.as_array()) > tol)
             or np.any(np.abs(self.highlight_tint.as_array()) > tol)
@@ -245,7 +267,11 @@ class GradeSpec(BaseModel):
         src = x
 
         # 1. Exposure, in stops, before the CDL so `offset` stays an absolute lift.
-        if abs(self.exposure) > _TOL:
+        # _ID_TOL, not _TOL: the guard must agree with is_identity(), or there
+        # is a window (1e-12 < |exposure| < 1e-9) where is_identity() says True
+        # while apply() no longer reproduces the identity grid bit-for-bit --
+        # exactly the silent hash-gate corruption class.
+        if abs(self.exposure) > _ID_TOL:
             x = x * (2.0 ** self.exposure)
 
         # 2. CDL. Clamp before the power step: a fractional power of a negative
@@ -577,6 +603,13 @@ def _self_check() -> None:
     x = rng.random((5000, 3))
     only_tint = _apply_tonal_split(x, np.array([0.1, -0.05, 0.2]), 0.0, np.array([-0.1, 0.0, 0.3]), 0.0)
     assert np.abs((only_tint - x) @ LUMA).max() < 1e-15
+    # ... but only while the result stays in gamut. apply()'s final clip
+    # truncates whatever left [0,1], and truncation is not luma-preserving:
+    # measured on the 65^3 grid, 6.1% of grid points clip and their luma error
+    # reaches 0.0198 (5 code values). That is the price of a legal image, not a
+    # bug in the split -- which is why the guarantee is stated on the helper.
+    clipped = np.clip(only_tint, 0.0, 1.0)
+    assert np.abs((clipped - np.clip(x, 0, 1)) @ LUMA).max() > 1e-9
     only_lift = _apply_tonal_split(x, np.zeros(3), 0.07, np.zeros(3), -0.03) - x
     assert np.abs(only_lift - (only_lift @ LUMA)[:, None]).max() < 1e-15
 

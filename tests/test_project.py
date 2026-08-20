@@ -326,3 +326,22 @@ def test_export_does_not_share_its_lut_with_live_rendering(project, tmp_path, mo
         "frame render would overwrite it mid-encode"
     )
     assert not seen["cube"].exists(), "the private LUT should be cleaned up after"
+
+
+def test_bake_escalates_lut_size_for_hue_qualifiers(project, tmp_path):
+    """Project.bake is the ONLY route the app takes to a cube, so a hard-coded
+    size here made the 65^3 escalation dead everywhere but the tests."""
+    from ragvid.spec import HueBand
+
+    p = project
+    p.set_spec(GradeSpec(hue_green=HueBand(sat=0.3)))
+    assert _lut_size(p.bake()) == 65
+    p.set_spec(GradeSpec(saturation=1.3))
+    assert _lut_size(p.bake()) == 33
+
+
+def _lut_size(path) -> int:
+    for line in Path(path).read_text().splitlines():
+        if line.startswith("LUT_3D_SIZE"):
+            return int(line.split()[1])
+    raise AssertionError("no LUT_3D_SIZE")

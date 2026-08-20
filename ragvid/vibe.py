@@ -59,7 +59,9 @@ TONE — brightness and contrast. This is where most looks live.
    brighter highlights), negative = flatter and softer.
 7. pivot [0.25..0.65] — the tone the contrast S-curve rotates around. Default 0.435.
    Usually leave it alone; only move it when the contrast move lands at the wrong
-   brightness. Lower it to let the curve darken the image, raise it to lighten.
+   brightness. RAISE it to let the curve darken the image, LOWER it to lighten
+   (measured: contrast +0.5 on a mid-grey clip gives mean luma 0.557 at pivot 0.25
+   and 0.483 at pivot 0.65). With negative contrast the effect reverses.
 
 COLOUR — global cast and intensity.
 8. temperature [-2500..2500] — blue/orange axis, in Kelvin-like units. NEGATIVE = cooler
@@ -160,10 +162,17 @@ def _stat_notes(st: "ClipStats") -> list[tuple[bool, str]]:
          "The blacks are ALREADY crushed: negative offset would only destroy more of "
          "them. If the look wants depth, get it from contrast; if it wants detail back, "
          "use a small positive offset or shadow_lift."),
-        (st.p99.r < 0.75 and st.p99.g < 0.75 and st.p99.b < 0.75,
+        # `> 0` guards, not decoration: a session written before these fields
+        # existed loads with ClipStats defaults (p99 = 0, frame_variance = 0)
+        # and session.py does not migrate, so an unguarded threshold fires from
+        # a default and feeds the model an instruction about footage nobody
+        # measured. A genuinely all-black clip reading as "unmeasured" is the
+        # correct trade.
+        (0.0 < max(st.p99.r, st.p99.g, st.p99.b) and
+         st.p99.r < 0.75 and st.p99.g < 0.75 and st.p99.b < 0.75,
          "There is no real white in this clip (p99 well under 1) — it is hazy or "
          "under-exposed, so exposure, slope and contrast all have room to work."),
-        (st.frame_variance < 0.02,
+        (0.0 < st.frame_variance < 0.02,
          "Very low luma variance: the image is FLAT and can take more contrast than "
          "usual."),
         (st.frame_variance > 0.09,

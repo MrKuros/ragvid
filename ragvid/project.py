@@ -239,8 +239,15 @@ class Project:
 
     # ---- artifacts --------------------------------------------------------
 
-    def bake(self, path: str | Path | None = None, size: int = 33) -> Path:
-        """Write the current grade as a .cube LUT."""
+    def bake(self, path: str | Path | None = None, size: int | None = None) -> Path:
+        """Write the current grade as a .cube LUT.
+
+        `size=None` means "let bake_cube choose", which is what makes the 65^3
+        escalation for hue qualifiers reachable at all: this method is the ONLY
+        route the app takes to a cube (preview, frame, export, /media/cube), so
+        hard-coding 33 here left every shipping path on the coarse grid while
+        the tests -- which call bake_cube directly -- kept passing.
+        """
         from .lut import bake_cube
 
         out = Path(path) if path else self.cube_path
@@ -263,7 +270,7 @@ class Project:
         # either, or the "before" half of a compare would already be softened,
         # grained and vignetted.
         cube = str(self.bake()) if graded else None  # ungraded needs no spec
-        effects = self.spec.effects if graded else None
+        effects = self.spec.render_effects() if graded else None
         out = Path(path) if path else (
             self.preview_path if graded else self.state_dir / SOURCE_PREVIEW_NAME
         )
@@ -283,7 +290,7 @@ class Project:
         from .render import render_frame
 
         cube = str(self.bake()) if graded else None
-        effects = self.spec.effects if graded else None
+        effects = self.spec.render_effects() if graded else None
         name = "frame.png" if graded else "frame_source.png"
         out = Path(path) if path else self.state_dir / name
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -316,7 +323,7 @@ class Project:
         out.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="ragvid-export-") as tmp:
             cube = self.bake(Path(tmp) / "export.cube")
-            render_video(self.source, str(cube), str(out), self.spec.effects,
+            render_video(self.source, str(cube), str(out), self.spec.render_effects(),
                          gpu=gpu, progress=progress)
         return out
 

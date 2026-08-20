@@ -487,3 +487,34 @@ def test_effects_are_never_part_of_the_colour_transform():
     assert np.array_equal(
         GradeSpec(**LOOK, effects=loud).apply(grid), GradeSpec(**LOOK).apply(grid)
     )
+
+
+def test_look_mix_fades_the_spatial_effects_too():
+    """The UI calls look_mix "Strength of the whole look", but effects live in
+    the ffmpeg chain, outside apply() -- so at Strength 0% grain, glow and
+    vignette used to stay at full force in the preview AND the export."""
+    from ragvid.spec import EffectSpec
+
+    fx = EffectSpec(vignette=1.0, grain=0.6, glow=0.5, softness=-0.4)
+    assert GradeSpec(effects=fx, look_mix=1.0).render_effects() == fx
+    assert GradeSpec(effects=fx, look_mix=0.0).render_effects() == EffectSpec()
+    half = GradeSpec(effects=fx, look_mix=0.5).render_effects()
+    assert half.vignette == 0.5 and half.grain == 0.3 and half.softness == -0.2
+
+
+def test_is_identity_sees_every_field_including_pivot():
+    assert GradeSpec().is_identity()
+    assert not GradeSpec(pivot=0.9).is_identity()
+
+
+def test_identity_tolerance_matches_the_apply_guard():
+    """is_identity() and the exposure guard must agree, or there is a window
+    where a spec reports identity but no longer bakes the identity grid."""
+    import numpy as np
+
+    from ragvid.lut import _grid
+
+    g = _grid(9)
+    for e in (1e-13, 1e-12, 5e-10):
+        s = GradeSpec(exposure=e)
+        assert s.is_identity() and np.array_equal(s.apply(g), g)

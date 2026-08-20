@@ -18,20 +18,45 @@ import functools
 import math
 import re
 import subprocess
+import tempfile
 import warnings
 
 from .errors import FFmpegError
 from .platform import ffmpeg, ffprobe, hw_encoders, is_windows
 
 
-def _run(args: list[str], timeout: float | None = 600) -> str:
-    proc = subprocess.run(
-        [ffmpeg(), "-hide_banner", "-nostdin", "-y", *args],
-        capture_output=True, text=True, timeout=timeout,
-    )
+def _run(args: list[str], timeout: float | None = None) -> str:
+    """Run ffmpeg to completion. `timeout` defaults to None -- NO cap.
+
+    It used to default to 600s, which killed any export longer than ~7 minutes
+    of 1080p source (measured 1.46x realtime plain, 2.45x with the full effect
+    stack) with a bare TimeoutExpired and a half-written file left on disk. A
+    render is as long as the clip is; the short-and-bounded callers (preview,
+    frame, encoder probe) pass their own cap explicitly.
+    """
+    try:
+        proc = subprocess.run(
+            [ffmpeg(), "-hide_banner", "-nostdin", "-y", *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        # Typed like every other ffmpeg failure, and the partial output is
+        # removed -- a truncated file that looks finished is worse than none.
+        _unlink_output(args)
+        raise FFmpegError(-1, args, f"ffmpeg timed out after {timeout}s") from e
     if proc.returncode != 0:
         raise FFmpegError(proc.returncode, args, proc.stderr)
     return proc.stderr
+
+
+def _unlink_output(args: list[str]) -> None:
+    """Best-effort delete of the output path (ffmpeg's last argv element).
+
+    Skips anything starting with "-": that is a flag or ffmpeg's "-" pseudo-sink
+    (`-f null -`), never a file we created.
+    """
+    if args and not args[-1].startswith("-"):
+        Path(args[-1]).unlink(missing_ok=True)
 
 
 def _run_with_progress(args: list[str], duration: float, progress) -> str:
@@ -44,9 +69,16 @@ def _run_with_progress(args: list[str], duration: float, progress) -> str:
     if duration <= 0:
         return _run(args)
 
+    # stderr goes to a temp FILE, not a pipe. We only read stdout while ffmpeg
+    # runs, so a pipe on stderr deadlocks the moment ffmpeg writes more than the
+    # 64 KiB pipe buffer -- and a slightly corrupt source emits ~190 KB of
+    # decode warnings where a clean one emits 1.3 KB. Measured: the export froze
+    # at 28% forever, and because the server serialises exports it blocked every
+    # later export for the life of the process.
+    errf = tempfile.TemporaryFile(mode="w+", errors="replace")
     proc = subprocess.Popen(
         [ffmpeg(), "-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats", *args],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE, stderr=errf, text=True,
     )
     assert proc.stdout is not None
     # ffmpeg's final out_time_us and its progress=end marker both land on 1.0,
@@ -67,9 +99,12 @@ def _run_with_progress(args: list[str], duration: float, progress) -> str:
             report(int(value) / 1e6 / duration)
         elif key == "progress" and value == "end":
             report(1.0)
-    stderr = proc.stderr.read() if proc.stderr else ""
-    if proc.wait() != 0:
-        raise FFmpegError(proc.returncode, args, stderr)
+    rc = proc.wait()
+    with errf:
+        errf.seek(0)
+        stderr = errf.read()
+    if rc != 0:
+        raise FFmpegError(rc, args, stderr)
     return stderr
 
 
@@ -104,7 +139,7 @@ def _lut_filter(cube: str | None) -> str | None:
     return None if cube is None else f"lut3d=file={escape_path(cube)}"
 
 
-def _effect_filters(effects) -> tuple[list[str], list[str]]:
+def _effect_filters(effects, tag: str = "") -> tuple[list[str], list[str]]:
     """An EffectSpec as ffmpeg filter fragments: (before lut3d, after lut3d).
 
     These are the parts of a look a 3D LUT cannot hold, because they read
@@ -136,10 +171,13 @@ def _effect_filters(effects) -> tuple[list[str], list[str]]:
         # Isolate highlights (curve crushes everything under 0.6), blur them,
         # screen the blur back over the untouched image. all_opacity meters it,
         # so glow=0.1 is a sheen and glow=1.0 is a halation bloom.
+        # `tag` keeps these labels unique: render_preview splices one copy of
+        # this fragment per tile into a single filter_complex, and duplicate
+        # output labels are a hard ffmpeg parse error.
         post.append(
-            "split[rvg0][rvg1];"
-            f"[rvg1]curves=all=0/0 0.6/0 1/1,gblur=sigma={2 + 18 * v:.3f}[rvg2];"
-            f"[rvg0][rvg2]blend=all_mode=screen:all_opacity={min(v, 1.0):.3f}"
+            f"split[rvg{tag}0][rvg{tag}1];"
+            f"[rvg{tag}1]curves=all=0/0 0.6/0 1/1,gblur=sigma={2 + 18 * v:.3f}[rvg{tag}2];"
+            f"[rvg{tag}0][rvg{tag}2]blend=all_mode=screen:all_opacity={min(v, 1.0):.3f}"
         )
 
     if (v := effects.softness) > 0:
@@ -169,13 +207,13 @@ def _effect_filters(effects) -> tuple[list[str], list[str]]:
     return pre, post
 
 
-def _vf(effects, lut: str | None, *extra: str) -> str:
+def _vf(effects, lut: str | None, *extra: str, tag: str = "") -> str:
     """Compose one filter chain: effects around `lut`, then `extra` at the end.
 
     Built *around* _lut_filter's bare node rather than inside it, the same way
     the odd-dimension crop and the hw-encoder suffix already are.
     """
-    pre, post = _effect_filters(effects)
+    pre, post = _effect_filters(effects, tag)
     parts = [*pre, *([lut] if lut else []), *post, *(e for e in extra if e)]
     return ",".join(parts)
 
@@ -246,11 +284,20 @@ def render_preview(video: str, cube: str | None, out_png: str, effects=None,
     for i in range(n_frames):
         args += ["-ss", f"{duration * (i + 0.5) / n_frames:.3f}", "-i", video]
 
-    chain = [f"[{i}:v]" for i in range(n_frames)]
-    graph = "".join(chain)
-    graph += f"hstack=inputs={n_frames}" if n_frames > 1 else "null"
-    if vf := _vf(effects, _lut_filter(cube)):
-        graph += "," + vf
+    # Grade EACH tile, then stack. Stacking first and filtering the sheet made
+    # every spatial effect see an N-times-wider image: one vignette smeared
+    # across the whole sheet instead of one per frame (measured corner/centre
+    # 0.396 in the preview vs 0.196 in the export), and glow/softness/fringe
+    # bleeding over the tile seams. A preview that does not match the export is
+    # the one thing this function must not be.
+    lut = _lut_filter(cube)
+    graph = ";".join(
+        f"[{i}:v]{_vf(effects, lut, tag=str(i)) or 'null'}[rvp{i}]" for i in range(n_frames)
+    )
+    if n_frames > 1:
+        graph += ";" + "".join(f"[rvp{i}]" for i in range(n_frames)) + f"hstack=inputs={n_frames}"
+    else:
+        graph += ";[rvp0]null"
 
     _run([*args, "-filter_complex", graph, "-frames:v", "1", "-update", "1", out_png], timeout=120)
     return out_png

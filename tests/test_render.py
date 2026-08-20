@@ -348,3 +348,81 @@ def test_every_effect_fragment_parses_inside_a_real_graph(name, value):
     chain = chain.replace(bare, "null")  # no cube on disk here
     render._run(["-f", "lavfi", "-i", "testsrc2=s=64x64:d=0.2", "-vf", chain,
                  "-frames:v", "2", "-f", "null", "-"], timeout=60)
+
+
+# ---- preview must equal the export, per tile ------------------------------
+
+@pytest.mark.parametrize("effects", [
+    EffectSpec(vignette=0.8),
+    EffectSpec(glow=0.8),
+    EffectSpec(softness=0.6),
+    EffectSpec(fringe=0.6),
+])
+def test_preview_tile_matches_the_single_frame_render(tmp_path, effects):
+    """Every spatial effect must see ONE frame, not the hstacked sheet.
+
+    Filtering after the stack put a single vignette across the whole sheet and
+    bled glow/softness/fringe over the tile seams, so the contact sheet showed a
+    look the export could not produce. Measured max |tile - frame| was 96-255
+    code values; it must be 0.
+    """
+    n = 3
+    duration = render.probe_duration(SAMPLE)
+    sheet_png = tmp_path / "sheet.png"
+    render.render_preview(SAMPLE, None, str(sheet_png), effects, n_frames=n)
+    sheet = np.asarray(Image.open(sheet_png).convert("RGB")).astype(int)
+    w = sheet.shape[1] // n
+    for i in range(n):
+        frame_png = tmp_path / f"f{i}.png"
+        render.render_frame(SAMPLE, None, str(frame_png), effects,
+                            at=duration * (i + 0.5) / n)
+        frame = np.asarray(Image.open(frame_png).convert("RGB")).astype(int)
+        assert np.abs(sheet[:, i * w:(i + 1) * w] - frame).max() == 0
+
+
+def test_progress_survives_a_source_that_floods_stderr(tmp_path):
+    """ffmpeg's stderr must never be a pipe we do not drain concurrently.
+
+    A slightly corrupt source emits ~190 KB of decode warnings against a 64 KiB
+    pipe buffer, which deadlocked the export forever -- and since the server
+    serialises exports, blocked every later export for the life of the process.
+    """
+    src = ROOT / "test_files" / "test.mp4"
+    if not src.exists():
+        pytest.skip("no test_files/test.mp4")
+    data = bytearray(src.read_bytes())
+    rnd = np.random.default_rng(0)
+    for i in rnd.integers(len(data) // 10, len(data), 3000):
+        data[int(i)] = int(rnd.integers(256))
+    bad = tmp_path / "corrupt.mp4"
+    bad.write_bytes(bytes(data))
+
+    seen = []
+    out = render.render_video(str(bad), identity_cube(tmp_path / "i.cube"),
+                              str(tmp_path / "out.mp4"), progress=seen.append)
+    assert seen and seen[-1] == 1.0
+    assert Path(out).stat().st_size > 0
+
+
+def test_timeout_is_typed_and_leaves_no_partial_file(tmp_path):
+    """An expired cap must raise FFmpegError, not a bare TimeoutExpired, and
+    must not leave a truncated file that looks like a finished render."""
+    from ragvid.errors import FFmpegError
+
+    src = ROOT / "test_files" / "test.mp4"
+    if not src.exists():
+        pytest.skip("no test_files/test.mp4")
+    out = tmp_path / "o.mp4"
+    args = ["-i", str(src), "-map", "0:v:0", "-c:v", "libx264",
+            "-pix_fmt", "yuv420p", str(out)]
+    with pytest.raises(FFmpegError):
+        render._run(args, timeout=0.5)
+    assert not out.exists()
+
+
+def test_run_has_no_default_timeout():
+    """A render is as long as the clip is. The old 600s default killed any
+    export past ~7 minutes of 1080p source."""
+    import inspect
+
+    assert inspect.signature(render._run).parameters["timeout"].default is None

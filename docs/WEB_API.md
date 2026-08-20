@@ -35,7 +35,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
   "can_undo": true,
   "history_depth": 3,
   "steps": [{"index":0,"label":"warm and nostalgic","rationale":"...","current":false}],
-  "api_version": 2,
+  "api_version": 3,
   "version": 7,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,

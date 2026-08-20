@@ -293,8 +293,12 @@ async function post(path, payload) {
     if (payload instanceof FormData) opts.body = payload;
     else if (payload) { opts.headers = { "Content-Type": "application/json" };
                         opts.body = JSON.stringify(payload); }
-    render(await call(path, opts));
+    // hideBanner BEFORE render, never after: render() is what raises the
+    // api_version warning, and clearing it afterwards deleted the one message
+    // telling the user to restart the server -- on their very next click.
+    const state = await call(path, opts);
     hideBanner();
+    render(state);
   } catch (e) { showError(e); }
   finally { setBusy(false); }
 }
@@ -390,7 +394,6 @@ function buildHistory() {
     b.children[0].textContent = s.index + 1;
     b.children[1].textContent = s.label || "manual adjustment";
     b.title = s.rationale || s.label || "";
-    b.disabled = s.current || busy;
     b.onclick = () => post("/api/revert", { index: s.index });
     box.append(b);
   });
@@ -400,7 +403,6 @@ function buildHistory() {
   orig.className = "step";
   orig.type = "button";
   orig.innerHTML = `<span class="n">0</span><span class="lbl">Original (no look)</span>`;
-  orig.disabled = busy;
   orig.onclick = () => post("/api/revert", { index: -1 });
   box.prepend(orig);
   box.scrollTop = box.scrollHeight;
@@ -415,6 +417,10 @@ function syncEnabled() {
   $("photoBtn").disabled = !on;
   $("scrub").disabled = !S.open;
   $("strength").disabled = !on || !S.planned;
+  // History rows get their enabled state HERE, not at build time: post() calls
+  // render() (which rebuilds them) while `busy` is still true, so a build-time
+  // `disabled = busy` left every row dead until a page reload.
+  for (const b of $("hist").children) b.disabled = busy || b.classList.contains("now");
   $("hint").textContent = S.planned ? "hold to see original" : "no look applied yet";
 }
 
@@ -608,14 +614,17 @@ $("browseClose").onclick = () => $("browser").close();
 // silently no-op; setAt() walks the path instead.
 const GROUPS = [
   [null, [
-    ["exposure",          "Brightness",  -2, 2, 0.05],
+    ["exposure",          "Brightness",  -4, 4, 0.05],
     ["effects.grain",     "Grain",        0, 1, 0.01],
     ["effects.softness",  "Softness",    -1, 1, 0.01],
   ]],
   ["Colour", [
-    ["saturation",        "Colour",       0, 2, 0.01],
-    ["temperature",       "Warmth",   -3000, 3000, 50],
-    ["tint",              "Tint",        -1, 1, 0.01],
+    ["saturation",        "Colour",       0, 4, 0.01],
+    // step "any": Warmth is the one knob whose values are not multiples of a tidy
+    // step (the matcher solves them), and a coarse step snapped the thumb away
+    // from the number in the label right next to it.
+    ["temperature",       "Warmth",   -6000, 6000, "any"],
+    ["tint",              "Tint",        -2, 2, 0.01],
     ["contrast",          "Contrast",    -1, 1, 0.01],
     ["highlight_rolloff", "Protect highlights", 0, 1, 0.01],
   ]],
@@ -628,12 +637,12 @@ const GROUPS = [
   // sat only. `lum` per band exists in the spec and the LLM can set it -- the
   // clone preserves it -- but twelve hue knobs is a cockpit.
   ["Individual colours", [
-    ["hue_red.sat",       "Reds",         0, 2, 0.01],
-    ["hue_yellow.sat",    "Yellows",      0, 2, 0.01],
-    ["hue_green.sat",     "Greens",       0, 2, 0.01],
-    ["hue_cyan.sat",      "Cyans",        0, 2, 0.01],
-    ["hue_blue.sat",      "Blues",        0, 2, 0.01],
-    ["hue_magenta.sat",   "Magentas",     0, 2, 0.01],
+    ["hue_red.sat",       "Reds",         0, 4, 0.01],
+    ["hue_yellow.sat",    "Yellows",      0, 4, 0.01],
+    ["hue_green.sat",     "Greens",       0, 4, 0.01],
+    ["hue_cyan.sat",      "Cyans",        0, 4, 0.01],
+    ["hue_blue.sat",      "Blues",        0, 4, 0.01],
+    ["hue_magenta.sat",   "Magentas",     0, 4, 0.01],
   ]],
   ["Film & lens", [
     ["effects.glow",      "Glow",         0, 1, 0.01],
@@ -652,8 +661,12 @@ function setAt(o, path, v) {
 // One commit path for every control, flat or nested. structuredClone keeps the
 // nested objects from being shared with S.spec.
 function commit(pairs) {
+  // Write into S.spec as well as the outgoing copy. S.spec only refreshes when
+  // the previous POST returns, so two controls committed inside that window
+  // both cloned the same stale spec and the later one silently reverted the
+  // earlier one's field.
+  pairs.forEach(([path, v]) => setAt(S.spec, path, v));
   const spec = structuredClone(S.spec);
-  pairs.forEach(([path, v]) => setAt(spec, path, v));
   slidersFor = null;
   post("/api/spec", { spec });
 }
@@ -661,7 +674,10 @@ function commit(pairs) {
 // A tint is a signed offset per channel; a colour picker is unsigned. Mid-grey
 // is the neutral: spec.py strips a tint's own luma, so r == g == b changes
 // nothing at all, which is exactly what a user expects "no colour" to mean.
-const TINT_RANGE = 0.6;
+// 1.0, i.e. +/-0.5 per channel -- the full range sanitize() accepts. A narrower
+// range made the swatch lossy: re-picking the identical-looking colour shrank a
+// corpus tint from 0.5 to 0.3 and moved the frame by 1.7/255.
+const TINT_RANGE = 1.0;
 const hex2 = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
 const tintToHex = (t) => "#" + ["r", "g", "b"].map((c) => hex2((t[c] / TINT_RANGE + 0.5) * 255)).join("");
 function hexToTint(hex) {
