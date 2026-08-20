@@ -326,26 +326,3 @@ def render_video(video: str, cube: str, out_path: str, effects=None,
     else:
         _run(full)
     return out_path
-
-
-if __name__ == "__main__":  # pragma: no cover
-    # ponytail: self-check instead of a test file -- tests/ belongs to another
-    # agent this build. Run with `python -m ragvid.render`.
-    from .spec import EffectSpec
-
-    bare = _lut_filter("/tmp/x.cube")
-    assert _vf(None, bare) == bare, "no effects must leave the lut3d node alone"
-    assert _vf(EffectSpec(), bare) == bare, "a default EffectSpec must be a no-op"
-
-    # Every fragment must be grammatical *spliced into a real graph*, which is
-    # the part string equality cannot tell you -- glow's split/blend is three
-    # chains pretending to be one filter.
-    for name in EffectSpec.model_fields:
-        for value in (0.6, -0.6):
-            chain = _vf(EffectSpec(**{name: value}), bare,
-                        "crop=trunc(iw/2)*2:trunc(ih/2)*2")
-            chain = chain.replace(bare, "null")  # no cube on disk here
-            _run(["-f", "lavfi", "-i", "testsrc2=s=64x64:d=0.2", "-vf", chain,
-                  "-frames:v", "2", "-f", "null", "-"], timeout=60)
-            print(f"ok  {name}={value:+.1f}  {chain}")
-    print("all effect fragments parse")

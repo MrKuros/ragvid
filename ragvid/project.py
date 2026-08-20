@@ -201,8 +201,14 @@ class Project:
 
         Pushes onto the history like any other edit, so undo works the same for
         a dragged slider as for a refine.
+
+        sanitize() here and not in server.py: this is the funnel every "a spec
+        arrived from outside" path goes through (HTTP body, a future desktop UI,
+        a hand-edited session), and effects.* in particular is unbounded on the
+        way in -- glow=50 is a legal float and a gblur sigma that hangs ffmpeg.
+        Sanitizing at the caller would leave every sibling caller unguarded.
         """
-        return self._push(spec, label=label)
+        return self._push(spec.sanitize(), label=label)
 
     def reset(self) -> bool:
         """Discard every grade, back to the ungraded clip. False if there was

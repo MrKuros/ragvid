@@ -196,8 +196,16 @@ def plan_vibe(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
             format_stats(stats),
             f'The look the user asked for: "{vibe}"',
             examples,
-            "Grade this specific footage toward that look, starting from identity and moving "
-            "only what the look requires. Return the full spec.",
+            # The starting point has to agree with whether retrieval fired. Telling
+            # the model to start from identity right after handing it a measured
+            # neighbouring grade is a direct contradiction, and a 20B model
+            # resolves contradictions by ignoring one of them at random.
+            ("Grade this specific footage toward that look, starting from the closest "
+             "reference look above and moving only what this request and this footage "
+             "require. Return the full spec."
+             if examples else
+             "Grade this specific footage toward that look, starting from identity and "
+             "moving only what the look requires. Return the full spec."),
         ) if part
     )
     return provider.plan(SYSTEM, user).sanitize()

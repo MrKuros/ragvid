@@ -7,6 +7,7 @@ import pytest
 from PIL import Image
 
 from ragvid import render
+from ragvid.spec import EffectSpec
 
 ROOT = Path(__file__).resolve().parent.parent
 SAMPLE = str(ROOT / "assets" / "sample.mp4")
@@ -319,3 +320,31 @@ def test_baked_grade_matches_spec_apply_through_ffmpeg(tmp_path):
     err = np.abs(got - want).max()
     assert err < 6.0, f"max {err:.2f} code values off the exact grade"
     assert np.abs(got - want).mean() < 1.0
+
+
+# ---- effects filtergraph ---------------------------------------------------
+# Was a `python -m ragvid.render` self-check while tests/ belonged to another
+# agent this build; moved here on integration so it runs in CI. ~0.9s total.
+
+
+def test_no_effects_leaves_the_lut3d_node_alone():
+    """The bare-lut3d string is asserted elsewhere (test_platform); this asserts
+    the effects wrapper cannot perturb it, which is what keeps every existing
+    render path byte-identical for a grade that uses no effects."""
+    bare = render._lut_filter("/tmp/x.cube")
+    assert render._vf(None, bare) == bare
+    assert render._vf(EffectSpec(), bare) == bare
+
+
+@pytest.mark.parametrize("name", list(EffectSpec.model_fields))
+@pytest.mark.parametrize("value", (0.6, -0.6))
+def test_every_effect_fragment_parses_inside_a_real_graph(name, value):
+    """String equality cannot tell you a fragment is grammatical once spliced:
+    glow's split/blend is three chains pretending to be one filter, and a
+    malformed one only surfaces when ffmpeg refuses the whole -vf."""
+    bare = render._lut_filter("/tmp/x.cube")
+    chain = render._vf(EffectSpec(**{name: value}), bare,
+                       "crop=trunc(iw/2)*2:trunc(ih/2)*2")
+    chain = chain.replace(bare, "null")  # no cube on disk here
+    render._run(["-f", "lavfi", "-i", "testsrc2=s=64x64:d=0.2", "-vf", chain,
+                 "-frames:v", "2", "-f", "null", "-"], timeout=60)

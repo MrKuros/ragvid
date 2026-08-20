@@ -14,7 +14,7 @@ the existing closed-form matcher, run over a reference still by
 scripts/build_looks.py. Hand-authored numbers would reproduce exactly the
 hallucination the corpus exists to prevent. Each entry carries the ffmpeg chain
 that produced its reference still, so every claim is re-derivable from pixels.
-`looks/*.json` is a build artifact; scripts/build_looks.py is the source.
+`ragvid/look_corpus/*.json` is a build artifact; scripts/build_looks.py is the source.
 
 RETRIEVAL IS DELIBERATELY DUMB: token overlap over the name and mood words. No
 embedding model, no vector DB, no new dependency. This is a few dozen JSON
@@ -36,7 +36,10 @@ import json
 import re
 from pathlib import Path
 
-CORPUS_DIR = Path(__file__).resolve().parent.parent / "looks"
+# Inside the package, not at the repo root: hatch ships `packages = ["ragvid"]`,
+# so a top-level looks/ would be absent from an installed wheel and load_corpus()
+# would silently return () -- un-grounded prompts, no error, nobody notices.
+CORPUS_DIR = Path(__file__).resolve().parent / "look_corpus"
 
 # Number of examples handed to the model. 2, not 5: each entry is a full 43-field
 # spec (~350 tokens), and Groq's free tier is 8000 tokens/min.
@@ -53,7 +56,7 @@ _WORD = re.compile(r"[a-z0-9]+")
 
 @functools.lru_cache(maxsize=1)
 def load_corpus() -> tuple[dict, ...]:
-    """Every entry in looks/, sorted by name. Cached; empty if the dir is absent."""
+    """Every entry in the corpus dir, sorted by name. Cached; empty if the dir is absent."""
     if not CORPUS_DIR.is_dir():
         return ()
     entries = [json.loads(p.read_text()) for p in sorted(CORPUS_DIR.glob("*.json"))]

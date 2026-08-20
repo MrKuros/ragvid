@@ -140,6 +140,12 @@ clip in place rather than uploading a copy of it.
 One frame at `t`, graded or not. ~190ms regardless of clip length, so it is safe
 to call on every scrubber drag. `graded=0` works even before anything is planned.
 
+Frames and previews carry the six `effects` as well as the colour — `project.py`
+passes `spec.effects` into `render_frame`, `render_preview` and `render_video`
+alike, so grain and vignette are in the check-before-you-render frame and not
+just in the export. `graded=0` deliberately passes no effects at all: the
+"before" half of a compare is the untouched source.
+
 This exists so a full export is never how someone finds out a grade is wrong.
 
 `GET /media/cube?v=<version>` → the `.cube` LUT, `text/plain`, for download.

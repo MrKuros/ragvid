@@ -19,8 +19,8 @@ def _grid(size: int) -> np.ndarray:
     return np.stack([i % size, (i // size) % size, i // size**2], axis=-1) / (size - 1)
 
 
-def bake_cube(spec: GradeSpec, out_path: str, size: int = 33) -> str:
-    if size < 2:
+def bake_cube(spec: GradeSpec, out_path: str, size: int | None = None) -> str:
+    if size is not None and size < 2:
         raise ValueError(f"LUT size must be >= 2, got {size}")
     # Hue qualifiers have gradient KINKS on the planes r=g, g=b, r=b, so their
     # output is C0-but-not-C1 in RGB and trilinear/tetrahedral reconstruction is
@@ -28,11 +28,11 @@ def bake_cube(spec: GradeSpec, out_path: str, size: int = 33) -> str:
     # error against exact apply(), in 8-bit code values: mild qualifiers 2.60 at
     # 33^3 vs 1.15 at 65^3; extreme 4.90 vs 2.28. Widening the bands does not
     # help; it is intrinsic to hue selection. So escalate only when a band is
-    # actually in use -- raising the default would 8x every .cube (0.7 -> 5.6 MB)
-    # for grades that never touch a qualifier. `size == 33` means "the default";
-    # an explicitly requested size is always honoured.
-    if size == 33 and spec.has_hue_qualifiers():
-        size = 65
+    # actually in use -- raising the default would 8x every .cube (measured 0.97 -> 7.41 MB)
+    # for grades that never touch a qualifier. size=None means "the default";
+    # an explicitly requested size is always honoured, including 33.
+    if size is None:
+        size = 65 if spec.has_hue_qualifiers() else 33
     table = spec.apply(_grid(size))
     d = os.path.dirname(out_path)
     if d:

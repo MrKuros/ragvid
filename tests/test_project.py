@@ -311,7 +311,7 @@ def test_export_does_not_share_its_lut_with_live_rendering(project, tmp_path, mo
     project.set_spec(GradeSpec(saturation=2.5))
     seen = {}
 
-    def fake_render(video, cube, out, gpu=False, progress=None):
+    def fake_render(video, cube, out, effects=None, gpu=False, progress=None):
         seen["cube"] = Path(cube)
         seen["exists_during"] = Path(cube).is_file()
         Path(out).write_bytes(b"x")

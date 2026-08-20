@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild the looks corpus in looks/ — reproducible, no LLM, no hand-typed numbers.
+"""Rebuild the looks corpus in ragvid/look_corpus/ — reproducible, no LLM, no hand-typed numbers.
 
 Every number in every corpus entry is MEASURED, never authored. The pipeline is:
 
@@ -22,7 +22,7 @@ equivalent of choosing which frame to reference — and it is recorded verbatim 
 each entry's `provenance` so any claim in the corpus can be re-derived from
 pixels. The GradeSpec itself is never touched by hand.
 
-Stills land in out/ (gitignored, regenerable); only looks/*.json is committed.
+Stills land in out/ (gitignored, regenerable); only ragvid/look_corpus/*.json is committed.
 
 Usage:  uv run python scripts/build_looks.py
 """
@@ -46,7 +46,7 @@ from ragvid.spec import LUMA, SPLIT_CROSSOVER, GradeSpec, RGB, _smoothstep  # no
 
 SRC = REPO / "test_files" / "test.mp4"
 WORK = REPO / "out" / "looks_src"
-CORPUS = REPO / "looks"
+CORPUS = REPO / "ragvid" / "look_corpus"
 
 # 6 frames of the source, tiled into one still: a single probe_image call then
 # sees six moments of the clip instead of one possibly-atypical frame.

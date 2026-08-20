@@ -39,7 +39,7 @@ MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # the server is still running the Python it was started with -- which otherwise
 # shows up as fields silently missing and routes 404ing, with nothing on screen
 # to explain it.
-API_VERSION = 2
+API_VERSION = 3
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}

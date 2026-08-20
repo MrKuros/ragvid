@@ -15,3 +15,6 @@ assets/*.png
 test_files/output/
 test_files/*.gif
 test_files/*.png
+
+# agent worktrees
+.claude/
