@@ -253,12 +253,16 @@ class Project:
         """
         from .render import render_preview
 
+        # graded=False means the untouched source: no LUT and no effects
+        # either, or the "before" half of a compare would already be softened,
+        # grained and vignetted.
         cube = str(self.bake()) if graded else None  # ungraded needs no spec
+        effects = self.spec.effects if graded else None
         out = Path(path) if path else (
             self.preview_path if graded else self.state_dir / SOURCE_PREVIEW_NAME
         )
         out.parent.mkdir(parents=True, exist_ok=True)
-        render_preview(self.source, cube, str(out), n_frames=n_frames)
+        render_preview(self.source, cube, str(out), effects, n_frames=n_frames)
         return out
 
     def frame(self, at: float = 0.0, graded: bool = True,
@@ -273,10 +277,11 @@ class Project:
         from .render import render_frame
 
         cube = str(self.bake()) if graded else None
+        effects = self.spec.effects if graded else None
         name = "frame.png" if graded else "frame_source.png"
         out = Path(path) if path else self.state_dir / name
         out.parent.mkdir(parents=True, exist_ok=True)
-        render_frame(self.source, cube, str(out), at=at)
+        render_frame(self.source, cube, str(out), effects, at=at)
         return out
 
     def export(self, out_path: str | Path, gpu: bool = False,
@@ -291,6 +296,10 @@ class Project:
         what was asked for. Measured, not theorised: exporting at saturation 2.5
         and then nudging the slider to 0 produced a greyscale file.
 
+        `spec.effects` rides along as an ffmpeg filter chain -- it is spatial, so
+        it is not in the cube and would otherwise be silently dropped from the
+        one render that matters.
+
         Note this makes the *file* safe, not the spec: `self.spec` is read when
         the render starts, so a caller that wants the grade frozen at the moment
         the user pressed Export must snapshot the project itself.
@@ -301,7 +310,8 @@ class Project:
         out.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="ragvid-export-") as tmp:
             cube = self.bake(Path(tmp) / "export.cube")
-            render_video(self.source, str(cube), str(out), gpu=gpu, progress=progress)
+            render_video(self.source, str(cube), str(out), self.spec.effects,
+                         gpu=gpu, progress=progress)
         return out
 
     # ---- interop ----------------------------------------------------------
