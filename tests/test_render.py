@@ -205,3 +205,37 @@ def test_gif_output_still_applies_the_grade(tmp_path):
 
     g, pl = mean_rgb(graded), mean_rgb(plain)
     assert g[0] > pl[0] + 2.0, f"red should survive the palette pass: {pl} -> {g}"
+
+
+# ---- odd dimensions -------------------------------------------------------
+# Regression: libx264 at yuv420p refuses odd width/height outright ("height not
+# divisible by 2"), so exporting a 720x405 source to .mp4 failed at the very
+# last step, after the user had already waited through the encode. Plenty of
+# real sources are odd -- GIFs, hand-cropped clips.
+
+
+def test_odd_dimension_source_exports(tmp_path):
+    """An odd-sized input must still produce a playable H.264 file."""
+    odd = str(tmp_path / "odd.mp4")
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "testsrc2=size=641x405:rate=10:duration=1",
+         "-c:v", "libx264rgb", "-pix_fmt", "rgb24", odd],
+        check=True,
+    )
+    out = str(tmp_path / "out.mp4")
+    render.render_video(odd, identity_cube(tmp_path / "id.cube"), out)
+
+    stream = ffprobe(out)["streams"][0]
+    assert stream["codec_name"] == "h264"
+    assert stream["pix_fmt"] == "yuv420p"
+    # cropped down to the nearest even size, never up and never resampled
+    assert (stream["width"], stream["height"]) == (640, 404)
+
+
+def test_even_dimension_source_is_not_cropped(tmp_path):
+    """The crop must be a no-op when it isn't needed."""
+    out = str(tmp_path / "out.mp4")
+    render.render_video(SAMPLE, identity_cube(tmp_path / "id.cube"), out)
+    stream = ffprobe(out)["streams"][0]
+    assert (stream["width"], stream["height"]) == (W, H)

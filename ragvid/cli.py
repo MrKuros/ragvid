@@ -36,6 +36,11 @@ def _parser() -> argparse.ArgumentParser:
     e = sub.add_parser("export", help="render the full video")
     e.add_argument("out")
     e.add_argument("--gpu", action="store_true", help="use a hardware encoder if one is available")
+
+    s = sub.add_parser("serve", help="open the local web UI")
+    s.add_argument("--port", type=int, default=8765, help="default 8765; the next free port if taken")
+    s.add_argument("--root", help="where project state lives (default: the ragvid work dir)")
+    s.add_argument("--no-browser", action="store_true", help="do not open a browser")
     return p
 
 
@@ -82,6 +87,13 @@ def _cmd_reset(args) -> int:
         print("already at the first grade — nothing to step back to")
         return 0
     return _report(project)
+
+
+def _cmd_serve(args) -> int:
+    from .server import serve
+
+    serve(port=args.port, root=args.root, open_browser=not args.no_browser)
+    return 0
 
 
 def _cmd_export(args) -> int:

@@ -18,6 +18,7 @@ everything else is fast enough to call synchronously.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -29,6 +30,7 @@ from .spec import GradeSpec
 # one folder per project and delete it to clean up.
 CUBE_NAME = "current.cube"
 PREVIEW_NAME = "preview.png"
+SOURCE_PREVIEW_NAME = "source.png"
 
 ProgressFn = Callable[[float], None]
 
@@ -126,6 +128,18 @@ class Project:
     def preview_path(self) -> Path:
         return self.state_dir / PREVIEW_NAME
 
+    @property
+    def duration(self) -> float:
+        """Seconds. The range a scrubber spans."""
+        from .render import probe_duration
+
+        return probe_duration(self.source)
+
+    @property
+    def source_preview_path(self) -> Path:
+        """Ungraded counterpart of `preview_path`, for before/after compare."""
+        return self.state_dir / SOURCE_PREVIEW_NAME
+
     # ---- planning ---------------------------------------------------------
 
     def plan_from_vibe(self, vibe: str, provider=None) -> GradeSpec:
@@ -181,26 +195,66 @@ class Project:
         bake_cube(self.spec, str(out), size=size)
         return out
 
-    def preview(self, n_frames: int = 3, path: str | Path | None = None) -> Path:
-        """Render a contact sheet of the current grade. Sub-second; safe to call
-        on every keystroke of a refine box."""
+    def preview(self, n_frames: int = 3, path: str | Path | None = None,
+                graded: bool = True) -> Path:
+        """Render a contact sheet. Sub-second; safe to call on every keystroke
+        of a refine box.
+
+        `graded=False` renders the untouched source through the same framing, so
+        a UI can hold-to-compare against an image that differs only by the grade
+        — comparing against a differently-sampled frame would be misleading.
+        """
         from .render import render_preview
 
-        cube = self.bake()
-        out = Path(path) if path else self.preview_path
+        cube = str(self.bake()) if graded else None  # ungraded needs no spec
+        out = Path(path) if path else (
+            self.preview_path if graded else self.state_dir / SOURCE_PREVIEW_NAME
+        )
         out.parent.mkdir(parents=True, exist_ok=True)
-        render_preview(self.source, str(cube), str(out), n_frames=n_frames)
+        render_preview(self.source, cube, str(out), n_frames=n_frames)
+        return out
+
+    def frame(self, at: float = 0.0, graded: bool = True,
+              path: str | Path | None = None) -> Path:
+        """Render a single frame at `at` seconds — the check-before-you-render
+        call, and what a scrubber drives.
+
+        Cheap regardless of clip length (ffmpeg seeks before decoding), so a UI
+        can re-render on every drag rather than only on release. Exists so a
+        full export is never the way to find out whether a grade works.
+        """
+        from .render import render_frame
+
+        cube = str(self.bake()) if graded else None
+        name = "frame.png" if graded else "frame_source.png"
+        out = Path(path) if path else self.state_dir / name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        render_frame(self.source, cube, str(out), at=at)
         return out
 
     def export(self, out_path: str | Path, gpu: bool = False,
                progress: ProgressFn | None = None) -> Path:
-        """Render the full clip. The slow one — pass `progress` for a bar."""
+        """Render the full clip. The slow one — pass `progress` for a bar.
+
+        Bakes to a PRIVATE temporary LUT rather than `cube_path`. An export runs
+        for minutes while the rest of the app stays live, and anything that
+        renders a frame re-bakes `cube_path` in place — so sharing it means a
+        scrubber move or a slider drag mid-export hands ffmpeg a different grade
+        and the finished file silently matches neither what was approved nor
+        what was asked for. Measured, not theorised: exporting at saturation 2.5
+        and then nudging the slider to 0 produced a greyscale file.
+
+        Note this makes the *file* safe, not the spec: `self.spec` is read when
+        the render starts, so a caller that wants the grade frozen at the moment
+        the user pressed Export must snapshot the project itself.
+        """
         from .render import render_video
 
-        cube = self.bake()
         out = Path(out_path).expanduser()
         out.parent.mkdir(parents=True, exist_ok=True)
-        render_video(self.source, str(cube), str(out), gpu=gpu, progress=progress)
+        with tempfile.TemporaryDirectory(prefix="ragvid-export-") as tmp:
+            cube = self.bake(Path(tmp) / "export.cube")
+            render_video(self.source, str(cube), str(out), gpu=gpu, progress=progress)
         return out
 
     # ---- interop ----------------------------------------------------------
@@ -210,6 +264,7 @@ class Project:
         return {
             "source": self.source,
             "root": str(self.root),
+            "duration": self.duration,
             "spec": self.spec.model_dump() if self.is_planned else None,
             "history_depth": len(self.session.specs),
             "can_undo": self.can_undo,

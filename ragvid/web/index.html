@@ -1,0 +1,760 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ragvid</title>
+<style>
+:root{
+  --bg:#f6f6f4; --panel:#fff; --ink:#17171a; --dim:#5d5d66; --line:#dcdcd6;
+  --accent:#2f5fd0; --accent-ink:#fff; --bad:#a1231b; --bad-bg:#fdeceb;
+  --ok:#1f6b3a; --shadow:0 1px 2px rgba(0,0,0,.07), 0 8px 24px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#131315; --panel:#1c1c20; --ink:#ececed; --dim:#9a9aa4; --line:#31313a;
+    --accent:#7ea3ff; --accent-ink:#10131c; --bad:#ff9c92; --bad-bg:#341b18;
+    --ok:#7fd4a0; --shadow:none;
+  }
+}
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--ink);
+  font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  min-height:100dvh; display:flex; flex-direction:column;
+}
+button,input,select,textarea{font:inherit;color:inherit}
+h1,h2,h3{font-weight:600;margin:0}
+a{color:var(--accent)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.92em}
+.dim{color:var(--dim)}
+.small{font-size:13px}
+
+/* ---- controls ---- */
+button{
+  border:1px solid var(--line); background:var(--panel); border-radius:7px;
+  padding:.45rem .8rem; cursor:pointer;
+}
+button:hover:not(:disabled){border-color:var(--dim)}
+button:disabled{opacity:.42; cursor:not-allowed}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent;font-weight:600}
+input[type=text]{
+  border:1px solid var(--line); background:var(--panel); border-radius:7px;
+  padding:.45rem .6rem; width:100%; min-width:0;
+}
+input[type=text]:focus-visible,button:focus-visible,summary:focus-visible,input[type=range]:focus-visible,label.drop:focus-visible{
+  outline:2px solid var(--accent); outline-offset:2px;
+}
+input[type=range]{width:100%;accent-color:var(--accent)}
+label{display:block}
+.field-label{font-weight:600;margin-bottom:.25rem}
+
+/* ---- banner ---- */
+#banner{
+  background:var(--bad-bg); color:var(--bad); border-bottom:1px solid var(--bad);
+  padding:.6rem .9rem; display:flex; gap:.8rem; align-items:flex-start;
+}
+#banner .grow{flex:1}
+#banner button{background:transparent;border-color:currentColor;color:inherit;padding:.15rem .5rem}
+
+/* ---- empty screen ---- */
+#empty{
+  flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:1.1rem; padding:2rem 1rem; text-align:center;
+}
+#empty.over{background:color-mix(in srgb,var(--accent) 12%,var(--bg))}
+#empty .ring{
+  border:2px dashed var(--line); border-radius:16px; padding:2.4rem 2rem; max-width:34rem; width:100%;
+}
+#empty.over .ring{border-color:var(--accent)}
+#empty h1{font-size:1.5rem}
+#pathrow{display:flex;gap:.5rem;margin-top:1rem}
+
+/* ---- work screen ---- */
+#work{flex:1;display:flex;flex-direction:column;min-height:0}
+header{
+  display:flex;gap:.7rem;align-items:center;flex-wrap:wrap;
+  padding:.55rem .9rem;border-bottom:1px solid var(--line);background:var(--panel);
+}
+header .grow{flex:1;min-width:0}
+header .name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+#stage{
+  display:flex;flex-direction:column;align-items:center;gap:.5rem;
+  padding:1rem .9rem .2rem;
+}
+/* Fixed box, letterboxed contents: the frame is the hero even for a small
+   clip, and swapping frames never shifts the layout under the cursor. */
+#viewer{
+  position:relative; border-radius:10px; overflow:hidden;
+  background:#000; box-shadow:var(--shadow);
+  width:min(100%,960px); aspect-ratio:var(--ar,16/9);
+  max-height:56vh; min-height:200px;
+  cursor:zoom-in; touch-action:none; user-select:none; -webkit-user-select:none;
+}
+#viewer img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+#imgSrc{opacity:0}
+#viewer.comparing #imgSrc{opacity:1}
+#viewer .tag{
+  position:absolute;left:.5rem;top:.5rem;background:rgba(0,0,0,.62);color:#fff;
+  border-radius:5px;padding:.12rem .45rem;font-size:12px;letter-spacing:.02em;line-height:1.5;
+}
+#viewer.comparing .tag::after{content:" — original"}
+#pending{
+  position:absolute;right:.5rem;top:.5rem;background:rgba(0,0,0,.62);color:#fff;
+  border-radius:5px;padding:.12rem .45rem;font-size:12px;line-height:1.5;
+}
+#scrubwrap{width:min(100%,900px);display:flex;flex-direction:column;gap:.15rem}
+#scrubrow{display:flex;gap:.7rem;align-items:center}
+#time{min-width:9.5ch;text-align:right}
+#hint{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap}
+kbd{
+  border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;
+  padding:0 .35rem;font-family:inherit;font-size:.85em;background:var(--panel);
+}
+#rationale{
+  width:min(100%,900px);background:var(--panel);border:1px solid var(--line);
+  border-left:3px solid var(--accent);border-radius:8px;padding:.6rem .8rem;
+}
+#rationale.flash{animation:flash 1.1s ease-out}
+@keyframes flash{from{background:color-mix(in srgb,var(--accent) 22%,var(--panel))}to{background:var(--panel)}}
+#status{min-height:1.5rem;font-weight:500}
+
+/* ---- panels ---- */
+#panels{padding:.6rem .9rem 2rem;display:flex;flex-direction:column;gap:.8rem;align-items:center}
+.panel{
+  width:min(100%,900px);background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:.8rem;
+}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:.8rem;width:min(100%,900px)}
+@media (max-width:640px){.two{grid-template-columns:1fr}}
+.two .panel{width:auto}
+.panel h2{font-size:.82rem;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:.5rem}
+.row{display:flex;gap:.5rem;align-items:center}
+label.drop{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.3rem;
+  border:2px dashed var(--line);border-radius:9px;padding:1rem .6rem;cursor:pointer;text-align:center;
+}
+label.drop.over{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,var(--panel))}
+details summary{cursor:pointer;font-weight:600;padding:.15rem 0}
+.sliders{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:.55rem .9rem;margin-top:.7rem}
+.slider .field-label{display:flex;justify-content:space-between;gap:.5rem;font-weight:500;margin-bottom:0}
+.slider .val{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--dim);font-size:.9em}
+progress{width:100%;height:14px}
+#exportdone{color:var(--ok);word-break:break-all}
+@media (prefers-reduced-motion: reduce){*{animation:none !important;transition:none !important}}
+</style>
+</head>
+<body>
+
+<div id="banner" role="alert" hidden>
+  <div class="grow">
+    <div id="bannerMsg"></div>
+    <div id="bannerHelp" class="small" hidden></div>
+  </div>
+  <button id="bannerClose" title="Dismiss (Esc)">Dismiss</button>
+</div>
+
+<!-- ============ EMPTY ============ -->
+<section id="empty" hidden>
+  <div class="ring">
+    <h1>Drop a video here</h1>
+    <p class="dim">Anywhere in this window. mp4, mov, mkv — whatever ffmpeg reads.</p>
+    <p><button id="pickVideo">Choose a file…</button></p>
+    <div id="pathrow">
+      <input type="text" id="pathInput" placeholder="/path/to/clip.mp4" aria-label="Path to a video file on this machine" spellcheck="false">
+      <button id="pathGo">Open</button>
+    </div>
+    <p class="small dim" style="margin-bottom:0">Pasting a path avoids copying the file — better for anything large.</p>
+  </div>
+</section>
+
+<!-- ============ WORK ============ -->
+<section id="work" hidden>
+  <header>
+    <div class="grow">
+      <div class="name" id="clipName"></div>
+      <div class="small dim" id="clipMeta"></div>
+    </div>
+    <button id="undoBtn" title="Undo (Ctrl+Z)">Undo</button>
+    <button id="closeBtn">Close clip</button>
+  </header>
+
+  <div id="stage">
+    <div id="viewer">
+      <img id="imgGraded" alt="Current frame, graded">
+      <img id="imgSrc" alt="Current frame, ungraded" aria-hidden="true">
+      <span class="tag" id="viewTag">graded</span>
+      <span id="pending" hidden>rendering…</span>
+    </div>
+
+    <div id="scrubwrap">
+      <div id="scrubrow">
+        <input type="range" id="scrub" min="0" max="1" step="0.01" value="0" aria-label="Position in clip">
+        <span class="mono" id="time">0:00.0</span>
+      </div>
+      <div id="hint" class="small dim">
+        <span id="compareHint">Hold the frame or <kbd>Space</kbd> to see the original</span>
+        <span>Drag to check other frames — each one renders in about a fifth of a second</span>
+      </div>
+    </div>
+
+    <div id="rationale" hidden><strong class="small dim">Why this look</strong><div id="rationaleText"></div></div>
+    <div id="status" role="status" aria-live="polite"></div>
+  </div>
+
+  <div id="panels">
+    <div class="two">
+      <div class="panel">
+        <h2>Describe a look</h2>
+        <form id="vibeForm" class="row">
+          <input type="text" id="vibeInput" placeholder="gloomy, sun-bleached, 70s film…" aria-label="Describe the look you want">
+          <button id="vibeBtn" class="primary" type="submit">Grade</button>
+        </form>
+        <p class="small dim" style="margin:.45rem 0 0">Asks <span id="providerName">the model</span>. Needs an API key, takes a few seconds.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Match a reference image</h2>
+        <label class="drop" id="refDrop" tabindex="0">
+          <span>Drop an image, or click to choose</span>
+          <span class="small dim">jpg, png, a still you like</span>
+          <input type="file" id="refFile" accept="image/*" hidden>
+        </label>
+        <p class="small dim" style="margin:.45rem 0 0"><strong>No API key, works offline.</strong> Matches this clip's colour to the image. Instant.</p>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Refine in words</h2>
+      <form id="refineForm" class="row">
+        <input type="text" id="refineInput" placeholder="less blue in the shadows, warmer skin…" aria-label="Refine instruction">
+        <button id="refineBtn" type="submit">Refine</button>
+      </form>
+      <p class="small dim" id="refineHelp" style="margin:.45rem 0 0">Available once you have a grade. Press Enter to send.</p>
+    </div>
+
+    <details class="panel" id="tune">
+      <summary>Fine tune by hand</summary>
+      <p class="small dim" style="margin:.4rem 0 0">Applied when you let go of a slider. Every change is undoable.</p>
+      <div class="sliders" id="sliders"></div>
+    </details>
+
+    <div class="panel">
+      <h2>Export the whole clip</h2>
+      <p class="small dim" style="margin:0 0 .55rem">This is the slow, final step — minutes, not milliseconds. Check the frame above first.</p>
+      <form id="exportForm">
+        <label class="field-label" for="outInput">Write to</label>
+        <div class="row">
+          <input type="text" id="outInput" spellcheck="false" aria-label="Output file path">
+          <button id="exportBtn" class="primary" type="submit">Export</button>
+        </div>
+        <label class="row small" style="margin-top:.5rem;width:auto">
+          <input type="checkbox" id="gpuInput"> <span>Use GPU encoder (NVENC) if available</span>
+        </label>
+      </form>
+      <div id="exportProgress" hidden style="margin-top:.6rem">
+        <progress id="bar" max="100" value="0"></progress>
+        <div class="small" id="barText"></div>
+      </div>
+      <div id="exportdone" class="small mono" hidden style="margin-top:.5rem"></div>
+      <p class="small" style="margin:.6rem 0 0"><a id="cubeLink" href="#" download="grade.cube">Download the .cube LUT</a></p>
+    </div>
+  </div>
+</section>
+
+<input type="file" id="videoFile" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.gif,.mpg,.mpeg,.wmv,.m2ts" hidden>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+let S = { open: false };          // server state — the only source of truth
+let busy = "";                    // label of the in-flight blocking action
+let exporting = false;
+let comparing = false;
+let cooldown = 0;                 // seconds left on a rate limit
+let firstOpen = true;
+
+/* ---------------- transport ---------------- */
+
+async function req(path, opts) {
+  const r = await fetch(path, opts);
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* no body */ }
+  if (!r.ok) {
+    const info = (data && data.error) || { type: "Unknown", message: "HTTP " + r.status };
+    const err = new Error(info.message || ("HTTP " + r.status));
+    err.info = info;
+    throw err;
+  }
+  return data;
+}
+const apiGet = (p) => req(p, {});
+function apiPost(path, body) {
+  if (body instanceof FormData) return req(path, { method: "POST", body });
+  if (body === undefined) return req(path, { method: "POST" });
+  return req(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+// One blocking action at a time. Never leaves the UI without a busy label.
+async function act(label, fn) {
+  if (busy) return;
+  busy = label;
+  render();
+  try {
+    const s = await fn();
+    if (s && typeof s.open === "boolean") apply(s);
+  } catch (e) {
+    showError(e);
+  } finally {
+    busy = "";
+    render();
+  }
+}
+
+/* ---------------- errors ---------------- */
+
+function showError(e) {
+  const info = e.info || { type: "Unknown", message: e.message || String(e) };
+  let help = "";
+  if (info.type === "ProviderNotConfigured") {
+    help = "Set " + (info.env_var || "the provider's API key") +
+           " in your environment or .env, then reload. Or use “Match a reference image” — " +
+           "that path needs no key and runs entirely offline.";
+  } else if (info.type === "RateLimited") {
+    startCooldown(info.retry_after || 30);
+    help = "The reference-image path is not rate limited.";
+  } else if (info.type === "InputError") {
+    help = "Try another file" + (info.path ? " — " + info.path + " could not be used." : ".");
+  } else if (info.type === "NoGrade") {
+    help = "Describe a look or drop a reference image first.";
+  } else if (info.type === "SessionNotFound") {
+    S = { open: false, providers: S.providers, provider: S.provider };
+    render();
+  } else if (info.type === "FFmpegError") {
+    help = "ffmpeg exited " + (info.returncode !== undefined ? info.returncode : "non-zero") + ".";
+  }
+  $("bannerMsg").textContent = info.message || "Something went wrong.";
+  $("bannerHelp").textContent = help;
+  $("bannerHelp").hidden = !help;
+  $("banner").hidden = false;
+}
+function hideBanner() { $("banner").hidden = true; }
+
+let cooldownTimer = null;
+function startCooldown(seconds) {
+  cooldown = Math.ceil(seconds);
+  clearInterval(cooldownTimer);
+  cooldownTimer = setInterval(() => {
+    cooldown -= 1;
+    if (cooldown <= 0) {
+      cooldown = 0;
+      clearInterval(cooldownTimer);
+      if (!$("banner").hidden) $("bannerHelp").textContent = "You can try again now.";
+    } else if (!$("banner").hidden) {
+      $("bannerHelp").textContent = "Retry in " + cooldown + "s. The reference-image path is not rate limited.";
+    }
+    render();
+  }, 1000);
+  render();
+}
+
+/* ---------------- state ---------------- */
+
+function apply(s) {
+  const prevVersion = S.version, wasOpen = S.open, prevSource = S.source;
+  S = s;
+  // Also on a *different* source: opening a second clip must not inherit the
+  // first one's scrubber range or export path.
+  if (S.open && (!wasOpen || S.source !== prevSource)) {
+    firstOpen = true;
+    $("scrub").max = String(S.duration || 0);
+    // Mid-clip is more representative than frame zero, which is often black.
+    $("scrub").value = String((S.duration || 0) / 2);
+    $("outInput").value = defaultOut(S.source);
+    $("exportdone").hidden = true;
+    hideBanner();
+  }
+  render();
+  if (S.open && (firstOpen || S.version !== prevVersion)) {
+    firstOpen = false;
+    syncSliders();
+    updateFrame();
+  }
+}
+
+function defaultOut(src) {
+  if (!src) return "out.mp4";
+  const dot = src.lastIndexOf(".");
+  return (dot > src.lastIndexOf("/") ? src.slice(0, dot) : src) + "-graded.mp4";
+}
+
+function fmt(t) {
+  t = Math.max(0, t || 0);
+  const m = Math.floor(t / 60);
+  const s = t - m * 60;
+  return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1);
+}
+
+function render() {
+  $("empty").hidden = !!S.open;
+  $("work").hidden = !S.open;
+  $("pathGo").disabled = $("pickVideo").disabled = !!busy;
+  if (!S.open) {
+    $("status").textContent = "";
+    document.title = "ragvid";
+    return;
+  }
+
+  const blocked = !!busy;
+  const cooling = cooldown > 0;
+  const planned = !!S.planned;
+
+  $("clipName").textContent = S.name || S.source || "";
+  $("clipName").title = S.source || "";
+  $("clipMeta").textContent = [
+    S.duration ? (S.duration < 60 ? S.duration.toFixed(1) + "s" : fmt(S.duration)) : null,
+    S.stats ? S.stats.width + "×" + S.stats.height : null,
+    planned ? "grade " + S.history_depth : "not graded yet",
+  ].filter(Boolean).join("  ·  ");
+  document.title = (S.name || "ragvid") + " — ragvid";
+
+  $("undoBtn").disabled = blocked || !S.can_undo;
+  $("closeBtn").disabled = blocked || exporting;
+
+  $("vibeBtn").disabled = blocked || cooling;
+  $("vibeBtn").textContent = cooling ? "wait " + cooldown + "s" : "Grade";
+  $("refDrop").style.pointerEvents = blocked ? "none" : "";
+  $("refDrop").style.opacity = blocked ? ".5" : "";
+
+  $("refineInput").disabled = $("refineBtn").disabled = blocked || cooling || !planned;
+  $("refineHelp").textContent = !planned
+    ? "Available once you have a grade — describe a look or drop a reference image first."
+    : cooling ? "Rate limited — " + cooldown + "s left." : "Press Enter to send.";
+
+  $("tune").style.opacity = planned ? "" : ".55";
+  for (const el of sliderEls) el.disabled = blocked || !planned;
+  if (!planned && $("tune").open) $("tune").open = false;
+
+  $("exportBtn").disabled = blocked || exporting || !planned;
+  $("exportBtn").textContent = exporting ? "Exporting…" : "Export";
+  $("outInput").disabled = exporting;
+  $("cubeLink").href = "/media/cube?v=" + (S.version || 0);
+  const cubeShown = planned;
+  $("cubeLink").parentElement.hidden = !cubeShown;
+
+  const r = planned && S.spec && S.spec.rationale ? S.spec.rationale : "";
+  $("rationaleText").textContent = r;
+  $("rationale").hidden = !r;
+
+  if (S.stats && S.stats.width) $("viewer").style.setProperty("--ar", S.stats.width + "/" + S.stats.height);
+  $("compareHint").hidden = !planned;
+  $("viewTag").textContent = planned ? "graded" : "ungraded — no grade yet";
+  if (!planned) setCompare(false);
+
+  $("status").textContent = busy || (planned ? "" : "Pick one of the two ways to grade below.");
+  $("time").textContent = fmt(parseFloat($("scrub").value));
+}
+
+/* ---------------- the frame viewer ---------------- */
+
+let frameTimer = null;
+function scheduleFrame() {
+  clearTimeout(frameTimer);
+  frameTimer = setTimeout(updateFrame, 120);   // ~190ms per render; don't queue a drag
+}
+function updateFrame() {
+  if (!S.open) return;
+  const t = parseFloat($("scrub").value) || 0;
+  const v = S.version || 0;
+  const g = S.planned ? 1 : 0;
+  const main = "/media/frame?t=" + t + "&graded=" + g + "&v=" + v;
+  const src = "/media/frame?t=" + t + "&graded=0&v=" + v;
+  if ($("imgGraded").getAttribute("src") !== main) {
+    $("pending").hidden = false;
+    $("imgGraded").src = main;
+  }
+  // Preloaded so hold-to-compare is instant, and re-preloaded whenever t moves.
+  if ($("imgSrc").getAttribute("src") !== src) $("imgSrc").src = src;
+}
+function setCompare(on) {
+  if (on && !S.planned) on = false;
+  if (on === comparing) return;
+  comparing = on;
+  $("viewer").classList.toggle("comparing", on);
+}
+
+/* ---------------- sliders ---------------- */
+
+const SLIDERS = [
+  ["saturation", "Saturation", 0, 4, 0.01],
+  ["temperature", "Temperature", -6000, 6000, 10],
+  ["tint", "Tint", -2, 2, 0.01],
+  ["contrast", "Contrast", -1, 1, 0.01],
+  ["slope.r", "Slope R (gain)", 0, 4, 0.01],
+  ["slope.g", "Slope G (gain)", 0, 4, 0.01],
+  ["slope.b", "Slope B (gain)", 0, 4, 0.01],
+  ["offset.r", "Offset R (lift)", -1, 1, 0.005],
+  ["offset.g", "Offset G (lift)", -1, 1, 0.005],
+  ["offset.b", "Offset B (lift)", -1, 1, 0.005],
+  ["power.r", "Power R (gamma)", 0.05, 4, 0.01],
+  ["power.g", "Power G (gamma)", 0.05, 4, 0.01],
+  ["power.b", "Power B (gamma)", 0.05, 4, 0.01],
+];
+const sliderEls = [];
+
+function buildSliders() {
+  const wrap = $("sliders");
+  for (const [path, label, min, max, step] of SLIDERS) {
+    const id = "sl_" + path.replace(".", "_");
+    const div = document.createElement("div");
+    div.className = "slider";
+    div.innerHTML =
+      '<label class="field-label" for="' + id + '"><span></span><span class="val"></span></label>' +
+      '<input type="range" id="' + id + '">';
+    div.querySelector("span").textContent = label;
+    const el = div.querySelector("input");
+    el.min = min; el.max = max; el.step = step; el.dataset.path = path;
+    el.valueLabel = div.querySelector(".val");
+    el.addEventListener("input", () => { el.valueLabel.textContent = fmtNum(el.value); });
+    el.addEventListener("change", () => {           // fires on release, not on drag
+      act("applying…", () => apiPost("/api/spec", { spec: specWith(path, parseFloat(el.value)) }));
+    });
+    wrap.appendChild(div);
+    sliderEls.push(el);
+  }
+}
+function getPath(o, path) {
+  return path.split(".").reduce((a, k) => (a == null ? a : a[k]), o);
+}
+function fmtNum(v) {
+  v = Number(v);
+  return String(Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 1000) / 1000);
+}
+function syncSliders() {
+  const spec = S.spec;
+  for (const el of sliderEls) {
+    const path = el.dataset.path;
+    let v = spec ? getPath(spec, path) : null;
+    if (v == null) v = (path === "saturation" || path.startsWith("power") || path.startsWith("slope")) ? 1 : 0;
+    el.value = String(v);                 // the thumb snaps to `step`…
+    el.valueLabel.textContent = fmtNum(v); // …the readout shows the real number
+  }
+}
+// Only the slider that moved is changed. Building the spec from every slider
+// would quantize the twelve the user never touched to their `step`.
+function specWith(path, value) {
+  const spec = JSON.parse(JSON.stringify(S.spec));   // full object, per the contract
+  const parts = path.split(".");
+  let o = spec;
+  while (parts.length > 1) o = o[parts.shift()];
+  o[parts[0]] = value;
+  return spec;
+}
+
+/* ---------------- export ---------------- */
+
+async function runExport() {
+  const out = $("outInput").value.trim();
+  if (!out) { $("outInput").focus(); return; }
+  $("exportdone").hidden = true;
+  exporting = true;
+  $("exportProgress").hidden = false;
+  $("bar").value = 0;
+  $("bar").removeAttribute("value");            // indeterminate until the first tick
+  $("barText").textContent = "starting ffmpeg…";
+  render();
+  try {
+    const { job } = await apiPost("/api/export", { out, gpu: $("gpuInput").checked });
+    await pollExport(job);
+  } catch (e) {
+    showError(e);
+    $("exportProgress").hidden = true;
+  } finally {
+    exporting = false;
+    render();
+  }
+}
+
+function pollExport(job) {
+  return new Promise((resolve) => {
+    const tick = async () => {
+      let j;
+      try {
+        j = await apiGet("/api/export/" + encodeURIComponent(job));
+      } catch (e) {
+        showError(e);
+        $("exportProgress").hidden = true;
+        return resolve();
+      }
+      if (j.state === "running") {
+        const p = Math.round((j.progress || 0) * 100);
+        $("bar").value = p;
+        // The server snapshots the grade when the export starts, so say so: a
+        // slider moved now changes the frames above but not the file being written.
+        $("barText").textContent = p + "% — encoding the grade you pressed Export on. Checking frames above will not disturb it.";
+        setTimeout(tick, 300);
+        return;
+      }
+      $("exportProgress").hidden = true;
+      if (j.state === "done") {
+        $("exportdone").textContent = "Written to " + j.path;
+        $("exportdone").hidden = false;
+      } else {
+        const info = j.error || { type: "Unknown", message: "export failed" };
+        showError(Object.assign(new Error(info.message || "export failed"), { info }));
+      }
+      resolve();
+    };
+    tick();
+  });
+}
+
+/* ---------------- open a clip ---------------- */
+
+function openFile(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  act("opening " + file.name + "…", () => apiPost("/api/project", fd));
+}
+function openPath(path) {
+  act("opening…", () => apiPost("/api/project", { path }));
+}
+
+/* ---------------- wiring ---------------- */
+
+buildSliders();
+
+$("bannerClose").onclick = hideBanner;
+
+$("pickVideo").onclick = () => $("videoFile").click();
+$("videoFile").onchange = (e) => { if (e.target.files[0]) openFile(e.target.files[0]); e.target.value = ""; };
+$("pathGo").onclick = () => { const p = $("pathInput").value.trim(); if (p) openPath(p); };
+$("pathInput").addEventListener("keydown", (e) => { if (e.key === "Enter") $("pathGo").click(); });
+
+// Whole window is the drop target while nothing is open.
+let dragDepth = 0;
+addEventListener("dragover", (e) => { if (!S.open) { e.preventDefault(); } });
+addEventListener("dragenter", (e) => { if (!S.open) { dragDepth++; $("empty").classList.add("over"); } });
+addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("empty").classList.remove("over"); } });
+addEventListener("drop", (e) => {
+  dragDepth = 0;
+  $("empty").classList.remove("over");
+  if (S.open) return;
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f) openFile(f);
+});
+
+$("closeBtn").onclick = () => act("closing…", () => apiPost("/api/close"));
+$("undoBtn").onclick = () => act("undoing…", () => apiPost("/api/undo"));
+
+$("vibeForm").onsubmit = (e) => {
+  e.preventDefault();
+  const v = $("vibeInput").value.trim();
+  if (!v) { $("vibeInput").focus(); return; }
+  act("asking the model for a “" + v + "” grade…", () => apiPost("/api/vibe", { vibe: v }));
+};
+
+$("refineForm").onsubmit = (e) => {
+  e.preventDefault();
+  const v = $("refineInput").value.trim();
+  if (!v) { $("refineInput").focus(); return; }
+  act("asking the model to " + v + "…", async () => {
+    const s = await apiPost("/api/refine", { instruction: v });
+    $("refineInput").value = "";
+    flashRationale();
+    return s;
+  });
+};
+function flashRationale() {
+  const el = $("rationale");
+  el.classList.remove("flash");
+  void el.offsetWidth;
+  el.classList.add("flash");
+}
+
+// Reference image: click, keyboard, or drop.
+const refDrop = $("refDrop");
+$("refFile").onchange = (e) => { if (e.target.files[0]) sendReference(e.target.files[0]); e.target.value = ""; };
+refDrop.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("refFile").click(); }
+});
+["dragover", "dragenter"].forEach((n) => refDrop.addEventListener(n, (e) => {
+  e.preventDefault(); e.stopPropagation(); refDrop.classList.add("over");
+}));
+["dragleave", "dragend"].forEach((n) => refDrop.addEventListener(n, () => refDrop.classList.remove("over")));
+refDrop.addEventListener("drop", (e) => {
+  e.preventDefault(); e.stopPropagation();
+  refDrop.classList.remove("over");
+  const f = e.dataTransfer.files[0];
+  if (f) sendReference(f);
+});
+function sendReference(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  act("matching " + file.name + "…", () => apiPost("/api/reference", fd));
+}
+
+$("exportForm").onsubmit = (e) => { e.preventDefault(); runExport(); };
+
+// Scrubber: label updates instantly, the render is debounced.
+$("scrub").addEventListener("input", () => {
+  $("time").textContent = fmt(parseFloat($("scrub").value));
+  scheduleFrame();
+});
+$("imgGraded").addEventListener("load", (e) => {
+  $("pending").hidden = true;
+  // Size the box to the frame so a narrow window is not half letterbox.
+  const im = e.target;
+  if (im.naturalWidth) $("viewer").style.setProperty("--ar", im.naturalWidth + "/" + im.naturalHeight);
+});
+$("imgGraded").addEventListener("error", () => {
+  $("pending").hidden = true;
+  if (S.open) showError(new Error("Could not render the frame at " + fmt(parseFloat($("scrub").value)) + "."));
+});
+
+// Hold to compare.
+const viewer = $("viewer");
+viewer.addEventListener("pointerdown", (e) => { e.preventDefault(); setCompare(true); });
+["pointerup", "pointercancel", "pointerleave"].forEach((n) =>
+  viewer.addEventListener(n, () => setCompare(false)));
+
+function typing(el) {
+  return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" ||
+                el.tagName === "BUTTON" || el.isContentEditable);
+}
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { hideBanner(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+    e.preventDefault();
+    if (S.open && S.can_undo && !busy) $("undoBtn").click();
+    return;
+  }
+  if (e.code === "Space" && !typing(e.target) && !e.repeat && S.open) {
+    e.preventDefault();
+    setCompare(true);
+  }
+});
+addEventListener("keyup", (e) => { if (e.code === "Space") setCompare(false); });
+addEventListener("blur", () => setCompare(false));
+
+/* ---------------- boot ---------------- */
+
+apiGet("/api/state")
+  .then((s) => {
+    if (s && s.provider) $("providerName").textContent = s.provider;
+    apply(s);
+  })
+  .catch((e) => { S = { open: false }; render(); showError(e); });
+render();
+</script>
+</body>
+</html>

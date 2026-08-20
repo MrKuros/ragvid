@@ -172,6 +172,20 @@ def render_preview(video: str, cube: str | None, out_png: str, n_frames: int = 3
     return out_png
 
 
+def render_frame(video: str, cube: str | None, out_png: str, at: float = 0.0) -> str:
+    """One frame at `at` seconds, LUT applied. The check-before-you-render call.
+
+    Seeking before -i makes this independent of clip length, so scrubbing a
+    two-hour film costs the same as scrubbing a two-second one -- which is what
+    lets a UI re-render on every drag of a scrubber.
+    """
+    args = ["-ss", f"{max(0.0, at):.3f}", "-i", video]
+    if lut := _lut_filter(cube):
+        args += ["-vf", lut]
+    _run([*args, "-frames:v", "1", "-update", "1", out_png], timeout=120)
+    return out_png
+
+
 def _render_gif(video: str, cube: str, out_path: str, progress=None) -> str:
     """Render to an animated GIF.
 
@@ -210,6 +224,13 @@ def render_video(video: str, cube: str, out_path: str, gpu: bool = False,
         return _render_gif(video, cube, out_path, progress=progress)
     pre, enc, vf_suffix = _encoder_args(gpu)
     vf = _lut_filter(cube)
+    # H.264 at 4:2:0 needs even dimensions, and plenty of real sources are odd
+    # (a 720x405 GIF, anything cropped by hand) -- libx264 refuses outright with
+    # "height not divisible by 2" and the export fails at the very last step.
+    # Crop rather than scale: losing at most one row/column beats resampling
+    # every frame. A no-op when the dimensions are already even, so it costs
+    # nothing to apply unconditionally and saves probing for the size.
+    vf = f"{vf},crop=trunc(iw/2)*2:trunc(ih/2)*2"
     if vf_suffix:
         vf = f"{vf},{vf_suffix}"
     args = [*pre, "-i", video, "-map", "0:v:0", "-map", "0:a:0?", "-vf", vf, "-c:v", enc]

@@ -292,3 +292,34 @@ def test_spec_is_reachable_once_planned(project, tmp_path):
     project.plan_from_reference(tmp_path / "ref.png")
     assert project.is_planned is True
     assert project.spec is not None
+
+
+def test_export_does_not_share_its_lut_with_live_rendering(project, tmp_path, monkeypatch):
+    """Export must bake to a private LUT, not the shared cube_path.
+
+    Anything that renders a frame re-bakes cube_path in place, so sharing it
+    means a scrubber move or slider drag mid-export hands ffmpeg a different
+    grade -- and the finished file matches neither what the user approved nor
+    what they asked for. This is a real bug that shipped and was measured
+    (saturation 2.5 approved, slider nudged to 0, greyscale file out).
+    """
+    from ragvid.spec import GradeSpec
+
+    project.set_spec(GradeSpec(saturation=2.5))
+    seen = {}
+
+    def fake_render(video, cube, out, gpu=False, progress=None):
+        seen["cube"] = Path(cube)
+        seen["exists_during"] = Path(cube).is_file()
+        Path(out).write_bytes(b"x")
+        return str(out)
+
+    monkeypatch.setattr("ragvid.render.render_video", fake_render)
+    project.export(tmp_path / "out.mp4")
+
+    assert seen["exists_during"], "the LUT must exist while ffmpeg reads it"
+    assert seen["cube"] != project.cube_path, (
+        f"export baked to the shared {project.cube_path.name}; a concurrent "
+        "frame render would overwrite it mid-encode"
+    )
+    assert not seen["cube"].exists(), "the private LUT should be cleaned up after"

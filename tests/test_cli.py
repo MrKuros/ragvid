@@ -145,7 +145,13 @@ def test_export(calls, capsys):
     assert cli.main(["export", "out.mp4", "--gpu"]) == 0
 
     args, kw = calls["render_video"]
-    assert args[:3] == (_source(), _art("current.cube"), "out.mp4")
+    assert args[0] == _source()
+    assert args[2] == "out.mp4"
+    # NOT the shared .ragvid/current.cube: export bakes to a private temporary
+    # LUT, because anything rendering a frame re-bakes current.cube in place and
+    # would hand ffmpeg a different grade mid-encode.
+    assert args[1] != str(_art("current.cube"))
+    assert args[1].endswith(".cube")
     # No progress bar: stderr is captured, so it is not a tty.
     assert kw == {"gpu": True, "progress": None}
     assert "out.mp4" in capsys.readouterr().out
