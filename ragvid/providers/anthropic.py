@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 
+from ragvid.errors import ProviderError, ProviderNotConfigured
 from ragvid.spec import GradeSpec
 
 DEFAULT_MODEL = "claude-opus-5"
@@ -25,9 +26,7 @@ class AnthropicProvider:
 
             key = os.environ.get("ANTHROPIC_API_KEY")
             if not key:
-                raise RuntimeError(
-                    "ANTHROPIC_API_KEY is not set (put it in .env or the environment)"
-                )
+                raise ProviderNotConfigured("anthropic", "ANTHROPIC_API_KEY")
             self._client = anthropic.Anthropic(api_key=key)
         return self._client
 
@@ -45,8 +44,8 @@ class AnthropicProvider:
             },
         )
         if response.stop_reason == "refusal":
-            raise RuntimeError(f"Anthropic declined the request ({response.stop_details})")
+            raise ProviderError("anthropic", f"declined the request ({response.stop_details})")
         text = next((b.text for b in response.content if b.type == "text"), None)
         if text is None:
-            raise RuntimeError(f"Anthropic returned no text block (stop_reason={response.stop_reason})")
+            raise ProviderError("anthropic", f"returned no text block (stop_reason={response.stop_reason})")
         return GradeSpec(**json.loads(text)).sanitize()

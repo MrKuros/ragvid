@@ -11,6 +11,7 @@ import os
 import httpx
 import pytest
 
+from ragvid.errors import ProviderError, ProviderNotConfigured, RateLimited
 from ragvid.probe import ClipStats
 from ragvid.providers.base import DEFAULTS, get_provider, load_env
 from ragvid.providers.groq import FALLBACK_MODEL, GroqProvider, parse_reset
@@ -215,7 +216,7 @@ def test_get_provider_arguments_win_over_env(monkeypatch):
 
 def test_get_provider_rejects_unknown(monkeypatch):
     monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
-    with pytest.raises(ValueError, match="unknown provider"):
+    with pytest.raises(ProviderError, match="unknown provider"):
         get_provider("gpt5000")
 
 
@@ -325,23 +326,27 @@ def test_groq_raises_a_clear_error_when_everything_is_rate_limited(monkeypatch):
     monkeypatch.setattr("ragvid.providers.groq.time.sleep", lambda _: None)
     client = FakeClient([_rate_limited() for _ in range(4)])
 
-    with pytest.raises(RuntimeError, match="8000 tokens/min"):
+    with pytest.raises(RateLimited) as info:
         GroqProvider(client=client).plan("sys", "usr")
     assert len(client.calls) == 4
+    # Typed, and carrying what a UI needs: whose limit, and when it lifts.
+    assert info.value.provider == "groq" and info.value.retry_after == 0.01
+    assert "rate limit" in str(info.value)
 
 
 def test_groq_does_not_fall_back_to_itself(monkeypatch):
     monkeypatch.setattr("ragvid.providers.groq.time.sleep", lambda _: None)
     client = FakeClient([_rate_limited(), _rate_limited()])
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RateLimited):
         GroqProvider(model=FALLBACK_MODEL, client=client).plan("sys", "usr")
     assert len(client.calls) == 2
 
 
 def test_groq_client_property_needs_a_key(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+    with pytest.raises(ProviderNotConfigured, match="GROQ_API_KEY is not set") as info:
         _ = GroqProvider().client
+    assert (info.value.provider, info.value.env_var) == ("groq", "GROQ_API_KEY")
 
 
 # ---- Anthropic: request shape --------------------------------------------
@@ -386,5 +391,5 @@ def test_anthropic_surfaces_a_refusal():
 
     response = type("R", (), {"content": [], "stop_reason": "refusal", "stop_details": None})()
     client = type("C", (), {"messages": FakeMessages(response)})()
-    with pytest.raises(RuntimeError, match="declined"):
+    with pytest.raises(ProviderError, match="declined"):
         AnthropicProvider(client=client).plan("sys", "usr")

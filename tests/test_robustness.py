@@ -9,6 +9,7 @@ import pytest
 from PIL import Image
 
 from ragvid import cli, render
+from ragvid.errors import ProviderNotConfigured, RateLimited
 from ragvid.lut import bake_cube
 from ragvid.providers.groq import GroqProvider, parse_reset
 from ragvid.session import SESSION_DIR
@@ -79,9 +80,10 @@ def test_groq_skips_the_fallback_sleep_when_the_reset_is_far_out(monkeypatch):
             raise limited()
 
     client = Client()
-    with pytest.raises(RuntimeError, match="8000 tokens/min"):
+    with pytest.raises(RateLimited) as info:
         GroqProvider(client=client).plan("sys", "usr")
 
+    assert info.value.retry_after == 54.067  # the reset it refused to sleep through
     assert slept == []                    # never blocked on a wait it can't honour
     assert len(set(client.models)) == 2   # went straight to the fallback model
 
@@ -95,8 +97,7 @@ def test_groq_skips_the_fallback_sleep_when_the_reset_is_far_out(monkeypatch):
     ["grade", SAMPLE, "--ref", "no-such-file.png"],
 ])
 def test_cli_failures_are_messages_not_tracebacks(argv, tmp_path, monkeypatch, capsys):
-    monkeypatch.chdir(tmp_path)  # no .ragvid session here
-    monkeypatch.setattr(cli, "CUBE", str(tmp_path / "c.cube"))
+    monkeypatch.chdir(tmp_path)  # no .ragvid session here; artifacts land here too
     argv = [f"{_repo()}/{a}" if a.startswith("assets/") else a for a in argv]
 
     assert cli.main(argv) == 1
@@ -114,7 +115,7 @@ def test_missing_api_key_is_a_clear_error(monkeypatch):
     monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
     from ragvid.providers.base import get_provider
 
-    with pytest.raises(RuntimeError, match="GROQ_API_KEY is not set"):
+    with pytest.raises(ProviderNotConfigured, match="GROQ_API_KEY is not set"):
         get_provider("groq").client
 
 
@@ -160,4 +161,8 @@ def test_corrupt_session_is_a_message_not_a_traceback(body, tmp_path, monkeypatc
     (tmp_path / SESSION_DIR / "session.json").write_text(body)
 
     assert cli.main(["spec"]) == 1
-    assert capsys.readouterr().err.strip() == "ragvid: no session here — run 'ragvid grade' first"
+    err = capsys.readouterr().err.strip()
+    # A damaged file gets its own message -- "grade something first" would be
+    # wrong advice here, and the path is what the reader needs to go fix.
+    assert err.startswith("ragvid: ") and "Traceback" not in err
+    assert "unreadable" in err and str(tmp_path / SESSION_DIR / "session.json") in err

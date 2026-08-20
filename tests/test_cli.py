@@ -1,6 +1,14 @@
-"""CLI tests. Everything that touches ffmpeg or an API is monkeypatched."""
+"""CLI tests: argument parsing, exit codes and what gets printed.
+
+The orchestration itself now lives in ragvid.project.Project (see
+tests/test_project.py); these drive it through main() to prove the front end
+wires argv to it correctly. Everything that touches ffmpeg or an API is
+monkeypatched at its defining module -- cli.py no longer imports any of it, and
+Project imports its dependencies inside the methods that use them.
+"""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -20,10 +28,24 @@ STATS = ClipStats(
 )
 
 
+def _art(name: str) -> str:
+    """An artifact ragvid writes, under the project dir (cwd for the CLI)."""
+    return str(Path.cwd() / ".ragvid" / name)
+
+
+def _source() -> str:
+    """What Project.create stores as the source: absolute, resolved."""
+    return str(Path.cwd() / "clip.mp4")
+
+
 @pytest.fixture
 def calls(tmp_path, monkeypatch):
-    """Run in a temp cwd with every heavy dependency of cli.py recorded."""
+    """Run in a temp cwd with every heavy dependency recorded, not executed."""
     monkeypatch.chdir(tmp_path)
+    # Project.create/plan_from_reference reject paths that don't exist, so the
+    # inputs have to be real files even though nothing ever reads them.
+    (tmp_path / "clip.mp4").write_bytes(b"")
+    (tmp_path / "ref.png").write_bytes(b"")
     seen = {}
 
     def rec(name, ret):
@@ -32,14 +54,16 @@ def calls(tmp_path, monkeypatch):
             return ret
         return f
 
-    monkeypatch.setattr(cli, "probe_video", rec("probe_video", STATS))
-    monkeypatch.setattr(cli, "probe_image", rec("probe_image", STATS))
-    monkeypatch.setattr(cli, "match_reference", rec("match_reference", GradeSpec(temperature=800, rationale="matched")))
-    monkeypatch.setattr(cli, "plan_vibe", rec("plan_vibe", GradeSpec(contrast=0.4, rationale="gloomy")))
-    monkeypatch.setattr(cli, "refine_spec", rec("refine_spec", GradeSpec(contrast=0.1, rationale="less")))
-    monkeypatch.setattr(cli, "bake_cube", rec("bake_cube", cli.CUBE))
-    monkeypatch.setattr(cli, "render_preview", rec("render_preview", cli.PREVIEW))
-    monkeypatch.setattr(cli, "render_video", rec("render_video", "out.mp4"))
+    # Patch where each function is defined: Project imports them inside its
+    # methods, so there is no module-level name to shadow.
+    monkeypatch.setattr("ragvid.probe.probe_video", rec("probe_video", STATS))
+    monkeypatch.setattr("ragvid.probe.probe_image", rec("probe_image", STATS))
+    monkeypatch.setattr("ragvid.match.match_reference", rec("match_reference", GradeSpec(temperature=800, rationale="matched")))
+    monkeypatch.setattr("ragvid.vibe.plan_vibe", rec("plan_vibe", GradeSpec(contrast=0.4, rationale="gloomy")))
+    monkeypatch.setattr("ragvid.refine.refine_spec", rec("refine_spec", GradeSpec(contrast=0.1, rationale="less")))
+    monkeypatch.setattr("ragvid.lut.bake_cube", rec("bake_cube", None))
+    monkeypatch.setattr("ragvid.render.render_preview", rec("render_preview", None))
+    monkeypatch.setattr("ragvid.render.render_video", rec("render_video", "out.mp4"))
     return seen
 
 
@@ -48,16 +72,16 @@ def test_grade_vibe(calls, capsys):
 
     assert calls["plan_vibe"][0][:2] == ("gloomy", STATS)
     assert "match_reference" not in calls
-    assert calls["bake_cube"][0][1] == ".ragvid/current.cube"
-    assert calls["render_preview"][0][:3] == ("clip.mp4", ".ragvid/current.cube", ".ragvid/preview.png")
+    assert calls["bake_cube"][0][1] == _art("current.cube")
+    assert calls["render_preview"][0][:3] == (_source(), _art("current.cube"), _art("preview.png"))
 
     s = Session.load()
-    assert s.source == "clip.mp4"
+    assert s.source == _source()
     assert s.spec.contrast == 0.4
     assert s.stats == STATS
 
     out = capsys.readouterr().out
-    assert "gloomy" in out and ".ragvid/preview.png" in out
+    assert "gloomy" in out and _art("preview.png") in out
 
 
 def test_grade_ref_never_calls_llm(calls):
@@ -121,15 +145,16 @@ def test_export(calls, capsys):
     assert cli.main(["export", "out.mp4", "--gpu"]) == 0
 
     args, kw = calls["render_video"]
-    assert args[:3] == ("clip.mp4", ".ragvid/current.cube", "out.mp4")
-    assert kw == {"gpu": True}
+    assert args[:3] == (_source(), _art("current.cube"), "out.mp4")
+    # No progress bar: stderr is captured, so it is not a tty.
+    assert kw == {"gpu": True, "progress": None}
     assert "out.mp4" in capsys.readouterr().out
 
 
 def test_export_defaults_to_cpu(calls):
     cli.main(["grade", "clip.mp4", "--vibe", "gloomy"])
     cli.main(["export", "out.mp4"])
-    assert calls["render_video"][1] == {"gpu": False}
+    assert calls["render_video"][1] == {"gpu": False, "progress": None}
 
 
 def test_provider_passthrough(calls, monkeypatch):

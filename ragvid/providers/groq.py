@@ -7,6 +7,7 @@ import os
 import re
 import time
 
+from ragvid.errors import ProviderNotConfigured, RateLimited
 from ragvid.spec import GradeSpec
 
 BASE_URL = "https://api.groq.com/openai/v1"
@@ -48,7 +49,7 @@ class GroqProvider:
 
             key = os.environ.get("GROQ_API_KEY")
             if not key:
-                raise RuntimeError("GROQ_API_KEY is not set (put it in .env or the environment)")
+                raise ProviderNotConfigured("groq", "GROQ_API_KEY")
             # max_retries=0: the retry/backoff policy below is the only one, so the
             # SDK's own retries don't compound our sleeps.
             self._client = openai.OpenAI(api_key=key, base_url=BASE_URL, max_retries=0)
@@ -59,15 +60,17 @@ class GroqProvider:
 
         models = [self.model] + ([FALLBACK_MODEL] if self.model != FALLBACK_MODEL else [])
         last: Exception | None = None
+        last_wait: float | None = None
         for model in models:
             for attempt in range(ATTEMPTS_PER_MODEL):
                 try:
                     return self._call(model, system, user)
                 except openai.RateLimitError as exc:
                     last = exc
+                    last_wait = _retry_after(exc)
                     if attempt + 1 >= ATTEMPTS_PER_MODEL:
                         break
-                    wait = _retry_after(exc) or 2.0 ** attempt
+                    wait = last_wait or 2.0 ** attempt
                     if wait > MAX_SLEEP:
                         # The bucket resets further out than we are willing to
                         # block (a real 8000-TPM 429 reports ~54s). Sleeping
@@ -76,12 +79,10 @@ class GroqProvider:
                         # so go there now.
                         break
                     time.sleep(wait)
-        raise RuntimeError(
-            "Groq rate limit hit on both "
-            f"{' and '.join(models)} after {ATTEMPTS_PER_MODEL} attempts each. "
-            "The free tier allows 8000 tokens/min — wait a minute and retry, "
-            "or set RAGVID_PROVIDER=anthropic."
-        ) from last
+        # Every model exhausted. retry_after carries the provider's own reset
+        # time when it gave one, so a UI can show a countdown rather than a
+        # dead end.
+        raise RateLimited("groq", retry_after=last_wait) from last
 
     def _call(self, model: str, system: str, user: str) -> GradeSpec:
         response = self.client.chat.completions.create(

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from ragvid.errors import ProviderError
 from ragvid.spec import GradeSpec
 
 # Repo root .env — ragvid/providers/base.py -> parents[2].
@@ -53,4 +54,4 @@ def get_provider(name: str | None = None, model: str | None = None) -> Provider:
         from ragvid.providers.anthropic import AnthropicProvider
 
         return AnthropicProvider(model=model)
-    raise ValueError(f"unknown provider {name!r}; expected 'groq' or 'anthropic'")
+    raise ProviderError(str(name), "unknown provider; expected 'groq' or 'anthropic'")

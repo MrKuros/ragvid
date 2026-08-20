@@ -13,12 +13,10 @@ import re
 import subprocess
 import warnings
 
+from .errors import FFmpegError
+
 FFMPEG = "ffmpeg"
 FFPROBE = "ffprobe"
-
-
-class FFmpegError(RuntimeError):
-    """ffmpeg exited non-zero. Carries its stderr."""
 
 
 def _run(args: list[str], timeout: float | None = 600) -> str:
@@ -27,12 +25,47 @@ def _run(args: list[str], timeout: float | None = 600) -> str:
         capture_output=True, text=True, timeout=timeout,
     )
     if proc.returncode != 0:
-        raise FFmpegError(
-            f"ffmpeg exited {proc.returncode}\n"
-            f"  args: {' '.join(args)}\n"
-            f"  stderr:\n{proc.stderr.strip()}"
-        )
+        raise FFmpegError(proc.returncode, args, proc.stderr)
     return proc.stderr
+
+
+def _run_with_progress(args: list[str], duration: float, progress) -> str:
+    """Same as _run, but stream ffmpeg's progress and report 0.0 -> 1.0.
+
+    `-progress pipe:1` writes machine-readable key=value blocks to stdout, which
+    is far more reliable to parse than the human status line on stderr. Without
+    a known duration there is no fraction to report, so we fall back to _run.
+    """
+    if duration <= 0:
+        return _run(args)
+
+    proc = subprocess.Popen(
+        [FFMPEG, "-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats", *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    assert proc.stdout is not None
+    # ffmpeg's final out_time_us and its progress=end marker both land on 1.0,
+    # so report monotonically and only on change -- a consumer should never see
+    # the same fraction twice, least of all the terminal one.
+    last = -1.0
+
+    def report(fraction: float) -> None:
+        nonlocal last
+        fraction = max(0.0, min(1.0, fraction))
+        if fraction > last:
+            last = fraction
+            progress(fraction)
+
+    for line in proc.stdout:
+        key, _, value = line.strip().partition("=")
+        if key == "out_time_us" and value.strip("-").isdigit():
+            report(int(value) / 1e6 / duration)
+        elif key == "progress" and value == "end":
+            report(1.0)
+    stderr = proc.stderr.read() if proc.stderr else ""
+    if proc.wait() != 0:
+        raise FFmpegError(proc.returncode, args, stderr)
+    return stderr
 
 
 def escape_path(path: str) -> str:
@@ -139,7 +172,7 @@ def render_preview(video: str, cube: str | None, out_png: str, n_frames: int = 3
     return out_png
 
 
-def _render_gif(video: str, cube: str, out_path: str) -> str:
+def _render_gif(video: str, cube: str, out_path: str, progress=None) -> str:
     """Render to an animated GIF.
 
     GIF is not just "another container": the encoder takes pal8, so the
@@ -158,14 +191,23 @@ def _render_gif(video: str, cube: str, out_path: str) -> str:
         "[g1]palettegen=stats_mode=diff[pal];"
         "[g2][pal]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
     )
-    _run(["-i", video, "-filter_complex", fc, "-loop", "0", "-an", out_path])
+    args = ["-i", video, "-filter_complex", fc, "-loop", "0", "-an", out_path]
+    if progress:
+        _run_with_progress(args, probe_duration(video), progress)
+    else:
+        _run(args)
     return out_path
 
 
-def render_video(video: str, cube: str, out_path: str, gpu: bool = False) -> str:
-    """Full render. Audio is stream-copied, never re-encoded."""
+def render_video(video: str, cube: str, out_path: str, gpu: bool = False,
+                 progress=None) -> str:
+    """Full render. Audio is stream-copied, never re-encoded.
+
+    `progress` is an optional callable taking a 0.0-1.0 float, called as ffmpeg
+    works. This is the only operation slow enough for a UI to need a bar.
+    """
     if Path(out_path).suffix.lower() == ".gif":
-        return _render_gif(video, cube, out_path)
+        return _render_gif(video, cube, out_path, progress=progress)
     pre, enc, vf_suffix = _encoder_args(gpu)
     vf = _lut_filter(cube)
     if vf_suffix:
@@ -176,5 +218,9 @@ def render_video(video: str, cube: str, out_path: str, gpu: bool = False) -> str
         # players and hardware decoders reject. Pin 4:2:0. The hw paths already
         # upload their own format (nv12) so they must not get -pix_fmt.
         args += ["-pix_fmt", "yuv420p"]
-    _run([*args, "-c:a", "copy", out_path])
+    full = [*args, "-c:a", "copy", out_path]
+    if progress:
+        _run_with_progress(full, probe_duration(video), progress)
+    else:
+        _run(full)
     return out_path

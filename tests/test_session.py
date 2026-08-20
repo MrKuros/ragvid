@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from ragvid.errors import SessionCorrupt
 from ragvid.probe import ClipStats
 from ragvid.session import NoSession, Session
 from ragvid.spec import RGB, GradeSpec
@@ -71,8 +72,12 @@ def test_load_corrupt_session_is_friendly(tmp_path):
     p = Session.path()
     p.parent.mkdir()
     p.write_text("{not json")
-    with pytest.raises(NoSession):
+    # Distinct from NoSession on purpose: "this file is damaged" is different
+    # advice from "grade something first".
+    with pytest.raises(SessionCorrupt, match="unreadable") as info:
         Session.load()
+    assert not isinstance(info.value, NoSession)
+    assert info.value.path == str(p)
 
 
 def test_session_file_is_json_in_dot_ragvid():
@@ -80,6 +85,7 @@ def test_session_file_is_json_in_dot_ragvid():
     s.push(GradeSpec.identity())
     s.save()
     raw = json.loads(Session.path().read_text())
-    assert str(Session.path()) == ".ragvid/session.json"
+    assert Session.path().parts[-2:] == (".ragvid", "session.json")
+    assert Session.path().is_absolute()
     assert raw["source"] == "clip.mp4"
     assert len(raw["specs"]) == 1
