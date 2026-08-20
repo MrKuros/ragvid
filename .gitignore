@@ -18,3 +18,10 @@ test_files/*.png
 
 # agent worktrees
 .claude/
+
+# render outputs -- regenerable, never source. test_files/test.mp4 stays tracked:
+# scripts/build_looks.py derives the whole look corpus from it, so dropping it
+# would make the corpus unreproducible.
+test_files/*-graded*.mp4
+test_files/output/
+out/
