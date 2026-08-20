@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 import httpx
 import pytest
@@ -17,7 +18,7 @@ from ragvid.providers.base import DEFAULTS, get_provider, load_env
 from ragvid.providers.groq import FALLBACK_MODEL, GroqProvider, parse_reset
 from ragvid.refine import refine_spec
 from ragvid.spec import RGB, GradeSpec
-from ragvid.vibe import plan_vibe
+from ragvid.vibe import SYSTEM, format_stats, plan_vibe
 
 STATS = ClipStats(
     mean=RGB(r=0.2137, g=0.1904, b=0.2510),
@@ -72,6 +73,88 @@ def test_system_prompt_states_identity_and_sign_conventions():
         assert field in s, f"system prompt never mentions {field}"
 
 
+def test_system_prompt_couples_a_slope_push_to_highlight_rolloff():
+    # The measured defect this exists to fix: slope 1.3 pins 23% of a ramp at pure
+    # white. The model can only avoid it if the prompt links the two fields.
+    assert "IF YOU RAISE slope OR exposure" in SYSTEM
+    assert "highlight_rolloff" in SYSTEM
+
+
+# Ranges in the prompt are written `field [low..high]`, one uniform form, so they can be
+# parsed back out and checked against the clamps that actually run.
+RANGE_RE = re.compile(r"\b([a-z_]+(?:\.[a-z_]+)?) \[(-?\d+(?:\.\d+)?)\.\.(-?\d+(?:\.\d+)?)\]")
+
+
+def _sanitized(path: str, value: float) -> float:
+    """`value` put into `path`, run through sanitize(), read back."""
+    d = GradeSpec.identity().model_dump()
+    head, _, sub = path.partition(".")
+    node = d[head]
+    if isinstance(node, dict):  # RGB, HueBand or EffectSpec
+        keys = [sub] if sub else list(node)
+        for k in keys:
+            node[k] = value
+        return GradeSpec(**d).sanitize().model_dump()[head][keys[0]]
+    d[head] = value
+    return GradeSpec(**d).sanitize().model_dump()[head]
+
+
+def test_every_range_quoted_in_the_prompt_survives_sanitize():
+    # The prompt used to promise slope 0.7-1.4 while sanitize() allowed 0-8. A range the
+    # clamp does not honour is a lie to the model; a range outside it is unreachable.
+    found = RANGE_RE.findall(SYSTEM)
+    assert len(found) >= 20, "the parameter list stopped quoting ranges"
+    for path, lo, hi in found:
+        lo, hi = float(lo), float(hi)
+        assert lo < hi, path
+        assert _sanitized(path, lo) == pytest.approx(lo), f"{path} low end is clamped away"
+        assert _sanitized(path, hi) == pytest.approx(hi), f"{path} high end is clamped away"
+
+
+def test_every_numeric_field_has_a_quoted_range():
+    from ragvid.spec import HUE_FIELDS, EffectSpec
+
+    found = RANGE_RE.findall(SYSTEM)
+    paths = {p for p, _, _ in found}
+    # The other five bands share hue_red's two ranges, and the prompt says so.
+    covered = {p.split(".")[0] for p in paths} | set(HUE_FIELDS[1:]) | {"rationale"}
+    assert not set(GradeSpec.model_fields) - covered
+    assert {f"effects.{k}" for k in EffectSpec.model_fields} <= paths
+
+
+# ---- format_stats ---------------------------------------------------------
+
+
+def test_format_stats_carries_the_new_measurements():
+    text = format_stats(STATS.model_copy(update={
+        "p1": RGB.of(0.0142), "p99": RGB.of(0.8120),
+        "dominant_hue": 214.0, "clipped_high": 0.031, "crushed_low": 0.004,
+        "frame_variance": 0.0413,
+    }))
+    assert "0.0142" in text and "0.8120" in text
+    assert "214 deg" in text
+    assert "3.1%" in text and "0.4%" in text
+    assert "0.0413" in text
+
+
+def test_stats_notes_turn_a_measurement_into_an_instruction():
+    blown = format_stats(STATS.model_copy(update={
+        "clipped_high": 0.06, "p99": RGB.of(0.99), "frame_variance": 0.04,
+    }))
+    assert "no headroom" in blown and "highlight_rolloff 0.2-0.4" in blown
+
+    crushed = format_stats(STATS.model_copy(update={
+        "crushed_low": 0.09, "p99": RGB.of(0.99), "frame_variance": 0.04,
+    }))
+    assert "negative offset" in crushed
+
+    # A clip with nothing wrong pays no tokens for advice it does not need.
+    clean = format_stats(STATS.model_copy(update={
+        "p99": RGB.of(0.94), "frame_variance": 0.04,
+    }))
+    assert "What these measurements mean" not in clean
+
+
 # ---- plan_vibe ------------------------------------------------------------
 
 
@@ -110,8 +193,6 @@ def test_refine_prompt_includes_current_spec_and_demands_a_full_spec():
 
 
 def test_refine_system_prompt_extends_the_vibe_one():
-    from ragvid.vibe import SYSTEM
-
     p = FakeProvider()
     refine_spec(CANNED, "warmer", STATS, provider=p)
     assert p.system.startswith(SYSTEM)  # parameter semantics are still in scope
