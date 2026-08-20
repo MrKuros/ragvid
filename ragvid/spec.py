@@ -1,19 +1,61 @@
 """The grade spec — the contract every other module codes against.
 
-A GradeSpec is ~14 numbers describing a color grade. It is the *only* thing an
+A GradeSpec is 43 numbers describing a color grade. It is the *only* thing an
 LLM ever produces in this project; pixels are never sent to a model. The .cube
 LUT is a derived artifact baked from a spec, which is why refinement ("make it
 less blue") is possible at all — you can adjust numbers, not a baked LUT.
 
 The core is ASC CDL (slope/offset/power per channel + saturation), an industry
-interchange standard, plus temperature/tint/contrast.
+interchange standard, plus temperature/tint/contrast, an exposure stop, a
+tonal split (shadow/highlight tint + lift), six hue qualifiers, a highlight
+shoulder and a whole-look mix.
+
+`effects` is the odd one out: it is SPATIAL (blur, grain, vignette...), so it
+cannot live in a 3D LUT at all and `apply()` ignores it completely. render.py
+wires it into ffmpeg filters.
 
 EVALUATION ORDER IS LOAD-BEARING. Reviewers and reimplementations must match:
 
-    1. CDL       out = (x * slope + offset) ** power     [x clamped >= 0 first]
-    2. white bal temperature/tint applied as per-channel gains
-    3. saturation  lerp between luma and color
-    4. contrast  S-curve around `pivot`
+    0. src         the input, captured for the look_mix lerp at step 9
+    1. exposure    x *= 2**exposure      before CDL, so `offset` stays an
+                                         ABSOLUTE lift rather than being
+                                         scaled by exposure
+    2. CDL         x*slope + offset; clip(x, 0, None); x **= clip(power, 1e-6, None)
+    3. white bal   temperature/tint applied as per-channel gains
+    4. saturation  luma + (x - luma) * saturation
+    5. hue qualifiers  six smoothstep bands, chroma-gated, luma-preserving
+    6. tonal split shadow/highlight masks; tints are luma-stripped so tint and
+                   lift are exactly independent axes
+    7. rolloff     soft highlight shoulder (extended Reinhard)
+    8. contrast    S-curve around `pivot`
+    9. look_mix    out = clip(src,0,1) + (out - clip(src,0,1)) * look_mix
+   10. clip to [0, 1]
+
+THE CONSTRAINT THAT PINS THIS ORDER. `_smoothstep(u) = u*u*(3-2*u)` has
+derivative `6u(1-u)`, which goes NEGATIVE for u > 1 — feed the S-curve an
+out-of-range value and it is non-monotonic, i.e. brighter input maps to darker
+output, permanently baked into the .cube. That is why `_s_curve` clips its
+input and why the clip is NOT removable. Consequence: every op that can push a
+value above 1 sits before the soft clip, and the soft clip sits immediately
+before contrast.
+
+  - Rolloff is at 7, NOT at the end. The clip that actually destroys highlights
+    is the one inside the contrast step; a shoulder only at the final return
+    would leave it untouched. It is also after saturation, because saturation
+    > 1 can itself drive a channel above 1.
+  - Hue qualifiers come BEFORE the tonal split. A qualifier reads a hue angle,
+    so if the split injected its tint first, "teal shadows" would make the cyan
+    qualifier fire on every shadow in the frame.
+  - The tonal split comes AFTER global saturation: its tints are luma-stripped
+    so saturation cannot attenuate them, and its highlight lift is the last
+    thing that can exceed 1 — which is what the soft clip at 7 is there to catch.
+
+EVERY new step is guarded by an explicit identity check that skips it entirely.
+That is correctness, not micro-optimisation: `L + (x-L)*1.0` and
+`src + (x-src)*1.0` are not bitwise identities in floating point (~1 ulp), so
+an unguarded step would make `GradeSpec.identity().apply(grid) != grid` while
+still passing an atol=1e-6 test. The identity LUT hash gate would break
+silently and every saved grade would shift.
 
 All operations take and return float arrays in [0, 1] display space, shape
 (..., 3). Values are clipped to [0, 1] only at the very end.
@@ -33,6 +75,36 @@ LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float64)
 TEMP_FULL = 3000.0
 TEMP_GAIN = 0.12
 TINT_GAIN = 0.10
+
+# Luma at which the shadow and highlight masks meet. Deliberately NOT
+# `self.pivot`: coupling them would make a contrast-pivot move silently
+# retarget the split masks.
+SPLIT_CROSSOVER = 0.5
+
+# Hue qualifier band centres and half-width, in degrees.
+#
+# HUE_HALFWIDTH == the band spacing is not arbitrary. At any hue exactly two
+# bands are active with pre-smoothstep weights u and 1-u, and
+# _smoothstep(u) + _smoothstep(1-u) == 1 algebraically, so the six weights are
+# an EXACT partition of unity (measured: within 2e-15 of 1 over 1e4 hues). No
+# hue is unweighted, none is double-counted, and interpolation between adjacent
+# band settings is C1. Wrapping is free — it lives in the mod 360.
+HUE_CENTERS = np.array([0.0, 60.0, 120.0, 180.0, 240.0, 300.0], dtype=np.float64)
+HUE_HALFWIDTH = 60.0
+
+# Chroma below which hue qualifiers fade out. Mandatory, not a nicety: hue is
+# ill-conditioned near the neutral axis (d(hue)/d(channel) ~ 1/chroma) and the
+# neutral axis is the diagonal of the LUT cube. Without this gate a qualifier
+# tints every grey in the image and the whole grade reads as a colour cast.
+HUE_CHROMA_GATE = 0.15
+
+# The six band fields, in HUE_CENTERS order.
+HUE_FIELDS = ("hue_red", "hue_yellow", "hue_green", "hue_cyan", "hue_blue", "hue_magenta")
+
+# Width of the extended-Reinhard shoulder, in knee-relative units.
+SHOULDER_SPAN = 5.0
+
+_TOL = 1e-12
 
 
 class RGB(BaseModel):
@@ -57,6 +129,26 @@ class RGB(BaseModel):
         return cls(r=v, g=v, b=v)
 
 
+class HueBand(BaseModel):
+    """One hue qualifier. Same object-not-array reasoning as RGB."""
+
+    sat: float = Field(1.0, description="Saturation multiplier for this hue. 1.0 = unchanged.")
+    lum: float = Field(0.0, description="Luma offset for this hue. 0.0 = unchanged.")
+
+
+class EffectSpec(BaseModel):
+    """Spatial effects. NEVER applied by GradeSpec.apply and never baked into
+    the LUT — a 3D LUT is a per-pixel colour map and cannot express a blur.
+    render.py turns these into ffmpeg filters."""
+
+    denoise: float = Field(0.0, description="Temporal/spatial denoise strength, 0..1. 0 = off.")
+    glow: float = Field(0.0, description="Bloom on highlights, 0..1. 0 = off.")
+    softness: float = Field(0.0, description="Positive blurs, negative sharpens. -1..1. 0 = off.")
+    grain: float = Field(0.0, description="Film grain amount, 0..1. 0 = off.")
+    vignette: float = Field(0.0, description="Corner darkening, -1..1. Negative brightens corners. 0 = off.")
+    fringe: float = Field(0.0, description="Chromatic aberration, -1..1. 0 = off.")
+
+
 class GradeSpec(BaseModel):
     """A complete color grade. Serializes to the session file verbatim."""
 
@@ -68,6 +160,25 @@ class GradeSpec(BaseModel):
     tint: float = Field(0.0, description="Green/magenta axis. Negative = greener, positive = magenta. Typical range -1..1.")
     contrast: float = Field(0.0, description="S-curve strength, -1..1. 0 = unchanged, positive = more contrast.")
     pivot: float = Field(0.435, description="Tonal pivot the contrast S-curve rotates around.")
+
+    exposure: float = Field(0.0, description="Photographic stops applied before the CDL. 0.0 = unchanged, +1 = twice as bright.")
+    look_mix: float = Field(1.0, description="0..1 blend of the whole graded result back toward the source. 1.0 = full look.")
+    highlight_rolloff: float = Field(0.0, description="Soft highlight shoulder, 0..1. 0 = hard clip. Higher rolls off sooner and pulls whites below 1.")
+
+    shadow_tint: RGB = Field(default_factory=lambda: RGB.of(0.0), description="Colour pushed into shadows only. 0 = none. Luma-stripped, so it never changes brightness.")
+    highlight_tint: RGB = Field(default_factory=lambda: RGB.of(0.0), description="Colour pushed into highlights only. 0 = none. Luma-stripped, so it never changes brightness.")
+    shadow_lift: float = Field(0.0, description="Brightness offset applied to shadows only. 0 = unchanged.")
+    highlight_lift: float = Field(0.0, description="Brightness offset applied to highlights only. 0 = unchanged.")
+
+    hue_red: HueBand = Field(default_factory=HueBand, description="Qualifier for hues near 0 degrees (red).")
+    hue_yellow: HueBand = Field(default_factory=HueBand, description="Qualifier for hues near 60 degrees (yellow).")
+    hue_green: HueBand = Field(default_factory=HueBand, description="Qualifier for hues near 120 degrees (green).")
+    hue_cyan: HueBand = Field(default_factory=HueBand, description="Qualifier for hues near 180 degrees (cyan).")
+    hue_blue: HueBand = Field(default_factory=HueBand, description="Qualifier for hues near 240 degrees (blue).")
+    hue_magenta: HueBand = Field(default_factory=HueBand, description="Qualifier for hues near 300 degrees (magenta).")
+
+    effects: EffectSpec = Field(default_factory=EffectSpec, description="Spatial effects. Not part of the colour transform and never baked into the LUT.")
+
     rationale: str = Field("", description="One sentence explaining the look, for the user. Not used in math.")
 
     # ---- construction -----------------------------------------------------
@@ -79,6 +190,9 @@ class GradeSpec(BaseModel):
 
     def is_identity(self, tol: float = 1e-9) -> bool:
         i = GradeSpec.identity()
+        # Plain field-wise comparison. Note look_mix == 0 also returns the
+        # source, but a zero mix *with other fields set* is a state worth
+        # reporting as non-identity, so it is not special-cased.
         return (
             np.allclose(self.slope.as_array(), i.slope.as_array(), atol=tol)
             and np.allclose(self.offset.as_array(), i.offset.as_array(), atol=tol)
@@ -87,6 +201,31 @@ class GradeSpec(BaseModel):
             and abs(self.temperature) < tol
             and abs(self.tint) < tol
             and abs(self.contrast) < tol
+            and abs(self.exposure) < tol
+            and abs(self.look_mix - 1.0) < tol
+            and abs(self.highlight_rolloff) < tol
+            and np.allclose(self.shadow_tint.as_array(), 0.0, atol=tol)
+            and np.allclose(self.highlight_tint.as_array(), 0.0, atol=tol)
+            and abs(self.shadow_lift) < tol
+            and abs(self.highlight_lift) < tol
+            and not self.has_hue_qualifiers(tol)
+            and self.effects == i.effects
+        )
+
+    def has_hue_qualifiers(self, tol: float = 1e-9) -> bool:
+        """True if any hue band is off identity. lut.py uses this to pick a
+        LUT size; apply() uses it to skip the band pass entirely."""
+        return any(
+            abs(b.sat - 1.0) > tol or abs(b.lum) > tol
+            for b in (getattr(self, f) for f in HUE_FIELDS)
+        )
+
+    def _has_tonal_split(self, tol: float = 1e-9) -> bool:
+        return (
+            np.any(np.abs(self.shadow_tint.as_array()) > tol)
+            or np.any(np.abs(self.highlight_tint.as_array()) > tol)
+            or abs(self.shadow_lift) > tol
+            or abs(self.highlight_lift) > tol
         )
 
     # ---- evaluation -------------------------------------------------------
@@ -95,29 +234,70 @@ class GradeSpec(BaseModel):
         """Apply this grade to an array of shape (..., 3), float in [0, 1].
 
         Pure and vectorized: used both to bake the LUT and to unit-test the
-        math directly without going through ffmpeg.
+        math directly without going through ffmpeg. `self.effects` is spatial
+        and is deliberately not touched here.
         """
         x = np.asarray(rgb, dtype=np.float64)
         if x.shape[-1] != 3:
             raise ValueError(f"expected trailing dimension 3, got shape {x.shape}")
 
-        # 1. CDL. Clamp before the power step: a fractional power of a negative
+        # 0. Keep the input for the look_mix lerp at step 9.
+        src = x
+
+        # 1. Exposure, in stops, before the CDL so `offset` stays an absolute lift.
+        if abs(self.exposure) > _TOL:
+            x = x * (2.0 ** self.exposure)
+
+        # 2. CDL. Clamp before the power step: a fractional power of a negative
         #    number is NaN, and offset can legitimately push values below zero.
         x = x * self.slope.as_array() + self.offset.as_array()
         x = np.clip(x, 0.0, None)
         power = np.clip(self.power.as_array(), 1e-6, None)
         x = np.power(x, power)
 
-        # 2. White balance as channel gains.
+        # 3. White balance as channel gains.
         x = x * self._wb_gains()
 
-        # 3. Saturation around Rec.709 luma.
+        # 4. Saturation around Rec.709 luma.
         luma = np.sum(x * LUMA, axis=-1, keepdims=True)
         x = luma + (x - luma) * self.saturation
 
-        # 4. Contrast S-curve around the pivot.
+        # 5. Hue qualifiers. Guarded: the luma round trip inside costs ~1 ulp,
+        #    so an unguarded pass would break the identity hash silently.
+        if self.has_hue_qualifiers():
+            bands = [getattr(self, f) for f in HUE_FIELDS]
+            x = _apply_hue_bands(
+                x,
+                np.array([b.sat for b in bands], dtype=np.float64),
+                np.array([b.lum for b in bands], dtype=np.float64),
+            )
+
+        # 6. Tonal split. Exact even unguarded (x + 0.0 == x); guarded anyway to
+        #    skip a whole luma pass.
+        if self._has_tonal_split():
+            x = _apply_tonal_split(
+                x,
+                self.shadow_tint.as_array(), self.shadow_lift,
+                self.highlight_tint.as_array(), self.highlight_lift,
+            )
+
+        # 7. Highlight shoulder. At rolloff 0 this inserts literally no code and
+        #    the hard clip inside step 8 stays the sole range enforcement — that
+        #    is what makes rolloff=0 bit-for-bit identical to the old behaviour.
+        if self.highlight_rolloff > 1e-9:  # epsilon, not 0: knee -> 1 divides by ~0
+            x = _rolloff(x, self.highlight_rolloff)
+
+        # 8. Contrast S-curve around the pivot. Its np.clip is now effectively
+        #    only the floor guard when rolloff is on, but it is NOT removable:
+        #    _s_curve is non-monotonic on out-of-range input.
         if abs(self.contrast) > 1e-9:
             x = _s_curve(np.clip(x, 0.0, 1.0), self.contrast, self.pivot)
+
+        # 9. Mix the whole look back toward the source. Outermost by design.
+        #    Guarded: src + (x - src) * 1.0 is not a bitwise identity.
+        if self.look_mix < 1.0:
+            s = np.clip(src, 0.0, 1.0)
+            x = s + (x - s) * self.look_mix
 
         return np.clip(x, 0.0, 1.0)
 
@@ -135,7 +315,8 @@ class GradeSpec(BaseModel):
 
         `rationale` is included so the model explains itself in-band; every
         property is required and additionalProperties is False, which is what
-        Groq's strict mode actually enforces.
+        Groq's strict mode actually enforces. A property that is present but
+        NOT required is rejected outright, so the two lists must stay in step.
         """
         num = {"type": "number"}
         rgb = {
@@ -144,16 +325,35 @@ class GradeSpec(BaseModel):
             "required": ["r", "g", "b"],
             "additionalProperties": False,
         }
+        hue = {
+            "type": "object",
+            "properties": {"sat": num, "lum": num},
+            "required": ["sat", "lum"],
+            "additionalProperties": False,
+        }
+        effect_keys = list(EffectSpec.model_fields)
+        effects = {
+            "type": "object",
+            "properties": {k: num for k in effect_keys},
+            "required": effect_keys,
+            "additionalProperties": False,
+        }
+        props = {
+            "slope": rgb, "offset": rgb, "power": rgb,
+            "saturation": num, "temperature": num, "tint": num,
+            "contrast": num, "pivot": num,
+            "exposure": num, "look_mix": num, "highlight_rolloff": num,
+            "shadow_tint": rgb, "highlight_tint": rgb,
+            "shadow_lift": num, "highlight_lift": num,
+            "hue_red": hue, "hue_yellow": hue, "hue_green": hue,
+            "hue_cyan": hue, "hue_blue": hue, "hue_magenta": hue,
+            "effects": effects,
+            "rationale": {"type": "string"},
+        }
         return {
             "type": "object",
-            "properties": {
-                "slope": rgb, "offset": rgb, "power": rgb,
-                "saturation": num, "temperature": num, "tint": num,
-                "contrast": num, "pivot": num,
-                "rationale": {"type": "string"},
-            },
-            "required": ["slope", "offset", "power", "saturation", "temperature",
-                         "tint", "contrast", "pivot", "rationale"],
+            "properties": props,
+            "required": list(props),
             "additionalProperties": False,
         }
 
@@ -172,7 +372,128 @@ class GradeSpec(BaseModel):
         d["tint"] = float(np.clip(d["tint"], -2.0, 2.0))
         d["contrast"] = float(np.clip(d["contrast"], -1.0, 1.0))
         d["pivot"] = float(np.clip(d["pivot"], 0.05, 0.95))
-        return GradeSpec(**d)
+
+        d["exposure"] = float(np.clip(d["exposure"], -4.0, 4.0))
+        d["look_mix"] = float(np.clip(d["look_mix"], 0.0, 1.0))
+        d["highlight_rolloff"] = float(np.clip(d["highlight_rolloff"], 0.0, 1.0))
+
+        # Tints are added straight onto pixel values, so their sane range is
+        # much tighter than a gain's.
+        for k in ("shadow_tint", "highlight_tint"):
+            d[k] = {c: float(np.clip(v, -0.5, 0.5)) for c, v in d[k].items()}
+        d["shadow_lift"] = float(np.clip(d["shadow_lift"], -0.5, 0.5))
+        d["highlight_lift"] = float(np.clip(d["highlight_lift"], -0.5, 0.5))
+
+        for f in HUE_FIELDS:
+            d[f] = {
+                "sat": float(np.clip(d[f]["sat"], 0.0, 4.0)),
+                "lum": float(np.clip(d[f]["lum"], -0.5, 0.5)),
+            }
+
+        e = d["effects"]
+        for k in ("denoise", "glow", "grain"):
+            e[k] = float(np.clip(e[k], 0.0, 1.0))
+        for k in ("softness", "vignette", "fringe"):
+            e[k] = float(np.clip(e[k], -1.0, 1.0))
+
+        # Non-finite input (a model emitting 1e400, or NaN via a hand-edited
+        # session) would survive every clip above and poison the LUT.
+        return GradeSpec(**_scrub(d, GradeSpec.identity().model_dump()))
+
+
+def _scrub(d: dict, ident: dict) -> dict:
+    """Replace any non-finite number with its identity value, recursively."""
+    for k, v in d.items():
+        if isinstance(v, dict):
+            _scrub(v, ident[k])
+        elif isinstance(v, float) and not np.isfinite(v):
+            d[k] = ident[k]
+    return d
+
+
+# ---- tonal split ----------------------------------------------------------
+
+
+def _apply_tonal_split(
+    x: np.ndarray, s_tint: np.ndarray, s_lift: float,
+    h_tint: np.ndarray, h_lift: float,
+) -> np.ndarray:
+    """Shadow/highlight tint + lift with two disjoint smoothstep masks.
+
+    Luma is a LINEAR functional, so subtracting a tint's own luma makes it
+    exactly chroma-only:  L(x + (t - L(t))) == L(x)  and  L(x + lift) ==
+    L(x) + lift. Tint moves colour and nothing else; lift moves brightness and
+    nothing else. Two knobs, two axes, no crosstalk — exactly, not approximately.
+    """
+    # Clip first so a blown highlight reads as 1.0 rather than running off the
+    # top of the mask.
+    L = np.sum(np.clip(x, 0.0, 1.0) * LUMA, axis=-1, keepdims=True)
+    lo, hi = SPLIT_CROSSOVER, 1.0 - SPLIT_CROSSOVER  # both 0.5; constants, never 0
+    w_s = 1.0 - _smoothstep(np.clip(L / lo, 0.0, 1.0))       # 1 at black, 0 at L >= 0.5
+    w_h = _smoothstep(np.clip((L - SPLIT_CROSSOVER) / hi, 0.0, 1.0))  # 0 at L <= 0.5
+    ts = s_tint - float(s_tint @ LUMA)
+    th = h_tint - float(h_tint @ LUMA)
+    return x + w_s * (ts + s_lift) + w_h * (th + h_lift)
+
+
+# ---- hue qualifiers -------------------------------------------------------
+
+
+def _hue_chroma(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(hue in degrees, chroma) via standard HSV sextants. Branchless, and
+    0/0 is impossible: the divisor is forced to 1 wherever chroma is zero."""
+    r, g, b = x[..., 0], x[..., 1], x[..., 2]
+    mx = x.max(axis=-1)
+    c = mx - x.min(axis=-1)
+    safe = np.where(c > _TOL, c, 1.0)
+    h = 60.0 * np.where(
+        mx == r,
+        ((g - b) / safe) % 6.0,
+        np.where(mx == g, (b - r) / safe + 2.0, (r - g) / safe + 4.0),
+    )
+    return np.where(c > _TOL, h, 0.0), c
+
+
+def _apply_hue_bands(x: np.ndarray, sats: np.ndarray, lums: np.ndarray) -> np.ndarray:
+    """Six smoothstepped triangular hue bands, chroma-gated, luma-preserving."""
+    h, c = _hue_chroma(x)
+    d = ((h[..., None] - HUE_CENTERS + 180.0) % 360.0) - 180.0
+    w = _smoothstep(np.clip(1.0 - np.abs(d) / HUE_HALFWIDTH, 0.0, 1.0))  # (..., 6)
+    gate = _smoothstep(np.clip(c / HUE_CHROMA_GATE, 0.0, 1.0))
+
+    # sum(w) == 1, so this interpolates between adjacent bands rather than
+    # accumulating them.
+    s = 1.0 + gate * ((w * sats).sum(axis=-1) - 1.0)
+    o = gate * (w * lums).sum(axis=-1)
+    L = np.sum(x * LUMA, axis=-1, keepdims=True)
+    return L + (x - L) * s[..., None] + o[..., None]
+
+
+# ---- highlight rolloff ----------------------------------------------------
+
+
+def _rolloff(x: np.ndarray, rolloff: float) -> np.ndarray:
+    """Extended-Reinhard highlight shoulder: monotone, C1 at the knee, max 1.
+
+    NO soft shoulder can map 1 -> 1. If f is monotone, f(x) == x on [0,1] and
+    f <= 1 everywhere, then f is identically 1 above 1 — that IS hard clipping.
+    A real shoulder must pull legal whites below 1, so rolloff MUST default to
+    0 and 0 MUST mean today's hard clip. Measured f(1) = 0.976 / 0.928 / 0.856
+    / 0.760 at rolloff 0.1 / 0.3 / 0.6 / 1.0. That white loss is unavoidable.
+
+    g'(y) = (1 + 2y/W^2 + y^2/W^2) / (1+y)^2 > 0 everywhere, so the curve is
+    strictly increasing. This matters more than it looks: a 3D LUT baked from a
+    non-monotone curve INVERTS highlights.
+
+    Motivation, measured on a 4096-step ramp: slope=1.3 — inside the 0.7..1.4
+    range the model is told is sane — pins 23.1% of the ramp at pure white;
+    slope=1.6 pins 37.5%. Every "brighter" prompt has been doing this.
+    """
+    knee = 1.0 - 0.5 * float(rolloff)
+    s = 1.0 - knee  # > 0: the caller gated on rolloff > 0
+    y = np.maximum(x - knee, 0.0) / s  # maximum() first: y = -1 would divide badly
+    g = y * (1.0 + y / SHOULDER_SPAN**2) / (1.0 + y)
+    return np.where(x <= knee, x, knee + s * np.minimum(g, 1.0))
 
 
 # ---- contrast helpers -----------------------------------------------------
@@ -211,3 +532,72 @@ def _s_curve(x: np.ndarray, contrast: float, pivot: float) -> np.ndarray:
     target = _smoothstep(u) if c > 0 else _inv_smoothstep(u)
     u2 = u + (target - u) * abs(c)
     return _pivot_unwarp(u2, pivot)
+
+
+# ---- self-check -----------------------------------------------------------
+
+
+def _self_check() -> None:
+    """`python -m ragvid.spec` — the properties the evaluation order depends on.
+
+    Not a substitute for the test suite; these are the claims that are easy to
+    break with an innocent-looking reordering and that a green suite would not
+    catch (see the atol=1e-6 trap in the module docstring).
+    """
+    import hashlib
+
+    from .lut import _grid
+
+    grid = _grid(33)
+    table = GradeSpec.identity().apply(grid)
+    # The hard gate: identity must be BIT-identical, not merely close.
+    assert hashlib.sha256(np.ascontiguousarray(table).tobytes()).hexdigest() == (
+        "517467be3ba6b7a8afe71a05c847061dc597f0ea92e41b422164b579fbc74291"
+    ), "identity LUT changed -- every saved grade just shifted"
+    assert np.array_equal(table, grid)
+    assert GradeSpec.identity().is_identity()
+    assert not GradeSpec(exposure=3.0).is_identity()
+    assert not GradeSpec(effects=EffectSpec(grain=0.4)).is_identity()
+
+    # Hue band weights are an exact partition of unity, so no hue is unweighted
+    # and none is double-counted.
+    h = np.linspace(0.0, 360.0, 10001)
+    d = ((h[..., None] - HUE_CENTERS + 180.0) % 360.0) - 180.0
+    assert np.abs(_smoothstep(np.clip(1.0 - np.abs(d) / HUE_HALFWIDTH, 0, 1)).sum(-1) - 1).max() < 1e-14
+
+    # Tonal split masks: sum <= 1 and DISJOINT support, so midtones cannot be
+    # double-counted even in principle.
+    L = np.linspace(0.0, 1.0, 10001)
+    w_s = 1.0 - _smoothstep(np.clip(L / SPLIT_CROSSOVER, 0, 1))
+    w_h = _smoothstep(np.clip((L - SPLIT_CROSSOVER) / (1 - SPLIT_CROSSOVER), 0, 1))
+    assert (w_s + w_h).max() <= 1.0 and not np.any((w_s > 0) & (w_h > 0))
+
+    # Tint is exactly chroma-only, lift exactly luma-only. No crosstalk.
+    rng = np.random.default_rng(0)
+    x = rng.random((5000, 3))
+    only_tint = _apply_tonal_split(x, np.array([0.1, -0.05, 0.2]), 0.0, np.array([-0.1, 0.0, 0.3]), 0.0)
+    assert np.abs((only_tint - x) @ LUMA).max() < 1e-15
+    only_lift = _apply_tonal_split(x, np.zeros(3), 0.07, np.zeros(3), -0.03) - x
+    assert np.abs(only_lift - (only_lift @ LUMA)[:, None]).max() < 1e-15
+
+    # A non-monotone shoulder would INVERT highlights in the baked .cube.
+    ramp = np.linspace(0.0, 4.0, 400001)
+    for r, expect in ((0.1, 0.976), (0.3, 0.928), (0.6, 0.856), (1.0, 0.760)):
+        y = _rolloff(ramp, r)
+        assert np.all(np.diff(y) >= 0.0) and abs(y.max() - 1.0) < 1e-12
+        assert abs(_rolloff(np.array([1.0]), r)[0] - expect) < 5e-4  # unavoidable white loss
+
+    # Nothing non-finite may reach the LUT, at any sanitized setting.
+    hot = GradeSpec(
+        slope=RGB(r=9e9, g=-3.0, b=float("nan")), offset=RGB.of(-5.0), power=RGB.of(0.0),
+        saturation=float("inf"), exposure=99.0, contrast=-2.0, highlight_rolloff=5.0,
+        look_mix=-1.0, shadow_tint=RGB.of(9.0), highlight_lift=float("-inf"),
+        hue_red=HueBand(sat=-4.0, lum=7.0), effects=EffectSpec(glow=float("nan")),
+    ).sanitize()
+    assert np.all(np.isfinite(hot.apply(grid)))
+    assert hot.apply(grid).min() >= 0.0 and hot.apply(grid).max() <= 1.0
+    print("spec self-check OK")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    _self_check()

@@ -25,10 +25,10 @@ import subprocess
 
 import numpy as np
 from PIL import Image
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ragvid.platform import ffmpeg, ffprobe
-from ragvid.spec import RGB
+from ragvid.spec import LUMA, RGB
 
 # sRGB piecewise transfer function constants (IEC 61966-2-1).
 _A = 0.055
@@ -54,7 +54,17 @@ def linear_to_srgb(x: np.ndarray | float) -> np.ndarray:
     return np.where(x <= _LIN_CUT, x * 12.92, (1 + _A) * x ** (1 / 2.4) - _A)
 
 
+# Values within this of the ends of the range count as clipped / crushed. One
+# 8-bit code value, so it means "already at the rail", not "nearly there".
+_RAIL = 1.5 / 255.0
+
+
 class ClipStats(BaseModel):
+    """Measured description of a clip. Every field after `duration` was added
+    later and MUST keep a default: three test modules construct ClipStats by
+    keyword, and old session files on disk do not have the new keys either.
+    """
+
     mean: RGB  # per-channel mean, sRGB display space, 0-1
     std: RGB  # per-channel std, sRGB display space
     saturation: float  # mean chroma 0-1
@@ -63,31 +73,88 @@ class ClipStats(BaseModel):
     height: int
     duration: float
 
+    # Percentiles say what mean/std cannot: whether the blacks sit at 0 or at
+    # 0.08, and how far the real white point is from 1.
+    p1: RGB = Field(default_factory=lambda: RGB.of(0.0))  # per-channel 1st percentile
+    p50: RGB = Field(default_factory=lambda: RGB.of(0.0))  # per-channel median
+    p99: RGB = Field(default_factory=lambda: RGB.of(0.0))  # per-channel 99th percentile
 
-def _frame_stats(rgb8: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
-    """(mean, std, saturation) for one uint8 RGB frame, in display space."""
+    clipped_high: float = 0.0  # fraction of pixels with any channel at the top rail
+    crushed_low: float = 0.0  # fraction of pixels with any channel at the bottom rail
+    dominant_hue: float = 0.0  # chroma-weighted circular mean hue, degrees 0-360
+    frame_variance: float = 0.0  # spatial variance of luma within a frame
+
+
+def _frame_stats(rgb8: np.ndarray) -> dict:
+    """Statistics for one uint8 RGB frame, in display space.
+
+    NOTE: the caller has already downscaled the frame to _ANALYSIS_WIDTH px, so
+    anything sensitive to spatial frequency -- frame_variance especially, and
+    the clipped/crushed counts to a lesser degree -- is a PROXY for the full-res
+    value, not the absolute truth. Downscaling averages neighbours, which pulls
+    a few isolated blown pixels back below the rail and shrinks fine-detail
+    variance. Good enough to rank clips and to tell a model "this is flat";
+    not good enough to certify legal levels for delivery.
+    """
     v = np.asarray(rgb8, dtype=np.float64).reshape(-1, 3) / 255.0
     hi = v.max(axis=1)
     lo = v.min(axis=1)
-    sat = float(np.mean((hi - lo) / np.maximum(hi, _EPS)))
-    return v.mean(axis=0), v.std(axis=0), sat
+    chroma = hi - lo
+
+    # Chroma-weighted circular mean hue. Returned as a vector, not an angle:
+    # angles do not median across frames (179 and -179 average to 0, the
+    # opposite hue), so the wrap-around has to be resolved after the median.
+    h = np.radians(_hue_deg(v, hi, chroma))
+    hue_vec = np.array([np.sum(chroma * np.cos(h)), np.sum(chroma * np.sin(h))]) / len(v)
+
+    luma = v @ LUMA
+    return {
+        "mean": v.mean(axis=0),
+        "std": v.std(axis=0),
+        "saturation": float(np.mean(chroma / np.maximum(hi, _EPS))),
+        "p1": np.percentile(v, 1, axis=0),
+        "p50": np.percentile(v, 50, axis=0),
+        "p99": np.percentile(v, 99, axis=0),
+        "clipped_high": float(np.mean(hi >= 1.0 - _RAIL)),
+        "crushed_low": float(np.mean(lo <= _RAIL)),
+        "hue_vec": hue_vec,
+        "frame_variance": float(luma.var()),
+    }
+
+
+def _hue_deg(v: np.ndarray, hi: np.ndarray, chroma: np.ndarray) -> np.ndarray:
+    """HSV hue in degrees for (N, 3) display-space pixels. 0 where chroma is 0."""
+    r, g, b = v[:, 0], v[:, 1], v[:, 2]
+    safe = np.where(chroma > _EPS, chroma, 1.0)  # never 0/0
+    h = 60.0 * np.where(
+        hi == r,
+        ((g - b) / safe) % 6.0,
+        np.where(hi == g, (b - r) / safe + 2.0, (r - g) / safe + 4.0),
+    )
+    return np.where(chroma > _EPS, h, 0.0)
 
 
 def _stats_from_frames(
     frames: list[np.ndarray], width: int, height: int, duration: float
 ) -> ClipStats:
     per = [_frame_stats(f) for f in frames]
-    means = np.median([p[0] for p in per], axis=0)
-    stds = np.median([p[1] for p in per], axis=0)
-    sat = float(np.median([p[2] for p in per]))
+    med = {k: np.median([p[k] for p in per], axis=0) for k in per[0]}
+    hx, hy = med["hue_vec"]
     return ClipStats(
-        mean=RGB(r=means[0], g=means[1], b=means[2]),
-        std=RGB(r=stds[0], g=stds[1], b=stds[2]),
-        saturation=sat,
+        mean=RGB(r=med["mean"][0], g=med["mean"][1], b=med["mean"][2]),
+        std=RGB(r=med["std"][0], g=med["std"][1], b=med["std"][2]),
+        saturation=float(med["saturation"]),
         frames_sampled=len(frames),
         width=width,
         height=height,
         duration=duration,
+        p1=RGB(r=med["p1"][0], g=med["p1"][1], b=med["p1"][2]),
+        p50=RGB(r=med["p50"][0], g=med["p50"][1], b=med["p50"][2]),
+        p99=RGB(r=med["p99"][0], g=med["p99"][1], b=med["p99"][2]),
+        clipped_high=float(med["clipped_high"]),
+        crushed_low=float(med["crushed_low"]),
+        dominant_hue=float(np.degrees(np.arctan2(hy, hx)) % 360.0),
+        frame_variance=float(med["frame_variance"]),
     )
 
 

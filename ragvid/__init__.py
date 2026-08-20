@@ -12,7 +12,7 @@ derived from them. Build a UI against this, not against the modules underneath.
 
 Everything below `Project` is a pure layer with no I/O policy of its own:
 
-    spec      GradeSpec -- the 14 numbers, and the math that applies them
+    spec      GradeSpec -- the 43 numbers, and the math that applies them
     probe     clip -> ClipStats (sampled frames, median statistics)
     match     (source, reference) -> GradeSpec, closed form, no model
     vibe      words -> GradeSpec, via a provider
@@ -37,7 +37,7 @@ from .errors import (
     SessionNotFound,
 )
 from .project import Project, available_providers
-from .spec import RGB, GradeSpec
+from .spec import RGB, EffectSpec, GradeSpec, HueBand
 
 __version__ = "0.1.0"
 
@@ -45,6 +45,8 @@ __all__ = [
     "Project",
     "GradeSpec",
     "RGB",
+    "HueBand",
+    "EffectSpec",
     "available_providers",
     # errors, so a front end can import everything it branches on from one place
     "RagvidError",
