@@ -74,3 +74,44 @@ def test_flat_source_does_not_blow_up(std):
         assert np.all(np.isfinite(arr))
     assert spec.slope.r == 1.0 and spec.saturation == 1.0
     assert np.all(np.isfinite(spec.apply(sample(src))))
+
+
+def _pinned_white(spec):
+    """Fraction of a luminance ramp this grade flattens to exactly 1.0."""
+    ramp = np.linspace(0.0, 1.0, 4096)[:, None].repeat(3, axis=1)
+    return float((spec.apply(ramp).max(axis=-1) >= 1.0 - 1e-9).mean())
+
+
+def test_bright_reference_does_not_hard_clip_the_highlights():
+    """Matching a bright reference must not flatten the top of the range to paper white.
+
+    Regression: this path runs with no LLM at all, so nothing downstream was ever
+    going to notice. Before highlight_rolloff was solved for here, matching
+    ref_tvd.png onto ironman.gif produced slope 1.43 and pinned 28.9% of a
+    4096-step ramp at exactly 1.0 -- a third of the tonal range as detail-free
+    white, in the one code path that is meant to be pure measurement.
+    """
+    src = stats((0.25, 0.22, 0.20), (0.12, 0.12, 0.12))
+    ref = stats((0.55, 0.55, 0.58), (0.20, 0.20, 0.20))
+    spec = match_reference(src, ref)
+
+    assert spec.slope.as_array().max() > 1.0, "test needs a brightening match to be meaningful"
+    assert spec.highlight_rolloff > 0.0
+    # Not exactly zero: the shoulder is solved so the PEAK input lands exactly on
+    # 1.0, so the single topmost ramp sample legitimately reads as white. What
+    # must not survive is a whole flattened region -- 28.9% before, 1 sample now.
+    assert _pinned_white(spec) < 0.01
+    # White loss is the unavoidable price, and it is real: no monotone shoulder
+    # can be the identity on [0,1] and still cap at 1 (that IS hard clipping), so
+    # legal whites must come down. Bound it rather than pretending it is free.
+    assert spec.apply(np.ones((1, 3))).max() > 0.85
+
+
+def test_darkening_match_leaves_rolloff_alone():
+    """No overshoot, no shoulder -- and therefore no white loss to pay for."""
+    src = stats((0.60, 0.60, 0.60), (0.20, 0.20, 0.20))
+    ref = stats((0.30, 0.30, 0.30), (0.10, 0.10, 0.10))
+    spec = match_reference(src, ref)
+
+    assert spec.slope.as_array().max() <= 1.0
+    assert spec.highlight_rolloff == 0.0

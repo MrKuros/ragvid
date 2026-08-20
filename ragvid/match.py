@@ -50,10 +50,27 @@ def match_reference(src: "ClipStats", ref: "ClipStats") -> GradeSpec:
         aim = luma_ref + (m_ref - luma_ref) / sat
     offset = aim - slope * m_src
 
+    # Protect the highlights this grade is about to create. A reference match
+    # routinely lands slope well above 1 -- matching a bright reference onto
+    # darker footage is the ordinary case, not the extreme one -- and with
+    # highlight_rolloff at its default 0 the result hard-clips. Measured on
+    # test_files/ref_tvd.png against ironman.gif: slope 1.43, and 28.9% of a
+    # 4096-step luminance ramp pinned at exactly 1.0, i.e. a third of the tonal
+    # range flattened to detail-free white.
+    #
+    # power is 1 and temperature/tint are 0 on this path, so the largest value
+    # the CDL can hand downstream is simply max(slope + offset). The shoulder
+    # maps inputs up to 1 + 2*rolloff back into range (knee = 1 - rolloff/2,
+    # white point = knee + 5*(1 - knee)), so solve for the peak this grade
+    # actually produces rather than picking a constant and hoping.
+    peak = float(np.max(slope + offset))
+    rolloff = float(np.clip((peak - 1.0) / 2.0, 0.0, 1.0))
+
     warmth = "warmer" if slope[0] > slope[2] else "cooler"
     return GradeSpec(
         slope=RGB(r=slope[0], g=slope[1], b=slope[2]),
         offset=RGB(r=offset[0], g=offset[1], b=offset[2]),
+        highlight_rolloff=rolloff,
         saturation=sat,
         rationale=(
             f"Matched reference: {warmth}, "
