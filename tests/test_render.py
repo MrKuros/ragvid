@@ -239,3 +239,83 @@ def test_even_dimension_source_is_not_cropped(tmp_path):
     render.render_video(SAMPLE, identity_cube(tmp_path / "id.cube"), out)
     stream = ffprobe(out)["streams"][0]
     assert (stream["width"], stream["height"]) == (W, H)
+
+
+# ---- the grade that reaches the pixels ------------------------------------
+# Everything above tests plumbing. This measures the actual thing a user sees:
+# a .cube baked from a spec, pushed through ffmpeg's own lut3d, read back as
+# 8-bit code values. It exists because "the LUT math is right" and "the render
+# is right" have been separately true here while the pair was wrong.
+
+def ramp_png(path: Path, w: int = 256, h: int = 32) -> str:
+    """A horizontal 0..255 grey ramp -- one pixel column per code value."""
+    row = np.arange(w, dtype=np.uint8)
+    Image.fromarray(np.repeat(np.repeat(row[None, :, None], h, 0), 3, 2)).save(path)
+    return str(path)
+
+
+def _pinned_white_fraction(tmp_path: Path, rolloff: float) -> float:
+    from ragvid.lut import bake_cube
+    from ragvid.spec import GradeSpec, RGB
+
+    cube = bake_cube(
+        GradeSpec(slope=RGB.of(1.6), highlight_rolloff=rolloff),
+        str(tmp_path / f"r{rolloff}.cube"),
+    )
+    out = str(tmp_path / f"r{rolloff}.png")
+    render.render_frame(ramp_png(tmp_path / "ramp.png"), cube, out)
+    a = np.asarray(Image.open(out).convert("RGB"), dtype=np.uint8)
+    return float(np.count_nonzero(a[..., 0] == 255)) / a[..., 0].size
+
+
+def test_rolloff_survives_the_round_trip_through_ffmpeg(tmp_path):
+    """slope=1.6 welds 37.5% of a ramp to pure white; the shoulder recovers it.
+
+    Measured through the real filter chain, so it also covers ffmpeg's
+    tetrahedral interpolation of the baked cube, not just spec.apply().
+    """
+    hard = _pinned_white_fraction(tmp_path, 0.0)
+    soft = _pinned_white_fraction(tmp_path, 1.0)
+    assert hard == pytest.approx(0.375, abs=0.01), hard   # today's behaviour, intact
+    assert soft == 0.0, soft
+
+    # and the recovered range carries real detail rather than a flat shelf.
+    # Above the old clip point (input 160/255) the hard-clipped render holds a
+    # single code value; the shoulder holds a monotone gradient instead.
+    def top_levels(name):
+        a = np.asarray(Image.open(tmp_path / name).convert("RGB"), dtype=int)
+        return a[0, 160:, 0]
+
+    hard_top, soft_top = top_levels("r0.0.png"), top_levels("r1.0.png")
+    assert list(np.unique(hard_top)) == [255]             # 96 columns, one value
+    assert np.all(np.diff(soft_top) >= 0)                 # monotone: no inversion
+    assert len(np.unique(soft_top)) > 20, np.unique(soft_top)
+    assert soft_top.max() < 255                           # the unavoidable white loss
+
+
+def test_baked_grade_matches_spec_apply_through_ffmpeg(tmp_path):
+    """The whole path -- spec -> .cube -> ffmpeg lut3d -> 8-bit -- within a few
+    code values of the exact math. Catches a wrong-way LUT axis order or a
+    colour-range conversion sneaking into the filter chain."""
+    from ragvid.lut import bake_cube
+    from ragvid.spec import GradeSpec, HueBand, RGB
+
+    spec = GradeSpec(slope=RGB(r=1.15, g=1.0, b=0.9), saturation=1.2,
+                     contrast=0.3, exposure=0.2, highlight_rolloff=0.3,
+                     shadow_tint=RGB(r=0.0, g=0.03, b=0.05),
+                     hue_red=HueBand(sat=0.7), hue_blue=HueBand(sat=1.25))
+    cube = bake_cube(spec, str(tmp_path / "look.cube"))
+
+    src = tmp_path / "src.png"
+    rng = np.random.default_rng(3)
+    pix = rng.integers(0, 256, size=(64, 64, 3), dtype=np.uint8)
+    Image.fromarray(pix).save(src)
+
+    out = str(tmp_path / "graded.png")
+    render.render_frame(str(src), cube, out)
+    got = np.asarray(Image.open(out).convert("RGB"), dtype=float)
+    want = spec.apply(pix.astype(float) / 255.0) * 255.0
+
+    err = np.abs(got - want).max()
+    assert err < 6.0, f"max {err:.2f} code values off the exact grade"
+    assert np.abs(got - want).mean() < 1.0
