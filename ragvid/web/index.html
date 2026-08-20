@@ -112,10 +112,16 @@
   details.manual summary::-webkit-details-marker { display:none; }
   details.manual summary::before { content:"▸ "; }
   details.manual[open] summary::before { content:"▾ "; }
-  .sliders { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+  .sliders { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
              gap:8px 26px; padding:12px 2px 4px; }
-  .slider { display:grid; grid-template-columns:88px 1fr 46px; align-items:center;
+  .slider { display:grid; grid-template-columns:120px 1fr 46px; align-items:center;
             gap:10px; font-size:13px; }
+  /* A range input's min-content width is ~130px and a 1fr track will not
+     shrink below it, so without this the rows overflow their grid cell and the
+     value collides with the next label. */
+  .slider input { min-width:0; width:100%; }
+  .slider input[type=color] { height:24px; padding:0; background:none;
+                              border:1px solid var(--line); border-radius:5px; }
   .slider span:first-child { color:var(--dim); }
   .slider output { font-variant-numeric:tabular-nums; text-align:right; color:var(--dim); }
 
@@ -206,6 +212,15 @@
 
     <p class="said" id="said"></p>
 
+    <!-- "Too much" is the most common note. Answering it used to mean
+         re-prompting; now it is one slider, outside the disclosure. -->
+    <div class="bar" id="strengthRow" hidden>
+      <span>Strength</span>
+      <input type="range" id="strength" min="0" max="1" step="0.01" value="1"
+             aria-label="Strength of the whole look">
+      <span class="time" id="strengthOut">100%</span>
+    </div>
+
     <div id="histWrap" hidden>
       <div class="histhead">What you asked for</div>
       <div class="hist" id="hist"></div>
@@ -226,7 +241,7 @@
 
     <details class="manual" id="manual">
       <summary>Adjust manually</summary>
-      <div class="sliders" id="sliders"></div>
+      <div id="sliders"></div>
     </details>
   </div>
 </section>
@@ -252,7 +267,7 @@ const $ = (id) => document.getElementById(id);
 // Must match server.py's API_VERSION. The HTML is re-read on every request but
 // the Python is not, so an old `ragvid serve` will happily serve this file and
 // then answer with a contract it does not implement.
-const EXPECTED_API = 2;
+const EXPECTED_API = 3;
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
@@ -346,6 +361,12 @@ function render(state) {
   $("said").innerHTML = S.planned && S.spec && S.spec.rationale
     ? `<b>Applied:</b> ${escapeHtml(S.spec.rationale)}` : "";
 
+  $("strengthRow").hidden = !S.planned;
+  if (S.planned) {
+    $("strength").value = S.spec.look_mix;
+    $("strengthOut").textContent = pct(S.spec.look_mix);
+  }
+
   buildHistory();
   buildSliders();
   syncEnabled();
@@ -393,6 +414,7 @@ function syncEnabled() {
   $("goBtn").disabled = !on;
   $("photoBtn").disabled = !on;
   $("scrub").disabled = !S.open;
+  $("strength").disabled = !on || !S.planned;
   $("hint").textContent = S.planned ? "hold to see original" : "no look applied yet";
 }
 
@@ -574,38 +596,143 @@ $("pathInput").addEventListener("keydown", (e) => {
 });
 $("browseClose").onclick = () => $("browser").close();
 
-// ---- manual sliders -------------------------------------------------------
+// ---- manual controls ------------------------------------------------------
 // Plain names. Nobody outside a grading suite says "saturation slope offset".
-const KNOBS = [
-  ["saturation", "Colour",   0, 2,    0.01],
-  ["temperature", "Warmth", -3000, 3000, 50],
-  ["tint",       "Tint",    -1, 1,    0.01],
-  ["contrast",   "Contrast", -1, 1,   0.01],
+// Grouped by what someone WANTS, not by what the maths is called: three knobs
+// in the open, everything else one disclosure deeper. "Strength" is not here at
+// all -- it has its own always-visible row above, because "too much" is the
+// note people give most often.
+//
+// A key is a dotted path into the spec. The old flat `{ ...S.spec, [key]: v }`
+// spread cannot reach effects.grain or hue_red.sat, so those controls would
+// silently no-op; setAt() walks the path instead.
+const GROUPS = [
+  [null, [
+    ["exposure",          "Brightness",  -2, 2, 0.05],
+    ["effects.grain",     "Grain",        0, 1, 0.01],
+    ["effects.softness",  "Softness",    -1, 1, 0.01],
+  ]],
+  ["Colour", [
+    ["saturation",        "Colour",       0, 2, 0.01],
+    ["temperature",       "Warmth",   -3000, 3000, 50],
+    ["tint",              "Tint",        -1, 1, 0.01],
+    ["contrast",          "Contrast",    -1, 1, 0.01],
+    ["highlight_rolloff", "Protect highlights", 0, 1, 0.01],
+  ]],
+  ["Shadows & highlights", [
+    ["shadow_tint",       "Shadow colour",    "rgb"],
+    ["shadow_lift",       "Shadows",     -0.5, 0.5, 0.01],
+    ["highlight_tint",    "Highlight colour", "rgb"],
+    ["highlight_lift",    "Highlights",  -0.5, 0.5, 0.01],
+  ]],
+  // sat only. `lum` per band exists in the spec and the LLM can set it -- the
+  // clone preserves it -- but twelve hue knobs is a cockpit.
+  ["Individual colours", [
+    ["hue_red.sat",       "Reds",         0, 2, 0.01],
+    ["hue_yellow.sat",    "Yellows",      0, 2, 0.01],
+    ["hue_green.sat",     "Greens",       0, 2, 0.01],
+    ["hue_cyan.sat",      "Cyans",        0, 2, 0.01],
+    ["hue_blue.sat",      "Blues",        0, 2, 0.01],
+    ["hue_magenta.sat",   "Magentas",     0, 2, 0.01],
+  ]],
+  ["Film & lens", [
+    ["effects.glow",      "Glow",         0, 1, 0.01],
+    ["effects.vignette",  "Vignette",    -1, 1, 0.01],
+    ["effects.denoise",   "Denoise",      0, 1, 0.01],
+    ["effects.fringe",    "Fringing",    -1, 1, 0.01],
+  ]],
 ];
+
+const getAt = (o, path) => path.split(".").reduce((v, k) => v[k], o);
+function setAt(o, path, v) {
+  const k = path.split(".");
+  k.slice(0, -1).reduce((x, n) => x[n], o)[k.at(-1)] = v;
+}
+
+// One commit path for every control, flat or nested. structuredClone keeps the
+// nested objects from being shared with S.spec.
+function commit(pairs) {
+  const spec = structuredClone(S.spec);
+  pairs.forEach(([path, v]) => setAt(spec, path, v));
+  slidersFor = null;
+  post("/api/spec", { spec });
+}
+
+// A tint is a signed offset per channel; a colour picker is unsigned. Mid-grey
+// is the neutral: spec.py strips a tint's own luma, so r == g == b changes
+// nothing at all, which is exactly what a user expects "no colour" to mean.
+const TINT_RANGE = 0.6;
+const hex2 = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+const tintToHex = (t) => "#" + ["r", "g", "b"].map((c) => hex2((t[c] / TINT_RANGE + 0.5) * 255)).join("");
+function hexToTint(hex) {
+  const v = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  // Snap true grey to exact zero so nudging a swatch back to neutral really
+  // does return the spec to identity rather than leaving 0.001 behind.
+  if (v[0] === v[1] && v[1] === v[2]) return [0, 0, 0];
+  return v.map((n) => (n / 255 - 0.5) * TINT_RANGE);
+}
+
 let slidersFor = null;
+const openGroups = new Set();       // survives the rebuild after every commit
+
 function buildSliders() {
   if (!S.planned) { $("sliders").innerHTML = "<p class='empty-dir'>Apply a look first.</p>"; return; }
   if (slidersFor === S.version) return;         // don't rebuild mid-drag
   slidersFor = S.version;
   $("sliders").innerHTML = "";
-  KNOBS.forEach(([key, label, min, max, step]) => {
-    const row = document.createElement("label");
-    row.className = "slider";
-    row.innerHTML = `<span>${label}</span>
-      <input type="range" min="${min}" max="${max}" step="${step}" value="${S.spec[key]}">
-      <output>${fmtNum(S.spec[key])}</output>`;
-    const [, input, out] = row.children;
-    input.addEventListener("input", () => { out.textContent = fmtNum(input.value); });
-    // commit on release, not on every pixel of the drag
-    input.addEventListener("change", () => {
-      const spec = { ...S.spec, [key]: parseFloat(input.value) };
-      slidersFor = null;
-      post("/api/spec", { spec });
-    });
-    $("sliders").append(row);
+  GROUPS.forEach(([name, knobs]) => {
+    const grid = document.createElement("div");
+    grid.className = "sliders";
+    knobs.forEach((k) => grid.append(k[2] === "rgb" ? swatchRow(k) : sliderRow(k)));
+    if (!name) return $("sliders").append(grid);
+    const d = document.createElement("details");
+    d.className = "manual";
+    d.open = openGroups.has(name);
+    d.innerHTML = "<summary></summary>";
+    d.firstChild.textContent = name;
+    d.ontoggle = () => d.open ? openGroups.add(name) : openGroups.delete(name);
+    d.append(grid);
+    $("sliders").append(d);
   });
 }
+
+function sliderRow([key, label, min, max, step]) {
+  const value = getAt(S.spec, key);
+  const row = document.createElement("label");
+  row.className = "slider";
+  row.innerHTML = `<span></span>
+    <input type="range" min="${min}" max="${max}" step="${step}" value="${value}">
+    <output>${fmtNum(value)}</output>`;
+  const [name, input, out] = row.children;
+  name.textContent = label;
+  input.addEventListener("input", () => { out.textContent = fmtNum(input.value); });
+  // commit on release, not on every pixel of the drag
+  input.addEventListener("change", () => commit([[key, parseFloat(input.value)]]));
+  return row;
+}
+
+function swatchRow([key, label]) {
+  const row = document.createElement("label");
+  row.className = "slider";
+  row.innerHTML = `<span></span>
+    <input type="color" value="${tintToHex(getAt(S.spec, key))}">
+    <output></output>`;
+  const [name, input] = row.children;
+  name.textContent = label;
+  input.addEventListener("change", () => {
+    const [r, g, b] = hexToTint(input.value);
+    commit([[`${key}.r`, r], [`${key}.g`, g], [`${key}.b`, b]]);
+  });
+  return row;
+}
+
 const fmtNum = (v) => Math.abs(v) >= 100 ? Math.round(v) : (+v).toFixed(2);
+const pct = (v) => `${Math.round(v * 100)}%`;
+
+// The whole-look mix, hoisted out of the disclosure: the answer to "nice, but
+// too much" should never be another round trip to the model.
+$("strength").addEventListener("input", (e) => { $("strengthOut").textContent = pct(e.target.value); });
+$("strength").addEventListener("change", (e) => commit([["look_mix", parseFloat(e.target.value)]]));
 
 // ---- export ---------------------------------------------------------------
 
