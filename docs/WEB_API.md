@@ -185,7 +185,7 @@ ceiling. Colour-only exports run 1.38×. Size the progress bar's ETA accordingly
 {"providers": [
   {"name": "groq", "label": "Groq", "model": "openai/gpt-oss-120b",
    "needs_key": true, "env_var": "GROQ_API_KEY",
-   "configured": true, "hint": "…R0cl", "source": "environment",
+   "configured": true, "hint": "…7f2a", "source": "environment",
    "structured": "json_schema", "enforces_schema": true,
    "keys_url": "https://console.groq.com/keys",
    "note": "Fast and free to start. Enforces the schema, so grades come back complete.",

@@ -115,7 +115,7 @@ def test_missing_api_key_is_a_clear_error(monkeypatch):
     monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
     from ragvid.providers.base import get_provider
 
-    with pytest.raises(ProviderNotConfigured, match="GROQ_API_KEY is not set"):
+    with pytest.raises(ProviderNotConfigured, match="Settings.*GROQ_API_KEY"):
         get_provider("groq").client
 
 

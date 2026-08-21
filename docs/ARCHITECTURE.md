@@ -52,6 +52,10 @@ a GUI and the CLI run identical code instead of each reimplementing the flow.
 `ragvid/cli.py` is ~110 lines and is the reference consumer — read it as the
 shortest possible example of driving the facade.
 
+The two front ends are equals on grading only. API keys are entered, changed and
+cleared solely in the GUI's Settings panel (`ragvid serve`); the CLI reads keys
+from the settings file and the environment but never writes them.
+
 ```python
 from ragvid import Project
 

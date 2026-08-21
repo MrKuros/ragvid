@@ -113,7 +113,10 @@ class ProviderNotConfigured(ProviderError):
 
     def __init__(self, provider: str, env_var: str) -> None:
         self.env_var = env_var
-        super().__init__(provider, f"{env_var} is not set (put it in .env or the environment)")
+        super().__init__(
+            provider,
+            f"no API key — add one in Settings under 'ragvid serve', or set {env_var}",
+        )
 
 
 class RateLimited(ProviderError):

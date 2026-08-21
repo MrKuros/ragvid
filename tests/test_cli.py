@@ -190,122 +190,26 @@ def test_unknown_command_exits_nonzero():
         cli.main(["bogus"])
 
 
-# ---- ragvid config ---------------------------------------------------------
-# Keys are read from a prompt or a pipe, never from argv: an argv key is visible
-# in `ps` to every user on the machine, and lands in the shell's history file.
+# ---- keys are not a CLI surface at all -------------------------------------
 
 SENTINEL = "gsk_SENTINEL_never_leak_me_0123456789"
 
 
-@pytest.fixture(autouse=True)
-def _isolated_settings(tmp_path, monkeypatch):
-    """settings.json under tmp_path, and no .env -- so these tests say the same
-    thing on every machine."""
-    from ragvid.providers.base import CATALOG
+def test_no_command_can_put_a_key_on_the_command_line(capsys):
+    """`ragvid config` is gone: keys are typed into the GUI (`ragvid serve` ->
+    Settings), which posts them to /api/key over loopback.
 
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
-    monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
-    for info in CATALOG.values():
-        if info.env_var:
-            monkeypatch.delenv(info.env_var, raising=False)
-
-
-def _stdin(monkeypatch, text: str) -> None:
-    import io
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(text))   # isatty() is False
-
-
-def test_config_lists_every_provider_and_says_which_is_in_use(capsys):
-    assert cli.main(["config"]) == 0
-    out = capsys.readouterr().out
-    for name in ("groq", "anthropic", "openai", "deepseek", "ollama"):
-        assert name in out
-    assert "-> groq" in out                 # the default, marked
-    assert "none (GROQ_API_KEY)" in out     # ...and honest about being unset
-    assert "best effort" in out             # the weaker endpoints are labelled
-
-
-def test_config_switches_provider_and_model(capsys):
+    That removes the reason the old command had to refuse a key given as an
+    argument -- `ps` shows every argument to every user on the box, and the
+    shell keeps a copy in its history. There is no longer an argv path to
+    refuse. This is the guard against one quietly reappearing.
+    """
     from ragvid import settings
 
-    assert cli.main(["config", "--use", "openai", "--set-model", "gpt-4.1"]) == 0
-    assert settings.selected() == ("openai", "gpt-4.1")
-    assert "-> openai" in capsys.readouterr().out
+    for argv in (["config"], ["config", "--set-key", "groq"], ["config", "--key", SENTINEL]):
+        with pytest.raises(SystemExit) as exit:
+            cli.main(argv)
+        assert exit.value.code != 0
 
-    assert cli.main(["config", "--set-model", ""]) == 0
-    assert settings.selected() == ("openai", None)
-
-
-def test_config_rejects_an_unknown_provider(capsys):
-    assert cli.main(["config", "--use", "gpt5000"]) == 1
-    assert "unknown provider" in capsys.readouterr().err
-
-
-def test_config_reads_a_key_from_stdin_and_never_prints_it(monkeypatch, capsys):
-    from ragvid import settings
-
-    _stdin(monkeypatch, SENTINEL + "\n")
-    assert cli.main(["config", "--set-key", "groq"]) == 0
-
-    assert settings.key("groq", "GROQ_API_KEY") == SENTINEL
-    out = capsys.readouterr()
-    assert SENTINEL not in out.out + out.err
-    assert "saved here …6789" in out.out          # the hint, and only the hint
-
-
-def test_config_prompts_without_echo_on_a_terminal(monkeypatch):
-    """On a tty the key comes from getpass, which does not echo it."""
-    from ragvid import settings
-
-    monkeypatch.setattr("sys.stdin", type("T", (), {"isatty": lambda self: True})())
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": SENTINEL)
-    assert cli.main(["config", "--set-key", "anthropic"]) == 0
-    assert settings.key("anthropic", "ANTHROPIC_API_KEY") == SENTINEL
-
-
-def test_config_refuses_a_key_passed_as_an_argument(capsys):
-    """`ps` shows every argument to every user on the box; the shell keeps a copy."""
-    from ragvid import settings
-
-    assert cli.main(["config", "--key", SENTINEL]) == 2
-    err = capsys.readouterr().err
-    assert "ps" in err and "history" in err
-    assert "--set-key" in err                     # says what to do instead
-    assert SENTINEL not in err
     assert settings.load() == {}                  # and nothing was written
-
-
-def test_config_refuses_a_key_where_a_provider_name_belongs(capsys):
-    assert cli.main(["config", "--set-key", SENTINEL]) == 2
-    assert "ps" in capsys.readouterr().err
-
-
-def test_config_clears_a_key(monkeypatch, capsys):
-    from ragvid import settings
-
-    _stdin(monkeypatch, SENTINEL)
-    cli.main(["config", "--set-key", "groq"])
-    assert cli.main(["config", "--clear-key", "groq"]) == 0
-    assert settings.key("groq", "GROQ_API_KEY") is None
-    assert SENTINEL not in settings.path().read_text()
-
-
-def test_config_says_nothing_was_saved_when_no_key_was_typed(monkeypatch, capsys):
-    from ragvid import settings
-
-    _stdin(monkeypatch, "\n")
-    assert cli.main(["config", "--set-key", "groq"]) == 1
-    assert "nothing was saved" in capsys.readouterr().err
-    assert settings.key("groq", "GROQ_API_KEY") is None
-
-
-def test_a_saved_provider_is_what_grade_uses(monkeypatch):
-    """The whole point of `config --use`: no flag, no env var, still openai."""
-    from ragvid import settings
-    from ragvid.providers.base import get_provider
-
-    settings.select(provider="openai")
-    assert get_provider().name == "openai"
+    assert SENTINEL not in capsys.readouterr().err

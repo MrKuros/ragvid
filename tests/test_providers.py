@@ -425,7 +425,7 @@ def test_groq_does_not_fall_back_to_itself(monkeypatch):
 
 def test_groq_client_property_needs_a_key(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    with pytest.raises(ProviderNotConfigured, match="GROQ_API_KEY is not set") as info:
+    with pytest.raises(ProviderNotConfigured, match="GROQ_API_KEY") as info:
         _ = GroqProvider().client
     assert (info.value.provider, info.value.env_var) == ("groq", "GROQ_API_KEY")
 

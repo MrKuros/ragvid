@@ -48,22 +48,19 @@ uv venv && uv pip install -e ".[dev]"
 
 Requires `ffmpeg` (any recent build has the `lut3d` filter).
 
-Then set a key — either in the web UI's Settings panel, or:
-
-```bash
-ragvid config --set-key groq     # prompts; never pass a key as an argument
-ragvid config                    # list providers, show which are ready
-```
-
-Keys live in `~/.local/share/ragvid/settings.json`, created `0600` before it
-holds anything. A key is never printed, logged, or returned by the API — only
-its last four characters.
-
-Then run it:
+Then run it and set a key:
 
 ```bash
 uv run ragvid serve            # http://127.0.0.1:8765, opens a browser
 ```
+
+Settings → pick a service → paste the key → Save. That panel is the only place
+keys are entered, and "Forget key" removes one. An environment variable or a
+`.env` still works; a key saved in Settings wins over both.
+
+Keys live in `~/.local/share/ragvid/settings.json`, created `0600` before it
+holds anything. A key is never printed, logged, or returned by the API — only
+its last four characters.
 
 `uv run` is what makes `ragvid` resolve without activating the venv; inside an
 activated venv the bare `ragvid ...` in this README works as written. `--port`
@@ -75,10 +72,10 @@ picks a different port, and a taken port falls through to the next free one.
 together · ollama`, plus any OpenAI-compatible endpoint via `RAGVID_BASE_URL`.
 
 They differ in one way that matters. Filling 43 required numbers reliably needs
-strict JSON-schema decoding, and not every provider enforces it. `ragvid config`
-marks each one **enforced** or **best effort**; a best-effort provider that
-returns an incomplete grade raises an error naming the missing fields instead of
-quietly filling them with defaults.
+strict JSON-schema decoding, and not every provider enforces it. The Settings
+panel says which each one does; a best-effort provider that returns an
+incomplete grade raises an error naming the missing fields instead of quietly
+filling them with defaults.
 
 Groq is the default. Its free tier is 8000 tokens/min — fine interactively,
 roughly two calls a minute at this spec size.
@@ -96,7 +93,6 @@ roughly two calls a minute at this spec size.
 | `ragvid spec` | Print the current grade as JSON |
 | `ragvid reset` | Step back one edit |
 | `ragvid export OUT` | Render the full video |
-| `ragvid config` | Providers and API keys |
 | `ragvid serve` | Open the local web UI |
 
 `grade` and `refine` render a 3-frame contact sheet, not the whole file, so the

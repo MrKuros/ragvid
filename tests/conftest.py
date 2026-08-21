@@ -77,7 +77,7 @@ def _isolate_settings(tmp_path, monkeypatch):
     """Point the settings store at a throwaway dir for every test.
 
     Without this the suite reads the developer's REAL settings file, so anyone
-    who has run `ragvid config --set-key groq` sees
+    who has ever pasted a key into the Settings panel of `ragvid serve` sees
     test_robustness.py::test_missing_api_key_is_a_clear_error fail with
     "DID NOT RAISE ProviderNotConfigured" -- a green suite on a clean machine
     and a red one on a configured machine, which is the worst way to learn
