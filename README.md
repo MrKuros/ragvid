@@ -59,6 +59,16 @@ Keys live in `~/.local/share/ragvid/settings.json`, created `0600` before it
 holds anything. A key is never printed, logged, or returned by the API — only
 its last four characters.
 
+Then run it:
+
+```bash
+uv run ragvid serve            # http://127.0.0.1:8765, opens a browser
+```
+
+`uv run` is what makes `ragvid` resolve without activating the venv; inside an
+activated venv the bare `ragvid ...` in this README works as written. `--port`
+picks a different port, and a taken port falls through to the next free one.
+
 ## Providers
 
 `groq · anthropic · openai · xai · mistral · openrouter · deepseek · moonshot ·
