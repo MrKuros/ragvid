@@ -118,6 +118,11 @@ times the length of the clip. Turn off the effects you don't actually want.
 **Matching a photo needs no account at all.** That path is pure maths, done on
 your own computer, with no AI service involved.
 
+**Shot in log?** If your camera records S-Log, V-Log, C-Log or similar, point
+ragvid at your camera's conversion LUT — the line under the prompt box — and it
+converts before measuring and before grading. Without it the picture is the flat
+grey one straight off the sensor, and the result is a guess at un-flattening it.
+
 **One clip, one look.** If different parts of your video need different looks,
 split it into separate clips first. ragvid doesn't do cuts, pacing, or audio —
 your audio is copied across untouched.

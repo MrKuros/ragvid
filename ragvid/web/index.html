@@ -52,6 +52,9 @@
   #svcLine { font-size:13px; opacity:.7; margin-top:2px; }
   #svcLine[hidden] { display:none; }
   #svcLine a { color:var(--accent); }
+  #lutLine { font-size:12.5px; opacity:.65; margin:0; }
+  #lutLine a { color:var(--accent); }
+  #lutLine b { color:var(--ink); font-weight:500; }
 
   /* ---- work area ---- */
   #work { flex:1; display:flex; flex-direction:column; min-height:0; }
@@ -283,6 +286,15 @@
 
     <p class="said" id="said"></p>
 
+    <!-- Log footage. Off by default and quiet about it, because most clips are
+         not log and a picker for something you do not have is just noise. -->
+    <p class="quiet" id="lutLine">
+      <span id="lutNone">Shot in log (S-Log, V-Log, C-Log)?
+        <a href="#" id="lutSet">Add your camera's conversion LUT</a>.</span>
+      <span id="lutOn" hidden>Converting with <b id="lutName"></b>.
+        <a href="#" id="lutChange">Change</a> · <a href="#" id="lutClear">Remove</a></span>
+    </p>
+
     <!-- "Too much" is the most common note. Answering it used to mean
          re-prompting; now it is one slider, outside the disclosure. -->
     <div class="bar" id="strengthRow" hidden>
@@ -359,7 +371,7 @@ const $ = (id) => document.getElementById(id);
 // Must match server.py's API_VERSION. The HTML is re-read on every request but
 // the Python is not, so an old `ragvid serve` will happily serve this file and
 // then answer with a contract it does not implement.
-const EXPECTED_API = 5;
+const EXPECTED_API = 6;
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
@@ -467,6 +479,11 @@ function render(state) {
   $("svcName").textContent = S.provider || "";
   $("clipname").textContent = S.open ? S.name : "";
   if (!S.open) return;
+
+  const lut = S.input_lut || "";
+  $("lutNone").hidden = !!lut;
+  $("lutOn").hidden = !lut;
+  $("lutName").textContent = lut.replace(/^.*[/\\]/, "");
 
   $("scrub").max = Math.max(0.1, S.duration || 0.1);
   if (t > S.duration) t = 0;
@@ -629,7 +646,7 @@ function showUpload(on, name, label) {
 // long file is seconds of a window that looks hung. Same bar, running.
 async function openPath(route, path) {
   const name = path.replace(/^.*[/\\]/, "");
-  showUpload(true, name, "reading…");
+  showUpload(true, name, route === "/api/input_lut" ? "measuring…" : "reading…");
   setBusy(true, "Opening…");
   hideBanner();
   try {
@@ -678,6 +695,15 @@ $("openBtn").onclick = () => openBrowser("video");
 $("emptyBrowse").onclick = (e) => { e.preventDefault(); openBrowser("video"); };
 $("firstrunBtn").onclick = () => $("settingsBtn").click();
 $("svcChange").onclick = (e) => { e.preventDefault(); $("settingsBtn").click(); };
+
+// ---- log footage ----------------------------------------------------------
+// A technical LUT is not a look: it undoes the camera's recording curve so the
+// grade has an ordinary image to work on. Setting one re-probes, so every
+// number the model is handed describes the converted picture.
+const pickLut = (e) => { e.preventDefault(); openBrowser("lut"); };
+$("lutSet").onclick = pickLut;
+$("lutChange").onclick = pickLut;
+$("lutClear").onclick = (e) => { e.preventDefault(); openPath("/api/input_lut", ""); };
 $("videoFile").onchange = (e) => {
   const f = e.target.files[0]; if (!f) return;
   upload("/api/project", f); e.target.value = "";
@@ -725,12 +751,12 @@ async function listDir(path) {
     });
     const list = $("dlist"); list.innerHTML = "";
     const saving = browseMode === "save";
-    const want = browseMode === "image" ? "image" : "video";
+    const want = browseMode === "image" ? "image" : browseMode === "lut" ? "lut" : "video";
     const files = saving ? [] : d.files.filter((f) => f.kind === want);
 
     d.dirs.forEach((x) => list.append(entry("📁", x.name, "", () => listDir(x.path))));
-    files.forEach((f) => list.append(entry(
-      want === "image" ? "🖼" : "🎬", f.name, kb(f.size), () => choose(f.path))));
+    const icon = want === "image" ? "🖼" : want === "lut" ? "🎚" : "🎬";
+    files.forEach((f) => list.append(entry(icon, f.name, kb(f.size), () => choose(f.path))));
 
     if (saving) {
       // Existing videos shown as context so you can see what is already here,
@@ -746,7 +772,7 @@ async function listDir(path) {
       }
     } else if (!d.dirs.length && !files.length) {
       list.insertAdjacentHTML("beforeend",
-        `<p class="empty-dir">No ${want}s in this folder.</p>`);
+        `<p class="empty-dir">${want === "lut" ? "No .cube LUTs" : `No ${want}s`} in this folder.</p>`);
     }
   } catch (e) { showError(e); }
 }
@@ -762,6 +788,7 @@ function entry(icon, name, size, onclick) {
 }
 function choose(path) {
   $("browser").close();
+  if (browseMode === "lut") return openPath("/api/input_lut", path);
   openPath(browseMode === "image" ? "/api/reference" : "/api/project", path);
 }
 $("pathGo").onclick = () => {

@@ -38,10 +38,11 @@ MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # the server is still running the Python it was started with -- which otherwise
 # shows up as fields silently missing and routes 404ing, with nothing on screen
 # to explain it.
-API_VERSION = 5
+API_VERSION = 6
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+LUT_EXT = {".cube"}
 
 INDEX = Path(__file__).parent / "web" / "index.html"
 PLACEHOLDER = b"""<!doctype html><meta charset=utf-8><title>ragvid</title>
@@ -175,6 +176,7 @@ def _state_json() -> dict:
         "steps": p.steps,
         "spec": p.spec.model_dump() if p.is_planned else None,
         "stats": stats.model_dump(),
+        "input_lut": p.input_lut,
         **base,
     }
 
@@ -286,6 +288,20 @@ def r_reference(req, q):
         return _mutated()
 
 
+def r_input_lut(req, q):
+    """Set or clear the camera's log-to-Rec.709 LUT.
+
+    `{"path": null}` clears it. Setting one RE-PROBES the clip, which is the
+    slowest thing on this route and the reason it exists at all: every statistic
+    the model is given has to describe the converted image, not the log one.
+    """
+    raw = _json_body(req).get("path")
+    path = str(raw).strip() if raw else None
+    with LOCK:
+        _project().set_input_lut(path)
+        return _mutated()
+
+
 def r_refine(req, q):
     instruction = str(_json_body(req).get("instruction") or "").strip()
     if not instruction:
@@ -361,11 +377,13 @@ def _listing(path: Path) -> dict:
         try:
             if e.is_dir():
                 dirs.append({"name": e.name, "path": str(e)})
-            elif e.suffix.lower() in VIDEO_EXT | IMAGE_EXT:
+            elif e.suffix.lower() in VIDEO_EXT | IMAGE_EXT | LUT_EXT:
+                ext = e.suffix.lower()
                 files.append({
                     "name": e.name,
                     "path": str(e),
-                    "kind": "video" if e.suffix.lower() in VIDEO_EXT else "image",
+                    "kind": ("video" if ext in VIDEO_EXT
+                             else "image" if ext in IMAGE_EXT else "lut"),
                     "size": e.stat().st_size,
                 })
         except OSError:
@@ -555,6 +573,7 @@ ROUTES = {
     ("GET", "/api/providers"): r_providers,
     ("POST", "/api/provider"): r_set_provider,
     ("POST", "/api/key"): r_set_key,
+    ("POST", "/api/input_lut"): r_input_lut,
     ("POST", "/api/export"): r_export,
 }
 

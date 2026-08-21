@@ -183,14 +183,20 @@ def _ffprobe(path: str) -> tuple[int, int, float]:
     return int(s["width"]), int(s["height"]), duration
 
 
-def _grab(path: str, t: float) -> np.ndarray | None:
-    """Decode one frame at time `t` as a scaled-down uint8 RGB array."""
+def _grab(path: str, t: float, input_lut: str | None = None) -> np.ndarray | None:
+    """Decode one frame at time `t` as a scaled-down uint8 RGB array.
+
+    `input_lut` is applied BEFORE the downscale, not after. A LUT is non-linear,
+    so LUT-then-average and average-then-LUT are different numbers, and the
+    whole point of measuring here is to report what the grade will actually see.
+    Ten full-size LUT applications is a price worth paying for that.
+    """
     # ponytail: PNG over the pipe instead of rawvideo so PIL reports the frame
     # size — scale=256:-2 gives a height we would otherwise have to predict.
     png = _run([
         # -nostdin: without it ffmpeg reads the terminal and eats the user's keystrokes.
         ffmpeg(), "-v", "error", "-nostdin", "-ss", f"{t:.3f}", "-i", path,
-        "-frames:v", "1", "-vf", f"scale={_ANALYSIS_WIDTH}:-2",
+        "-frames:v", "1", "-vf", _analysis_vf(input_lut),
         "-f", "image2pipe", "-c:v", "png", "-",
     ])
     if not png:
@@ -198,8 +204,21 @@ def _grab(path: str, t: float) -> np.ndarray | None:
     return np.asarray(Image.open(io.BytesIO(png)).convert("RGB"))
 
 
-def probe_video(path: str, n_frames: int = 10) -> ClipStats:
-    """Sample `n_frames` evenly spaced frames and summarize them."""
+def _analysis_vf(input_lut: str | None) -> str:
+    from .render import _lut_filter
+
+    scale = f"scale={_ANALYSIS_WIDTH}:-2"
+    return f"{_lut_filter(input_lut)},{scale}" if input_lut else scale
+
+
+def probe_video(path: str, n_frames: int = 10, input_lut: str | None = None) -> ClipStats:
+    """Sample `n_frames` evenly spaced frames and summarize them.
+
+    Pass `input_lut` for log footage: the stats then describe the converted
+    image, which is what the grade is applied to. Measuring the raw log instead
+    tells the model the clip is flat and grey, and it answers by inventing a
+    contrast push -- a guess at a conversion that already exists as a LUT.
+    """
     width, height, duration = _ffprobe(path)
     n = max(1, n_frames)
     # Bin starts, not bin centers: ffmpeg's input seek discards frames whose
@@ -208,7 +227,7 @@ def probe_video(path: str, n_frames: int = 10) -> ClipStats:
     # nothing. Bin starts are still evenly spaced and always land on a frame.
     times = [duration * i / n for i in range(n)] if duration > 0 else [0.0]
 
-    frames = [f for f in (_grab(path, t) for t in times) if f is not None]
+    frames = [f for f in (_grab(path, t, input_lut) for t in times) if f is not None]
     if not frames:
         raise RuntimeError(f"decoded no frames from {path}")
     return _stats_from_frames(frames, width, height, duration)

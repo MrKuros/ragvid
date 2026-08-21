@@ -207,14 +207,23 @@ def _effect_filters(effects, tag: str = "") -> tuple[list[str], list[str]]:
     return pre, post
 
 
-def _vf(effects, lut: str | None, *extra: str, tag: str = "") -> str:
+def _vf(effects, lut: str | None, *extra: str, tag: str = "",
+        input_lut: str | None = None) -> str:
     """Compose one filter chain: effects around `lut`, then `extra` at the end.
 
     Built *around* _lut_filter's bare node rather than inside it, the same way
     the odd-dimension crop and the hw-encoder suffix already are.
+
+    `input_lut` is a TECHNICAL LUT -- a camera vendor's log-to-Rec.709 transform
+    -- and it runs before the grade, because that is the only order that means
+    anything: a creative grade sits on top of the conversion, never mixed into
+    it. Denoise stays ahead of both, since sensor noise is a property of the
+    camera's own space and cleaning it there beats cleaning it after a curve has
+    stretched the shadows.
     """
     pre, post = _effect_filters(effects, tag)
-    parts = [*pre, *([lut] if lut else []), *post, *(e for e in extra if e)]
+    technical = [_lut_filter(input_lut)] if input_lut else []
+    parts = [*pre, *technical, *([lut] if lut else []), *post, *(e for e in extra if e)]
     return ",".join(parts)
 
 
@@ -270,7 +279,7 @@ def _encoder_args(gpu: bool) -> tuple[list[str], str, str]:
 # ---- rendering ------------------------------------------------------------
 
 def render_preview(video: str, cube: str | None, out_png: str, effects=None,
-                   n_frames: int = 3) -> str:
+                   n_frames: int = 3, input_lut: str | None = None) -> str:
     """Contact sheet: n_frames evenly spaced, LUT + effects, hstacked into one PNG.
 
     One ffmpeg process with n seek-before-input inputs, so cost is independent
@@ -292,7 +301,8 @@ def render_preview(video: str, cube: str | None, out_png: str, effects=None,
     # the one thing this function must not be.
     lut = _lut_filter(cube)
     graph = ";".join(
-        f"[{i}:v]{_vf(effects, lut, tag=str(i)) or 'null'}[rvp{i}]" for i in range(n_frames)
+        f"[{i}:v]{_vf(effects, lut, tag=str(i), input_lut=input_lut) or 'null'}[rvp{i}]"
+        for i in range(n_frames)
     )
     if n_frames > 1:
         graph += ";" + "".join(f"[rvp{i}]" for i in range(n_frames)) + f"hstack=inputs={n_frames}"
@@ -304,7 +314,7 @@ def render_preview(video: str, cube: str | None, out_png: str, effects=None,
 
 
 def render_frame(video: str, cube: str | None, out_png: str, effects=None,
-                 at: float = 0.0) -> str:
+                 at: float = 0.0, input_lut: str | None = None) -> str:
     """One frame at `at` seconds, LUT + effects. The check-before-you-render call.
 
     Seeking before -i makes this independent of clip length, so scrubbing a
@@ -312,13 +322,14 @@ def render_frame(video: str, cube: str | None, out_png: str, effects=None,
     lets a UI re-render on every drag of a scrubber.
     """
     args = ["-ss", f"{max(0.0, at):.3f}", "-i", video]
-    if vf := _vf(effects, _lut_filter(cube)):
+    if vf := _vf(effects, _lut_filter(cube), input_lut=input_lut):
         args += ["-vf", vf]
     _run([*args, "-frames:v", "1", "-update", "1", out_png], timeout=120)
     return out_png
 
 
-def _render_gif(video: str, cube: str, out_path: str, effects=None, progress=None) -> str:
+def _render_gif(video: str, cube: str, out_path: str, effects=None, progress=None,
+                input_lut: str | None = None) -> str:
     """Render to an animated GIF.
 
     GIF is not just "another container": the encoder takes pal8, so the
@@ -332,7 +343,7 @@ def _render_gif(video: str, cube: str, out_path: str, effects=None, progress=Non
     dithering, in one pass over the input.
     """
     fc = (
-        f"[0:v]{_vf(effects, _lut_filter(cube))},split[g1][g2];"
+        f"[0:v]{_vf(effects, _lut_filter(cube), input_lut=input_lut)},split[g1][g2];"
         "[g1]palettegen=stats_mode=diff[pal];"
         "[g2][pal]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
     )
@@ -345,14 +356,15 @@ def _render_gif(video: str, cube: str, out_path: str, effects=None, progress=Non
 
 
 def render_video(video: str, cube: str, out_path: str, effects=None,
-                 gpu: bool = False, progress=None) -> str:
+                 gpu: bool = False, progress=None, input_lut: str | None = None) -> str:
     """Full render. Audio is stream-copied, never re-encoded.
 
     `progress` is an optional callable taking a 0.0-1.0 float, called as ffmpeg
     works. This is the only operation slow enough for a UI to need a bar.
     """
     if Path(out_path).suffix.lower() == ".gif":
-        return _render_gif(video, cube, out_path, effects, progress=progress)
+        return _render_gif(video, cube, out_path, effects, progress=progress,
+                           input_lut=input_lut)
     pre, enc, vf_suffix = _encoder_args(gpu)
     # H.264 at 4:2:0 needs even dimensions, and plenty of real sources are odd
     # (a 720x405 GIF, anything cropped by hand) -- libx264 refuses outright with
@@ -360,7 +372,8 @@ def render_video(video: str, cube: str, out_path: str, effects=None,
     # Crop rather than scale: losing at most one row/column beats resampling
     # every frame. A no-op when the dimensions are already even, so it costs
     # nothing to apply unconditionally and saves probing for the size.
-    vf = _vf(effects, _lut_filter(cube), "crop=trunc(iw/2)*2:trunc(ih/2)*2", vf_suffix)
+    vf = _vf(effects, _lut_filter(cube), "crop=trunc(iw/2)*2:trunc(ih/2)*2", vf_suffix,
+             input_lut=input_lut)
     args = [*pre, "-i", video, "-map", "0:v:0", "-map", "0:a:0?", "-vf", vf, "-c:v", enc]
     if not vf_suffix:
         # lut3d negotiates yuv444p, which libx264 happily encodes into a file most

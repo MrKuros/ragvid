@@ -35,7 +35,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
   "can_undo": true,
   "history_depth": 3,
   "steps": [{"index":0,"label":"warm and nostalgic","rationale":"...","current":false}],
-  "api_version": 5,
+  "api_version": 6,
   "version": 7,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,
@@ -49,6 +49,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
             "effects": {"denoise":0,"glow":0,"softness":0,
                         "grain":0,"vignette":0,"fringe":0},
             "rationale": "..." },
+  "input_lut": null,
   "stats": { "mean": {"r":0.2,"g":0.15,"b":0.15}, "saturation": 0.48,
              "width": 720, "height": 405, "frames_sampled": 10 },
   "providers": ["groq", "anthropic", "openai", "..."],
@@ -228,6 +229,23 @@ apart in the UI as well. ragvid's own settings panel once aimed its key box at
 whichever provider was *active*, so adding a key for a second service meant
 selecting it first — which switched grading to a service that had no key yet
 and left the app unusable until the key was typed.
+
+## Log footage
+
+`POST /api/input_lut` `{"path": "/luts/slog3_to_709.cube"}` sets the camera's
+technical LUT; `{"path": null}` clears it. Returns the new state.
+
+It is applied before the grade — a creative look sits on top of the conversion,
+never mixed into it — and before the clip is measured. Setting one **re-probes**,
+which is the slow part of this route: every statistic describes the image the
+grade will land on, and a conversion changes all of them (measured on simulated
+S-Log3: mean 0.50 → 0.75, std 0.11 → 0.25, p99 0.65 → 1.00). Without it the model
+is told the clip is flat and grey and answers with an invented contrast push.
+
+`/api/browse` lists `.cube` files with `"kind": "lut"` so a picker can offer them.
+
+The grade LUT at `/media/cube` remains display-referred and does **not** include
+the conversion. A `.cube` taken into Resolve still expects converted input.
 
 ## Errors
 

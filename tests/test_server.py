@@ -730,6 +730,53 @@ def test_state_says_whether_the_active_provider_has_a_key(api):
     assert api.get("/api/state").json["configured"] is False
 
 
+def test_a_log_conversion_lut_can_be_set_and_cleared(api, tmp_path):
+    """Log footage is unusable without this, and it is not a look.
+
+    Setting one has to re-probe: the stats describe the image the grade lands
+    on, and a conversion changes every one of them. If this route ever stopped
+    re-probing, the model would keep being told the clip is flat and grey.
+    """
+    from ragvid.lut import bake_cube
+    from ragvid.spec import GradeSpec
+
+    cube = tmp_path / "log_to_709.cube"
+    bake_cube(GradeSpec(contrast=0.6, saturation=1.4), str(cube), size=17)
+
+    api.open_clip()
+    assert api.state()["input_lut"] is None
+    flat = api.state()["stats"]["std"]
+
+    r = api.post("/api/input_lut", {"path": str(cube)})
+    assert r.status == 200
+    assert r.json["input_lut"] == str(cube.resolve())
+    assert r.json["stats"]["std"] != flat, "the clip was not re-probed through the LUT"
+
+    assert api.post("/api/input_lut", {"path": None}).json["input_lut"] is None
+    assert api.state()["stats"]["std"] == flat
+
+
+def test_a_lut_that_is_not_there_is_a_400_not_a_broken_render(api, tmp_path):
+    """Caught on the way in, or ffmpeg reports it from inside a filter graph
+    minutes into an export."""
+    api.open_clip()
+    r = api.post("/api/input_lut", {"path": str(tmp_path / "nope.cube")})
+    assert r.status == 400
+    assert r.error["type"] == "InputError"
+
+    (tmp_path / "notes.txt").write_text("x")
+    assert api.post("/api/input_lut", {"path": str(tmp_path / "notes.txt")}).status == 400
+
+
+def test_the_browser_offers_cube_files(api, tmp_path):
+    """The picker has to show LUTs or the feature is unreachable from the UI."""
+    (tmp_path / "look.cube").write_text("LUT_3D_SIZE 2\n")
+    (tmp_path / "notes.txt").write_text("x")
+    listing = api.get(f"/api/browse?path={tmp_path}").json
+    kinds = {f["name"]: f["kind"] for f in listing["files"]}
+    assert kinds == {"look.cube": "lut"}
+
+
 def test_no_route_ever_answers_with_the_key(api):
     """The sentinel goes in through the one route that accepts it, and must not
     come back out of any of them -- not in a body, not in an error."""

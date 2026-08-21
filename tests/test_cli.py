@@ -159,14 +159,14 @@ def test_export(calls, capsys):
     assert args[1] != str(_art("current.cube"))
     assert args[1].endswith(".cube")
     # No progress bar: stderr is captured, so it is not a tty.
-    assert kw == {"gpu": True, "progress": None}
+    assert kw == {"gpu": True, "progress": None, "input_lut": None}
     assert "out.mp4" in capsys.readouterr().out
 
 
 def test_export_defaults_to_cpu(calls):
     cli.main(["grade", "clip.mp4", "--vibe", "gloomy"])
     cli.main(["export", "out.mp4"])
-    assert calls["render_video"][1] == {"gpu": False, "progress": None}
+    assert calls["render_video"][1] == {"gpu": False, "progress": None, "input_lut": None}
 
 
 def test_provider_passthrough(calls, monkeypatch):

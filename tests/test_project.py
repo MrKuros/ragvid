@@ -48,7 +48,8 @@ def clip(tmp_path, monkeypatch):
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"")
     (tmp_path / "ref.png").write_bytes(b"")  # probe_image is faked; only existence matters
-    monkeypatch.setattr("ragvid.probe.probe_video", lambda path, n_frames=10: STATS)
+    monkeypatch.setattr("ragvid.probe.probe_video",
+                        lambda path, n_frames=10, input_lut=None: STATS)
     monkeypatch.setattr("ragvid.probe.probe_image", lambda path: REF_STATS)
     return video
 
@@ -73,7 +74,7 @@ def test_create_probes_once_and_caches_the_stats(clip, tmp_path):
 def test_create_passes_n_frames_through(clip, tmp_path, monkeypatch):
     seen = {}
 
-    def fake(path, n_frames=10):
+    def fake(path, n_frames=10, input_lut=None):
         seen["n"] = n_frames
         return STATS
 
@@ -305,7 +306,7 @@ def test_export_does_not_share_its_lut_with_live_rendering(project, tmp_path, mo
     project.set_spec(GradeSpec(saturation=2.5))
     seen = {}
 
-    def fake_render(video, cube, out, effects=None, gpu=False, progress=None):
+    def fake_render(video, cube, out, effects=None, gpu=False, progress=None, input_lut=None):
         seen["cube"] = Path(cube)
         seen["exists_during"] = Path(cube).is_file()
         Path(out).write_bytes(b"x")

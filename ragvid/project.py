@@ -28,6 +28,23 @@ from .spec import GradeSpec
 
 # Everything the project writes lives under root/SESSION_DIR, so a UI can show
 # one folder per project and delete it to clean up.
+def _check_lut(path: str | Path | None) -> str | None:
+    """Validate a technical LUT path here, not at render time.
+
+    ffmpeg would otherwise report a missing or malformed .cube from inside a
+    filter graph, minutes into an export, as a wall of filter syntax. Checking
+    on the way in turns that into one sentence at the moment the file is picked.
+    """
+    if path is None or (isinstance(path, str) and not path.strip()):
+        return None
+    lut = Path(path).expanduser()
+    if not lut.is_file():
+        raise InputError(str(lut), "no such LUT file")
+    if lut.suffix.lower() != ".cube":
+        raise InputError(str(lut), "not a .cube LUT")
+    return str(lut.resolve())
+
+
 CUBE_NAME = "current.cube"
 PREVIEW_NAME = "preview.png"
 SOURCE_PREVIEW_NAME = "source.png"
@@ -46,12 +63,14 @@ class Project:
 
     @classmethod
     def create(cls, video: str | Path, root: str | Path | None = None,
-               n_frames: int = 10) -> "Project":
+               n_frames: int = 10, input_lut: str | Path | None = None) -> "Project":
         """Probe `video` and start a new project.
 
         `root` defaults to the video's own directory, so opening a clip from a
         file picker does something sensible without asking the user where state
         should live.
+
+        `input_lut` is for log footage — see `set_input_lut`.
         """
         from .probe import probe_video
 
@@ -59,8 +78,9 @@ class Project:
         if not video.exists():
             raise InputError(str(video), "no such file")
         root = Path(root).expanduser() if root else video.parent
-        stats = probe_video(str(video), n_frames=n_frames)
-        session = Session.create(str(video.resolve()), stats)
+        lut = _check_lut(input_lut)
+        stats = probe_video(str(video), n_frames=n_frames, input_lut=lut)
+        session = Session.create(str(video.resolve()), stats, input_lut=lut)
         return cls(session, root)
 
     @classmethod
@@ -139,6 +159,33 @@ class Project:
         del self.session.labels[index + 1:]
         self.save()
         return True
+
+    @property
+    def input_lut(self) -> str | None:
+        """The technical LUT applied before the grade, or None."""
+        return self.session.input_lut
+
+    def set_input_lut(self, path: str | Path | None, n_frames: int = 10) -> str | None:
+        """Set (or clear) the camera's log-to-Rec.709 LUT and RE-PROBE.
+
+        Re-probing is not an optimisation to skip. Every number the model is
+        given describes the image the grade will land on, and a conversion LUT
+        changes all of them -- measured on simulated S-Log3, mean 0.34 -> 0.49
+        and std 0.24 -> 0.48. Keeping the old stats would describe a clip that
+        no longer exists and quietly aim the whole grade at the wrong tones.
+
+        The existing grade is deliberately left alone: it is the user's, and
+        silently rewriting it is worse than letting them see it applied to the
+        converted image and adjust.
+        """
+        from .probe import probe_video
+
+        lut = _check_lut(path)
+        if lut == self.session.input_lut:
+            return lut
+        self.session.input_lut = lut
+        self.session.stats = probe_video(self.source, n_frames=n_frames, input_lut=lut)
+        return lut
 
     @property
     def is_planned(self) -> bool:
@@ -275,7 +322,8 @@ class Project:
             self.preview_path if graded else self.state_dir / SOURCE_PREVIEW_NAME
         )
         out.parent.mkdir(parents=True, exist_ok=True)
-        render_preview(self.source, cube, str(out), effects, n_frames=n_frames)
+        render_preview(self.source, cube, str(out), effects, n_frames=n_frames,
+                       input_lut=self.input_lut)
         return out
 
     def frame(self, at: float = 0.0, graded: bool = True,
@@ -294,7 +342,8 @@ class Project:
         name = "frame.png" if graded else "frame_source.png"
         out = Path(path) if path else self.state_dir / name
         out.parent.mkdir(parents=True, exist_ok=True)
-        render_frame(self.source, cube, str(out), effects, at=at)
+        render_frame(self.source, cube, str(out), effects, at=at,
+                     input_lut=self.input_lut)
         return out
 
     def export(self, out_path: str | Path, gpu: bool = False,
@@ -324,7 +373,7 @@ class Project:
         with tempfile.TemporaryDirectory(prefix="ragvid-export-") as tmp:
             cube = self.bake(Path(tmp) / "export.cube")
             render_video(self.source, str(cube), str(out), self.spec.render_effects(),
-                         gpu=gpu, progress=progress)
+                         gpu=gpu, progress=progress, input_lut=self.input_lut)
         return out
 
     # ---- interop ----------------------------------------------------------
@@ -334,6 +383,7 @@ class Project:
         return {
             "source": self.source,
             "root": str(self.root),
+            "input_lut": self.input_lut,
             "duration": self.duration,
             "spec": self.spec.model_dump() if self.is_planned else None,
             "history_depth": len(self.session.specs),
