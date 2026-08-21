@@ -26,6 +26,11 @@ dependencies = [
     "anthropic>=0.40",   # alternate provider / quality baseline
 ]
 
+[project.urls]
+Homepage = "https://github.com/MrKuros/ragvid"
+Repository = "https://github.com/MrKuros/ragvid"
+Issues = "https://github.com/MrKuros/ragvid/issues"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
