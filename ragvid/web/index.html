@@ -141,6 +141,16 @@
   #banner .x { margin-left:auto; background:none; border:0; color:inherit;
                padding:0 4px; opacity:.7; }
 
+  /* ---- upload ---- */
+  #uploading { display:flex; gap:12px; align-items:center; margin:0 18px;
+               padding:11px 14px; border:1px solid var(--line); border-radius:var(--r);
+               background:var(--panel); font-size:13.5px; }
+  #uploading[hidden] { display:none; }
+  #uploading .upname { max-width:34ch; overflow:hidden; text-overflow:ellipsis;
+                       white-space:nowrap; }
+  #uploading .uplabel { color:var(--dim); font-variant-numeric:tabular-nums;
+                        min-width:12ch; text-align:right; }
+
   /* ---- modal ---- */
   dialog { border:1px solid var(--line); border-radius:12px; background:var(--panel);
            color:var(--ink); padding:0; width:min(680px,92vw); max-height:78vh; }
@@ -208,6 +218,12 @@
 </header>
 
 <div id="banner"><span id="bannerMsg"></span><button class="x" id="bannerX">✕</button></div>
+
+<div id="uploading" hidden>
+  <span class="upname" id="upName"></span>
+  <span class="prog"><i id="upBar"></i></span>
+  <span class="uplabel" id="upLabel"></span>
+</div>
 
 <section id="empty">
   <h1>Drop a video here</h1>
@@ -353,9 +369,8 @@ async function post(path, payload) {
   setBusy(true);
   try {
     const opts = { method: "POST" };
-    if (payload instanceof FormData) opts.body = payload;
-    else if (payload) { opts.headers = { "Content-Type": "application/json" };
-                        opts.body = JSON.stringify(payload); }
+    if (payload) { opts.headers = { "Content-Type": "application/json" };
+                   opts.body = JSON.stringify(payload); }   // uploads go through upload()
     // hideBanner BEFORE render, never after: render() is what raises the
     // api_version warning, and clearing it afterwards deleted the one message
     // telling the user to restart the server -- on their very next click.
@@ -564,14 +579,62 @@ $("askForm").addEventListener("submit", (e) => {
 $("photoBtn").onclick = () => { browseMode = "image"; $("photoFile").click(); };
 $("photoFile").onchange = (e) => {
   const f = e.target.files[0]; if (!f) return;
-  const fd = new FormData(); fd.append("file", f);
-  post("/api/reference", fd); e.target.value = "";
+  upload("/api/reference", f); e.target.value = "";
 };
 
 $("undoBtn").onclick = () => post("/api/undo");
 $("resetBtn").onclick = () => {
   if (confirm("Remove the look and go back to the original clip?")) post("/api/reset");
 };
+
+// ---- uploading ------------------------------------------------------------
+// fetch() cannot report upload progress, so a big clip looked like a frozen
+// window for as long as the copy took. XHR can, and this is the one place worth
+// keeping it for.
+//
+// The bar reaching 100% does NOT mean done: the server then probes the clip,
+// which takes a moment more, so the label says what is happening rather than
+// sitting at 100% looking stuck.
+
+function showUpload(on, name) {
+  $("uploading").hidden = !on;
+  if (on) {
+    $("upName").textContent = name;
+    $("upBar").style.width = "0%";
+    $("upLabel").textContent = "0%";
+  }
+}
+
+function upload(path, file) {
+  showUpload(true, file.name);
+  setBusy(true, "Opening…");
+  hideBanner();
+
+  const fd = new FormData();
+  fd.append("file", file);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", path);
+
+  xhr.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    const pct = Math.round((e.loaded / e.total) * 100);
+    $("upBar").style.width = `${pct}%`;
+    $("upLabel").textContent = pct < 100 ? `${pct}%` : "reading…";
+  };
+  const done = () => { showUpload(false); setBusy(false); };
+  xhr.onload = () => {
+    done();
+    let body = null;
+    try { body = JSON.parse(xhr.responseText); } catch { /* handled below */ }
+    if (xhr.status >= 200 && xhr.status < 300 && body) return render(body);
+    showError(Object.assign(new Error("upload failed"), { info: body && body.error }));
+  };
+  xhr.onerror = () => {
+    done();
+    showError(new Error("The upload did not finish — is ragvid still running?"));
+  };
+  xhr.send(fd);
+}
 
 // ---- opening a clip -------------------------------------------------------
 
@@ -580,8 +643,7 @@ $("emptyBrowse").onclick = (e) => { e.preventDefault(); openBrowser("video"); };
 $("firstrunBtn").onclick = () => $("settingsBtn").click();
 $("videoFile").onchange = (e) => {
   const f = e.target.files[0]; if (!f) return;
-  const fd = new FormData(); fd.append("file", f);
-  post("/api/project", fd); e.target.value = "";
+  upload("/api/project", f); e.target.value = "";
 };
 
 // Drag a clip anywhere onto the window.
@@ -592,8 +654,7 @@ $("videoFile").onchange = (e) => {
 addEventListener("drop", (e) => {
   e.preventDefault();
   const f = e.dataTransfer.files[0]; if (!f) return;
-  const fd = new FormData(); fd.append("file", f);
-  post(f.type.startsWith("image/") && S.open ? "/api/reference" : "/api/project", fd);
+  upload(f.type.startsWith("image/") && S.open ? "/api/reference" : "/api/project", f);
 });
 
 // ---- file browser ---------------------------------------------------------

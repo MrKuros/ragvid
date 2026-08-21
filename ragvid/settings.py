@@ -90,7 +90,10 @@ def key(provider: str, env_var: str | None) -> str | None:
     stored = load().get("keys", {}).get(provider)
     if stored:
         return stored
-    return os.environ.get(env_var) if env_var else None
+    # `or None` because an empty variable is how a shell says "unset", and the
+    # providers already treat it that way: without this, GROQ_API_KEY= showed as
+    # a configured service that failed the moment you asked it for a grade.
+    return (os.environ.get(env_var) or None) if env_var else None
 
 
 def set_key(provider: str, value: str) -> None:

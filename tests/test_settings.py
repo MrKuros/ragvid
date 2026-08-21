@@ -134,6 +134,17 @@ def test_clearing_hands_the_environment_back(monkeypatch):
     assert settings.key("groq", "GROQ_API_KEY") == "from_environment"
 
 
+def test_an_empty_variable_counts_as_no_key(monkeypatch):
+    """`GROQ_API_KEY=` is how a shell says unset, and the providers already read
+    it that way -- they raise ProviderNotConfigured on an empty string. Before
+    this, the settings layer disagreed: the service showed as ready in the UI and
+    then failed on the first grade."""
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    assert settings.key("groq", "GROQ_API_KEY") is None
+    assert settings.source("groq", "GROQ_API_KEY") is None
+    assert settings.hint("groq", "GROQ_API_KEY") is None
+
+
 def test_a_provider_with_no_key_and_no_variable_is_simply_unset():
     assert settings.key("ollama", None) is None
     assert settings.source("ollama", None) is None
