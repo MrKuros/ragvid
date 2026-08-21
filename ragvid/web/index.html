@@ -157,6 +157,27 @@
                  border-radius:6px; padding:8px 11px; outline:none; }
   .empty-dir { color:var(--dim); padding:22px; text-align:center; font-size:14px; }
 
+  /* ---- settings ---- */
+  .prow { display:flex; gap:11px; align-items:center; width:100%; text-align:left;
+          background:none; border:1px solid transparent; padding:9px 11px;
+          border-radius:6px; }
+  .prow:hover { background:#2a2a31; }
+  .prow.on { border-color:var(--accent); background:#22303233; }
+  .prow .nm { flex:1; min-width:0; }
+  .prow .nm b { font-weight:500; display:block; }
+  .prow .nm small { color:var(--dim); font-size:12px; }
+  .tag { font-size:11.5px; padding:3px 7px; border-radius:999px; border:1px solid var(--line);
+         color:var(--dim); flex:none; }
+  .tag.ready { color:var(--accent); border-color:var(--accent); }
+  .keybox { border-top:1px solid var(--line); padding:14px 18px; display:flex;
+            flex-direction:column; gap:9px; }
+  .keybox .row2 { display:flex; gap:8px; align-items:center; }
+  .keybox input { flex:1; background:var(--bg); border:1px solid var(--line);
+                  border-radius:6px; padding:8px 11px; outline:none; min-width:0; }
+  .keybox input:focus { border-color:var(--accent); }
+  .keynote { color:var(--dim); font-size:13px; line-height:1.5; }
+  .keynote a { color:var(--accent); }
+
   /* ---- export ---- */
   .prog { flex:1; height:6px; background:var(--line); border-radius:3px; overflow:hidden; }
   .prog i { display:block; height:100%; width:0; background:var(--accent);
@@ -170,6 +191,7 @@
   <span class="logo">ragvid</span>
   <span class="clipname" id="clipname"></span>
   <span class="spacer"></span>
+  <button id="settingsBtn">Settings</button>
   <button id="openBtn">Open clip…</button>
 </header>
 
@@ -257,6 +279,26 @@
   </div>
 </dialog>
 
+<dialog id="settings">
+  <div class="dhead"><b>Settings</b><span class="spacer"></span>
+       <span class="keynote" id="setActive"></span></div>
+  <div class="dlist" id="plist"></div>
+  <div class="keybox">
+    <div class="row2">
+      <input type="password" id="keyInput" autocomplete="off" spellcheck="false"
+             placeholder="Paste the key for this service">
+      <button class="primary" id="keySave">Save key</button>
+      <button id="keyClear" hidden>Forget key</button>
+    </div>
+    <p class="keynote" id="keyNote"></p>
+  </div>
+  <div class="dfoot">
+    <span class="keynote" id="setMsg"></span>
+    <span class="spacer"></span>
+    <button id="setClose">Done</button>
+  </div>
+</dialog>
+
 <input type="file" id="videoFile" hidden
        accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.gif,.mpg,.mpeg,.wmv,.m2ts">
 <input type="file" id="photoFile" hidden accept="image/*">
@@ -267,7 +309,7 @@ const $ = (id) => document.getElementById(id);
 // Must match server.py's API_VERSION. The HTML is re-read on every request but
 // the Python is not, so an old `ragvid serve` will happily serve this file and
 // then answer with a contract it does not implement.
-const EXPECTED_API = 3;
+const EXPECTED_API = 4;
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
@@ -315,7 +357,8 @@ function showError(e) {
   const info = e.info || { type: "Error", message: e.message || "Something went wrong." };
   let msg = info.message;
   if (info.type === "ProviderNotConfigured") {
-    msg = `No API key set (${info.env_var}). You can still match a photo — that works offline.`;
+    msg = `No key yet for ${S.provider || "this service"}. Open Settings and paste one — `
+        + `or use a photo, which works with no key at all.`;
   } else if (info.type === "RateLimited") {
     countdown(Math.ceil(info.retry_after || 30));
     return;
@@ -749,6 +792,98 @@ const pct = (v) => `${Math.round(v * 100)}%`;
 // too much" should never be another round trip to the model.
 $("strength").addEventListener("input", (e) => { $("strengthOut").textContent = pct(e.target.value); });
 $("strength").addEventListener("change", (e) => commit([["look_mix", parseFloat(e.target.value)]]));
+
+// ---- settings -------------------------------------------------------------
+// One list of services, one key box. The key box is write-only by design: a
+// stored key is NEVER sent back by the server, so there is nothing to put in
+// the input and we never try -- it shows a reminder of the last four characters
+// instead.
+
+let providers = [];
+
+$("settingsBtn").onclick = () => { $("settings").showModal(); loadProviders(); };
+$("setClose").onclick = () => $("settings").close();
+
+async function loadProviders(msg) {
+  $("setMsg").textContent = msg || "";
+  try {
+    const d = await call("/api/providers");
+    providers = d.providers;
+    S.provider = d.provider;
+    drawProviders(d);
+  } catch (e) { showError(e); }
+}
+
+function drawProviders(d) {
+  const list = $("plist");
+  list.innerHTML = "";
+  providers.forEach((p) => {
+    const b = document.createElement("button");
+    b.className = "prow" + (p.active ? " on" : "");
+    b.type = "button";
+    b.innerHTML = `<span class="nm"><b></b><small></small></span><span class="tag"></span>`;
+    b.querySelector("b").textContent = p.label;
+    b.querySelector("small").textContent = p.note;
+    const tag = b.querySelector(".tag");
+    tag.textContent = p.configured ? (p.needs_key ? `ready ${p.hint || ""}` : "ready") : "needs a key";
+    if (p.configured) tag.classList.add("ready");
+    b.onclick = () => chooseProvider(p.name);
+    list.append(b);
+  });
+  const active = providers.find((p) => p.active) || {};
+  $("setActive").textContent = active.model ? `using ${active.model}` : "";
+  $("keyInput").value = "";                       // never show a stored key
+  $("keyInput").placeholder = active.needs_key
+    ? `Paste the key for ${active.label || "this service"}`
+    : "This one needs no key";
+  $("keyInput").disabled = !active.needs_key;
+  $("keySave").disabled = !active.needs_key;
+  $("keyClear").hidden = active.source !== "settings";
+  $("keyNote").innerHTML = keyNote(active);
+}
+
+function keyNote(p) {
+  if (!p.name) return "";
+  if (!p.needs_key) return "Runs on this computer, so there is nothing to pay for and no key to set.";
+  const where = p.source === "settings" ? `Saved on this computer (${p.hint}).`
+              : p.source === "environment" ? `Coming from ${p.env_var} in your environment.`
+              : "No key yet.";
+  const get = p.keys_url
+    ? ` <a href="${p.keys_url}" target="_blank" rel="noreferrer">Get one</a>.` : "";
+  return `${escapeHtml(where)}${get} It is stored only on this computer, readable by you alone.`;
+}
+
+async function chooseProvider(name) {
+  try {
+    render(await call("/api/provider", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: name }),
+    }));
+    loadProviders();
+  } catch (e) { showError(e); }
+}
+
+async function sendKey(key) {
+  const active = providers.find((p) => p.active) || {};
+  if (!active.name) return;
+  try {
+    await call("/api/key", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: active.name, key }),
+    });
+    $("keyInput").value = "";
+    loadProviders(key ? "Key saved." : "Key removed.");
+  } catch (e) { showError(e); }
+}
+
+$("keySave").onclick = () => {
+  const v = $("keyInput").value.trim();
+  if (v) sendKey(v);
+};
+$("keyInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("keySave").click(); }
+});
+$("keyClear").onclick = () => sendKey(null);
 
 // ---- export ---------------------------------------------------------------
 

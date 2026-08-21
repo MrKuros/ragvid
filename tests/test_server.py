@@ -121,6 +121,21 @@ def httpd():
 
 
 @pytest.fixture(autouse=True)
+def _isolated_settings(tmp_path, monkeypatch):
+    """Keys and the provider choice come from tmp_path, never from the developer's
+    real settings.json or the repo's .env."""
+    from ragvid.providers.base import CATALOG
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
+    for info in CATALOG.values():
+        if info.env_var:
+            monkeypatch.delenv(info.env_var, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_llm(monkeypatch):
     """Nothing reaches a provider unless a test explicitly installs a fake one."""
 
@@ -197,8 +212,8 @@ def test_empty_state(api):
     body = api.state()
     assert body["open"] is False
     assert body["version"] == 0
-    assert body["providers"] == ["groq", "anthropic"]
-    assert body["provider"]
+    assert {"groq", "anthropic", "ollama"} <= set(body["providers"])
+    assert body["provider"] and body["model"]
 
 
 def test_open_by_path(api):
@@ -641,3 +656,109 @@ def test_binds_loopback_only(httpd):
     with socket.socket() as sock:
         sock.settimeout(2)
         assert sock.connect_ex((outside, port)) != 0
+
+
+# ---- settings: providers and keys ------------------------------------------
+# The key never comes back out. Every assertion here is about that, or about
+# the panel having enough to render without it.
+
+SENTINEL = "gsk_SENTINEL_never_leak_me_0123456789"
+
+
+def test_providers_route_lists_everything_with_its_state(api):
+    rows = {p["name"]: p for p in api.get("/api/providers").json["providers"]}
+    assert {"groq", "anthropic", "openai", "deepseek", "ollama"} <= set(rows)
+    assert rows["groq"]["configured"] is False and rows["groq"]["hint"] is None
+    assert rows["ollama"]["needs_key"] is False and rows["ollama"]["configured"] is True
+    # The UI needs to be able to warn about a weaker endpoint.
+    assert rows["groq"]["enforces_schema"] is True
+    assert rows["deepseek"]["enforces_schema"] is False
+    assert sum(p["active"] for p in rows.values()) == 1
+
+
+def test_choosing_a_provider_sticks(api):
+    body = api.post("/api/provider", {"provider": "anthropic", "model": "claude-opus-5"}).json
+    assert body["provider"] == "anthropic" and body["model"] == "claude-opus-5"
+    assert api.state()["provider"] == "anthropic"
+
+    # An empty model falls back to the catalog default rather than sending "".
+    assert api.post("/api/provider", {"provider": "openai", "model": ""}).json["model"]
+
+
+def test_an_unknown_provider_is_a_400_not_a_502(api):
+    r = api.post("/api/provider", {"provider": "gpt5000"})
+    assert r.status == 400
+    assert r.error["type"] == "InputError"
+    assert "unknown provider" in r.error["message"]
+
+
+def test_a_key_can_be_set_and_cleared_from_the_ui(api, tmp_path):
+    import stat
+
+    from ragvid import settings
+
+    r = api.post("/api/key", {"provider": "groq", "key": SENTINEL})
+    assert r.status == 200
+    groq = [p for p in r.json["providers"] if p["name"] == "groq"][0]
+    assert groq["configured"] is True and groq["hint"] == "…6789"
+
+    # It really landed on disk, and only its owner can read it.
+    assert settings.key("groq", "GROQ_API_KEY") == SENTINEL
+    assert stat.S_IMODE(settings.path().stat().st_mode) == 0o600
+
+    # Clearing removes it from the file rather than blanking it.
+    api.post("/api/key", {"provider": "groq", "key": None})
+    assert SENTINEL not in settings.path().read_text()
+    assert settings.key("groq", "GROQ_API_KEY") is None
+
+
+def test_no_route_ever_answers_with_the_key(api):
+    """The sentinel goes in through the one route that accepts it, and must not
+    come back out of any of them -- not in a body, not in an error."""
+    from ragvid import settings
+
+    api.post("/api/key", {"provider": "groq", "key": SENTINEL})
+    api.post("/api/provider", {"provider": "groq"})
+    api.open_clip()
+
+    bodies = [
+        api.get("/api/providers").body,
+        api.get("/api/state").body,
+        api.post("/api/provider", {"provider": "groq"}).body,
+        api.post("/api/key", {"provider": "groq", "key": SENTINEL}).body,
+        api.get("/api/browse").body,
+        api.post("/api/vibe", {"vibe": ""}).body,        # an error body too
+        api.get("/api/export/nope").body,
+        api.get("/").body,
+    ]
+    for body in bodies:
+        assert SENTINEL.encode() not in body
+    assert settings.key("groq", "GROQ_API_KEY") == SENTINEL  # it really was stored
+
+
+def test_a_missing_key_is_still_a_428_pointing_at_settings(api, llm_raises):
+    from ragvid.errors import ProviderNotConfigured
+
+    api.open_clip()
+    llm_raises(ProviderNotConfigured("groq", "GROQ_API_KEY"))
+    r = api.post("/api/vibe", {"vibe": "gloomy"})
+    assert r.status == 428
+    assert r.error["env_var"] == "GROQ_API_KEY"
+
+
+def test_the_page_and_the_server_agree_on_the_api_version():
+    """Bump one without the other and a stale page silently drops fields; this
+    is the check that makes the two move together."""
+    import re
+
+    page = server.INDEX.read_text()
+    found = re.search(r"const EXPECTED_API = (\d+);", page)
+    assert found, "index.html no longer declares EXPECTED_API"
+    assert int(found.group(1)) == server.API_VERSION
+
+
+def test_the_settings_panel_never_puts_a_key_into_its_input():
+    """The one UI rule that cannot be checked from the Python side at runtime."""
+    page = server.INDEX.read_text()
+    assert 'id="keyInput"' in page and 'type="password"' in page
+    assert '$("keyInput").value = "";' in page

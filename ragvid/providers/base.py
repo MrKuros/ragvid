@@ -149,7 +149,8 @@ CATALOG: dict[str, ProviderInfo] = {
             base_url="https://api.moonshot.ai/v1", env_var="MOONSHOT_API_KEY",
             fallback="moonshot-v1-32k", structured="json_object",
             keys_url="https://platform.moonshot.ai/console/api-keys",
-            note="Guarantees valid JSON but not the full schema; see DeepSeek.",
+            note="Guarantees valid JSON but not the full schema, so a grade can come "
+                 "back incomplete — ragvid says so instead of guessing.",
         ),
         ProviderInfo(
             "together", "Together", "meta-llama/Llama-3.3-70B-Instruct-Turbo",

@@ -14,7 +14,7 @@ import pytest
 
 from ragvid.errors import ProviderError, ProviderNotConfigured, RateLimited
 from ragvid.probe import ClipStats
-from ragvid.providers.base import DEFAULTS, get_provider, load_env
+from ragvid.providers.base import CATALOG, DEFAULTS, describe, get_provider, load_env
 from ragvid.providers.groq import FALLBACK_MODEL, GroqProvider, parse_reset
 from ragvid.refine import refine_spec
 from ragvid.spec import RGB, GradeSpec
@@ -474,3 +474,274 @@ def test_anthropic_surfaces_a_refusal():
     client = type("C", (), {"messages": FakeMessages(response)})()
     with pytest.raises(ProviderError, match="declined"):
         AnthropicProvider(client=client).plan("sys", "usr")
+
+
+# ---- every provider, not two ----------------------------------------------
+# The catalog, the capability ladder, and the escape hatch. Still no network:
+# each test drives a fake client or stops before one is built.
+
+
+@pytest.fixture(autouse=True)
+def _isolated_settings(tmp_path, monkeypatch):
+    """settings.json must come from tmp_path, never the developer's real one."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    # ...and never from the repo's .env, which would make "is groq configured?"
+    # depend on whose machine the suite is running on.
+    monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
+    for info in CATALOG.values():
+        if info.env_var:
+            monkeypatch.delenv(info.env_var, raising=False)
+
+
+def _fake(script):
+    return FakeClient(script)
+
+
+def _text(body: str):
+    """A completion whose content is exactly `body` (prose, fences and all)."""
+    message = type("M", (), {"content": body})()
+    return type("R", (), {"choices": [type("C", (), {"message": message})()]})()
+
+
+def _bad_request(msg="response_format not supported"):
+    import openai
+
+    response = httpx.Response(
+        400, json={"error": {"message": msg}},
+        request=httpx.Request("POST", "https://example.invalid/v1/chat/completions"),
+    )
+    return openai.BadRequestError(msg, response=response, body=None)
+
+
+def test_the_catalog_covers_the_providers_people_actually_have():
+    expected = {"groq", "anthropic", "openai", "moonshot", "deepseek",
+                "openrouter", "together", "xai", "mistral", "ollama"}
+    assert expected <= set(CATALOG)
+
+
+def test_every_catalog_row_declares_a_usable_structured_output_level():
+    from ragvid.providers.openai_compat import MODES
+
+    for name, info in CATALOG.items():
+        assert info.structured in MODES, name
+        assert info.model, name
+        # An OpenAI-compatible row needs somewhere to send the request; the
+        # Anthropic SDK brings its own.
+        assert bool(info.base_url) == (info.kind == "openai"), name
+        # Anything weaker than strict decoding must SAY so, in its own text.
+        if info.structured != "json_schema":
+            assert "incomplete" in info.note or "miss fields" in info.note, name
+
+
+def test_only_ollama_runs_without_a_key():
+    assert [n for n, i in CATALOG.items() if i.env_var is None] == ["ollama"]
+    assert CATALOG["ollama"].base_url.startswith("http://127.0.0.1")
+
+
+@pytest.mark.parametrize("name", ["openai", "deepseek", "moonshot", "together",
+                                  "xai", "mistral", "openrouter", "ollama"])
+def test_each_provider_builds_with_its_own_url_model_and_capability(name, monkeypatch):
+    monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
+    monkeypatch.delenv("RAGVID_PROVIDER", raising=False)
+    monkeypatch.delenv("RAGVID_MODEL", raising=False)
+    info = CATALOG[name]
+    p = get_provider(name)
+    assert (p.name, p.base_url, p.model) == (name, info.base_url, info.model)
+    assert (p.env_var, p.structured) == (info.env_var, info.structured)
+
+
+def test_an_unknown_endpoint_works_through_the_escape_hatch(monkeypatch):
+    """RAGVID_BASE_URL, not the catalog, is the real answer to 'all of them'."""
+    monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
+    monkeypatch.delenv("RAGVID_PROVIDER", raising=False)
+    monkeypatch.setenv("RAGVID_BASE_URL", "https://llm.internal/v1")
+    monkeypatch.setenv("RAGVID_MODEL", "house-model-1")
+    monkeypatch.setenv("RAGVID_API_KEY", "k")
+
+    p = get_provider()                      # no provider named: the hatch wins
+    assert (p.name, p.base_url, p.model) == ("custom", "https://llm.internal/v1", "house-model-1")
+    assert p.env_var == "RAGVID_API_KEY"
+    assert "custom" in [row["name"] for row in describe()]
+
+
+def test_the_escape_hatch_is_invisible_until_it_is_configured(monkeypatch):
+    monkeypatch.delenv("RAGVID_BASE_URL", raising=False)
+    monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
+    assert "custom" not in [row["name"] for row in describe()]
+    with pytest.raises(ProviderError, match="RAGVID_BASE_URL"):
+        get_provider("custom")
+
+
+# ---- the structured-output ladder -----------------------------------------
+
+
+def test_a_json_object_endpoint_gets_the_schema_in_the_prompt_instead():
+    """No constrained decoding, so the schema has to travel as an instruction."""
+    from ragvid.providers.openai_compat import OpenAICompatProvider
+
+    client = _fake([_ok(INSANE)])
+    p = OpenAICompatProvider("deepseek", "https://x/v1", "m", "K",
+                             structured="json_object", client=client)
+    out = p.plan("sys", "usr")
+
+    sent = client.calls[0]
+    assert sent["response_format"] == {"type": "json_object"}
+    system = sent["messages"][0]["content"]
+    assert system.startswith("sys")
+    assert json.dumps(GradeSpec.llm_json_schema()) in system   # the whole schema
+    assert "json" in system.lower()          # several endpoints require the word
+    assert out.saturation == 0.0             # and it still goes through sanitize()
+
+
+def test_a_text_only_endpoint_gets_json_dug_out_of_its_prose():
+    from ragvid.providers.openai_compat import OpenAICompatProvider
+
+    fenced = "Sure!\n```json\n" + CANNED.model_dump_json() + "\n```\nHope that helps."
+    client = _fake([_text(fenced)])
+    p = OpenAICompatProvider("weird", "https://x/v1", "m", "K",
+                             structured="text", client=client)
+    out = p.plan("sys", "usr")
+
+    assert "response_format" not in client.calls[0]   # asking would 400
+    assert out == CANNED
+
+
+def test_a_short_answer_is_an_error_not_a_half_filled_spec():
+    """The failure this whole ladder exists to make visible.
+
+    Pydantic would default the missing fields and hand back a spec that looks
+    fine and grades wrong. Naming the fields is far cheaper to diagnose.
+    """
+    from ragvid.providers.openai_compat import OpenAICompatProvider
+
+    half = json.loads(CANNED.model_dump_json())
+    half.pop("saturation")
+    half["slope"].pop("b")
+    client = _fake([_text(json.dumps(half))])
+    p = OpenAICompatProvider("deepseek", "https://x/v1", "m", "K",
+                             structured="json_object", client=client)
+
+    with pytest.raises(ProviderError) as info:
+        p.plan("sys", "usr")
+    assert "saturation" in str(info.value) and "slope.b" in str(info.value)
+    assert info.value.provider == "deepseek"
+
+
+def test_prose_with_no_json_at_all_is_a_typed_error():
+    from ragvid.providers.openai_compat import OpenAICompatProvider
+
+    client = _fake([_text("I'd rather not.")])
+    p = OpenAICompatProvider("weird", "https://x/v1", "m", "K",
+                             structured="text", client=client)
+    with pytest.raises(ProviderError, match="no JSON object"):
+        p.plan("sys", "usr")
+
+
+def test_an_endpoint_that_rejects_strict_mode_steps_down_by_itself():
+    """The escape hatch points at an unknown endpoint, so the flag can be wrong.
+    A 400 on the response_format must degrade, not fail the grade."""
+    from ragvid.providers.openai_compat import OpenAICompatProvider
+
+    client = _fake([_bad_request(), _bad_request(), _text(CANNED.model_dump_json())])
+    p = OpenAICompatProvider("custom", "https://x/v1", "m", "K",
+                             structured="json_schema", client=client)
+
+    assert p.plan("sys", "usr") == CANNED
+    formats = [c.get("response_format", {}).get("type") for c in client.calls]
+    assert formats == ["json_schema", "json_object", None]
+    assert p.structured == "text"   # remembered, so the next grade costs one call
+
+
+def test_a_provider_never_climbs_above_its_declared_capability():
+    from ragvid.providers.openai_compat import OpenAICompatProvider
+
+    client = _fake([_ok(CANNED)])
+    OpenAICompatProvider("deepseek", "https://x/v1", "m", "K",
+                         structured="json_object", client=client).plan("sys", "usr")
+    assert client.calls[0]["response_format"]["type"] == "json_object"
+
+
+def test_a_bad_request_below_the_last_rung_still_surfaces():
+    import openai
+
+    from ragvid.providers.openai_compat import OpenAICompatProvider
+
+    client = _fake([_bad_request("model not found")])
+    p = OpenAICompatProvider("custom", "https://x/v1", "m", "K",
+                             structured="text", client=client)
+    with pytest.raises(openai.BadRequestError):
+        p.plan("sys", "usr")
+
+
+# ---- keys: precedence, and never leaking one ------------------------------
+
+SENTINEL = "gsk_SENTINEL_never_leak_me_0123456789"
+
+
+def test_a_key_typed_into_the_app_beats_the_environment(monkeypatch):
+    from ragvid import settings
+
+    monkeypatch.setenv("GROQ_API_KEY", "from_environment")
+    settings.set_key("groq", SENTINEL)
+    assert settings.key("groq", "GROQ_API_KEY") == SENTINEL
+
+
+def test_the_environment_still_configures_a_provider_with_nothing_stored(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "from_environment")
+    monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
+    client = get_provider("groq").client        # must not raise
+    assert client.api_key == "from_environment"
+
+
+def test_a_stored_key_configures_the_provider_without_touching_the_environment(monkeypatch):
+    from ragvid import settings
+
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
+    settings.set_key("groq", SENTINEL)
+    assert get_provider("groq").client.api_key == SENTINEL
+    assert "GROQ_API_KEY" not in os.environ     # nothing was smuggled into the env
+
+
+def test_the_saved_provider_and_model_are_what_a_grade_uses(monkeypatch):
+    from ragvid import settings
+
+    monkeypatch.setenv("RAGVID_PROVIDER", "groq")   # settings win over this
+    monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
+    settings.select(provider="openai", model="gpt-4.1")
+    p = get_provider()
+    assert (p.name, p.model) == ("openai", "gpt-4.1")
+
+    # ...but a model saved for openai must not follow the user to anthropic
+    assert get_provider("anthropic").model == DEFAULTS["anthropic"]
+
+
+def test_a_provider_never_carries_its_key_in_str_or_repr(monkeypatch):
+    from ragvid import settings
+
+    settings.set_key("groq", SENTINEL)
+    p = get_provider("groq")
+    p.client                                     # force the key to be read
+    assert SENTINEL not in str(p) + repr(p) + str(vars(p))
+    assert "groq" in repr(p)                     # still says something useful
+
+
+def test_ollama_needs_no_key_at_all(monkeypatch):
+    monkeypatch.setattr("ragvid.providers.base.load_env", lambda *a, **k: None)
+    p = get_provider("ollama")
+    assert p.client.base_url.host == "127.0.0.1"   # built without a key, no raise
+
+
+def test_describe_reports_configured_state_and_never_a_key():
+    from ragvid import settings
+
+    settings.set_key("groq", SENTINEL)
+    rows = {row["name"]: row for row in describe()}
+    assert rows["groq"]["configured"] is True
+    assert rows["groq"]["hint"] == "…6789"
+    assert rows["groq"]["source"] == "settings"
+    assert rows["anthropic"]["configured"] is False
+    assert rows["ollama"]["configured"] is True and rows["ollama"]["needs_key"] is False
+    assert SENTINEL not in json.dumps(rows)
