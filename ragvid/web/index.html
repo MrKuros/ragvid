@@ -49,6 +49,9 @@
   #firstrun b { font-size:15px; }
   #firstrun p { font-size:14px; }
   #firstrun .quiet { font-size:13px; opacity:.75; }
+  #svcLine { font-size:13px; opacity:.7; margin-top:2px; }
+  #svcLine[hidden] { display:none; }
+  #svcLine a { color:var(--accent); }
 
   /* ---- work area ---- */
   #work { flex:1; display:flex; flex-direction:column; min-height:0; }
@@ -150,6 +153,14 @@
                        white-space:nowrap; }
   #uploading .uplabel { color:var(--dim); font-variant-numeric:tabular-nums;
                         min-width:12ch; text-align:right; }
+  /* nothing to measure: a stripe that moves says "working", a full bar lies */
+  #uploading .prog i.indet {
+    background:linear-gradient(90deg,var(--line) 0 35%,var(--accent) 50%,var(--line) 65% 100%);
+    background-size:250% 100%; animation:slide 1.1s linear infinite; }
+  @keyframes slide { from { background-position:100% 0; } to { background-position:-150% 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    #uploading .prog i.indet { animation:none; background:var(--line); }
+  }
 
   /* ---- modal ---- */
   dialog { border:1px solid var(--line); border-radius:12px; background:var(--panel);
@@ -237,6 +248,8 @@
     <p class="quiet">Or skip it — matching the colours of a photo you already
        have works with no account at all.</p>
   </div>
+  <p class="quiet" id="svcLine" hidden>Using <b id="svcName"></b>.
+     <a href="#" id="svcChange">Change or update the key</a>.</p>
 </section>
 
 <section id="work" hidden>
@@ -446,7 +459,12 @@ function render(state) {
   }
   $("empty").hidden = S.open;
   $("work").hidden = !S.open;
-  $("firstrun").hidden = S.configured !== false;   // absent on an old server: assume set up
+  // Loud once, quiet forever after -- but never nothing, or "where do I put my
+  // key?" has no answer on the one screen a new user is actually looking at.
+  const noKey = S.configured === false;            // absent on an old server: assume set up
+  $("firstrun").hidden = !noKey;
+  $("svcLine").hidden = noKey || !S.provider;
+  $("svcName").textContent = S.provider || "";
   $("clipname").textContent = S.open ? S.name : "";
   if (!S.open) return;
 
@@ -596,13 +614,31 @@ $("resetBtn").onclick = () => {
 // which takes a moment more, so the label says what is happening rather than
 // sitting at 100% looking stuck.
 
-function showUpload(on, name) {
+function showUpload(on, name, label) {
   $("uploading").hidden = !on;
+  $("upBar").classList.toggle("indet", !!label);
   if (on) {
     $("upName").textContent = name;
-    $("upBar").style.width = "0%";
-    $("upLabel").textContent = "0%";
+    $("upBar").style.width = label ? "100%" : "0%";
+    $("upLabel").textContent = label || "0%";
   }
+}
+
+// Opening a file already on this machine sends no bytes, so there is no
+// percentage to show -- but the server still has to probe the clip, which on a
+// long file is seconds of a window that looks hung. Same bar, running.
+async function openPath(route, path) {
+  const name = path.replace(/^.*[/\\]/, "");
+  showUpload(true, name, "reading…");
+  setBusy(true, "Opening…");
+  hideBanner();
+  try {
+    render(await call(route, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }));
+  } catch (e) { showError(e); }
+  finally { showUpload(false); setBusy(false); }
 }
 
 function upload(path, file) {
@@ -641,6 +677,7 @@ function upload(path, file) {
 $("openBtn").onclick = () => openBrowser("video");
 $("emptyBrowse").onclick = (e) => { e.preventDefault(); openBrowser("video"); };
 $("firstrunBtn").onclick = () => $("settingsBtn").click();
+$("svcChange").onclick = (e) => { e.preventDefault(); $("settingsBtn").click(); };
 $("videoFile").onchange = (e) => {
   const f = e.target.files[0]; if (!f) return;
   upload("/api/project", f); e.target.value = "";
@@ -725,7 +762,7 @@ function entry(icon, name, size, onclick) {
 }
 function choose(path) {
   $("browser").close();
-  post(browseMode === "image" ? "/api/reference" : "/api/project", { path });
+  openPath(browseMode === "image" ? "/api/reference" : "/api/project", path);
 }
 $("pathGo").onclick = () => {
   const v = $("pathInput").value.trim();
