@@ -41,6 +41,14 @@
   #empty h1 { font-size:26px; margin:0; font-weight:600; }
   #empty p { color:var(--dim); margin:0; max-width:46ch; line-height:1.6; }
   #empty.drag { background:#1b2427; }
+  #firstrun { margin-top:10px; max-width:46ch; padding:16px 18px; border-radius:12px;
+              border:1px solid var(--line); background:var(--panel);
+              display:flex; flex-direction:column; gap:9px; align-items:center;
+              text-align:center; }
+  #firstrun[hidden] { display:none; }
+  #firstrun b { font-size:15px; }
+  #firstrun p { font-size:14px; }
+  #firstrun .quiet { font-size:13px; opacity:.75; }
 
   /* ---- work area ---- */
   #work { flex:1; display:flex; flex-direction:column; min-height:0; }
@@ -205,6 +213,14 @@
   <h1>Drop a video here</h1>
   <p>Or <a href="#" id="emptyBrowse" style="color:var(--accent)">browse your files</a>.
      Then describe the look you want, check a frame, and save.</p>
+  <div id="firstrun" hidden>
+    <b>One thing first</b>
+    <p>Describing a look needs an AI service, and those need an account. It takes
+       a minute and there are free options.</p>
+    <button class="primary" id="firstrunBtn">Connect a service</button>
+    <p class="quiet">Or skip it — matching the colours of a photo you already
+       have works with no account at all.</p>
+  </div>
 </section>
 
 <section id="work" hidden>
@@ -314,7 +330,7 @@ const $ = (id) => document.getElementById(id);
 // Must match server.py's API_VERSION. The HTML is re-read on every request but
 // the Python is not, so an old `ragvid serve` will happily serve this file and
 // then answer with a contract it does not implement.
-const EXPECTED_API = 4;
+const EXPECTED_API = 5;
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
@@ -415,6 +431,7 @@ function render(state) {
   }
   $("empty").hidden = S.open;
   $("work").hidden = !S.open;
+  $("firstrun").hidden = S.configured !== false;   // absent on an old server: assume set up
   $("clipname").textContent = S.open ? S.name : "";
   if (!S.open) return;
 
@@ -560,6 +577,7 @@ $("resetBtn").onclick = () => {
 
 $("openBtn").onclick = () => openBrowser("video");
 $("emptyBrowse").onclick = (e) => { e.preventDefault(); openBrowser("video"); };
+$("firstrunBtn").onclick = () => $("settingsBtn").click();
 $("videoFile").onchange = (e) => {
   const f = e.target.files[0]; if (!f) return;
   const fd = new FormData(); fd.append("file", f);

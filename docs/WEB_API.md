@@ -35,7 +35,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
   "can_undo": true,
   "history_depth": 3,
   "steps": [{"index":0,"label":"warm and nostalgic","rationale":"...","current":false}],
-  "api_version": 4,
+  "api_version": 5,
   "version": 7,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,
@@ -53,11 +53,18 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
              "width": 720, "height": 405, "frames_sampled": 10 },
   "providers": ["groq", "anthropic", "openai", "..."],
   "provider": "groq",
-  "model": "openai/gpt-oss-120b"
+  "model": "openai/gpt-oss-120b",
+  "configured": true
 }
 ```
 
-When nothing is open: `{"open": false, "providers": [...], "provider": "groq"}`.
+When nothing is open: `{"open": false, "providers": [...], "provider": "groq",
+"configured": false}`.
+
+`configured` says whether the active provider has a key. It is repeated here,
+rather than left to `/api/providers`, so an opening screen can prompt for a key
+without a second round trip — a first-time user does not know one is needed, and
+finds out by typing a mood and getting an error.
 When open but not yet graded: `"planned": false`, `"spec": null`.
 
 ### The spec object

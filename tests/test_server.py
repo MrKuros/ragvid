@@ -712,6 +712,24 @@ def test_a_key_can_be_set_and_cleared_from_the_ui(api, tmp_path):
     assert settings.key("groq", "GROQ_API_KEY") is None
 
 
+def test_state_says_whether_the_active_provider_has_a_key(api):
+    """The opening screen prompts for a key off this flag.
+
+    Nobody arrives at a colour grader expecting to bring an API key, so the
+    first-run prompt has to appear before the user types anything. It reads
+    `configured` straight off /api/state -- if that field stopped being sent,
+    the prompt would silently never show and the first grade would fail with an
+    error instead.
+    """
+    assert api.get("/api/state").json["configured"] is False
+
+    api.post("/api/key", {"provider": "groq", "key": SENTINEL})
+    assert api.get("/api/state").json["configured"] is True
+
+    api.post("/api/key", {"provider": "groq", "key": None})
+    assert api.get("/api/state").json["configured"] is False
+
+
 def test_no_route_ever_answers_with_the_key(api):
     """The sentinel goes in through the one route that accepts it, and must not
     come back out of any of them -- not in a body, not in an error."""

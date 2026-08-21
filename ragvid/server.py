@@ -38,7 +38,7 @@ MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # the server is still running the Python it was started with -- which otherwise
 # shows up as fields silently missing and routes 404ing, with nothing on screen
 # to explain it.
-API_VERSION = 4
+API_VERSION = 5
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -128,15 +128,27 @@ def _work_dir() -> Path:
 
 
 def _active() -> dict:
-    """Which provider a grade would use right now, and with what model."""
-    from .providers.base import active_choice, info_for
+    """Which provider a grade would use right now, with what model, and whether
+    it has a key at all.
 
+    `configured` is here rather than only on /api/providers so a UI can put a
+    first-run prompt on its opening screen without a second round trip: nobody
+    arrives knowing they need to bring an API key.
+    """
+    from ragvid import settings
+
+    from .providers.base import active_choice, info_for, load_env
+
+    load_env()
     name, model = active_choice()
+    configured = False
     try:
-        model = model or info_for(name).model
+        info = info_for(name)
+        model = model or info.model
+        configured = info.env_var is None or settings.key(name, info.env_var) is not None
     except ProviderError:
         model = model or ""
-    return {"provider": name, "model": model}
+    return {"provider": name, "model": model, "configured": configured}
 
 
 def _state_json() -> dict:

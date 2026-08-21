@@ -15,28 +15,61 @@ are sent away. No frames, no clips, no uploads.
 
 ## Getting started
 
-You need [ffmpeg](https://ffmpeg.org/download.html) and
-[uv](https://docs.astral.sh/uv/getting-started/installation/) installed first —
-on a Mac that's `brew install ffmpeg`, on Windows `winget install Gyan.FFmpeg`.
-Then, in a terminal (PowerShell on Windows):
+### 1. Install ffmpeg and uv
+
+ragvid needs two things on your machine first: **ffmpeg**, which does the video
+work, and **uv**, which runs ragvid.
+
+| Your computer | ffmpeg | uv |
+|---|---|---|
+| **Windows** | `winget install Gyan.FFmpeg` | `winget install astral-sh.uv` |
+| **macOS** | `brew install ffmpeg` | `brew install uv` |
+| **Linux** (Debian/Ubuntu) | `sudo apt install ffmpeg` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| **Linux** (Fedora) | `sudo dnf install ffmpeg` | same as above |
+| **Linux** (Arch) | `sudo pacman -S ffmpeg` | same as above |
+
+No package manager? [ffmpeg downloads](https://ffmpeg.org/download.html) ·
+[uv install guide](https://docs.astral.sh/uv/getting-started/installation/).
+
+### 2. Download ragvid
+
+Open a terminal — **PowerShell** on Windows, **Terminal** on macOS and Linux —
+and run these one line at a time:
 
 ```bash
 git clone https://github.com/MrKuros/ragvid
 cd ragvid
+```
+
+### 3. Set it up
+
+```bash
 uv venv
 uv pip install -e ".[dev]"
+```
+
+This takes a minute the first time and never again.
+
+### 4. Start it
+
+```bash
 uv run ragvid serve
 ```
 
-That last line opens ragvid in your browser. Leave the terminal window open
-while you use it.
+ragvid opens in your browser at **http://127.0.0.1:8765**. Leave the terminal
+window open while you use it — closing it stops ragvid. To stop it deliberately,
+press **Ctrl-C** in that window.
 
-**One more step the first time.** ragvid uses an AI service to turn your words
-into a grade, and those services need an account. Click **Settings**, pick a
-service, paste your key, Save. Groq is free to start and is a good first
-choice — the Settings panel links straight to the page where you get a key.
+Next time, steps 1 to 3 are done: `cd ragvid` and `uv run ragvid serve` is all
+you need.
 
-Then: open a video, type a mood, and adjust from there.
+### 5. Connect an AI service
+
+ragvid asks the first time you open it. Click **Connect a service**, pick one,
+paste your key, Save. **Groq** is free to start and the panel links straight to
+the page where you get a key.
+
+You only do this once — ragvid remembers.
 
 ## What you can ask for
 
