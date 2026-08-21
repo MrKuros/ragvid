@@ -21,7 +21,7 @@ Read this before building a front end.
                             └────┬────┘
                                  ▼
                             providers/
-                          groq · anthropic
+            groq · openai · anthropic · 8 more · custom
                                  │
                                  ▼
                           spec.GradeSpec

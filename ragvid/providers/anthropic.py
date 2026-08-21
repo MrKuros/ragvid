@@ -44,7 +44,7 @@ class AnthropicProvider:
             max_tokens=MAX_TOKENS,
             system=system,
             messages=[{"role": "user", "content": user}],
-            # effort=low: this is ~14 numbers, not a reasoning problem. Thinking stays
+            # effort=low: this is 43 numbers to fill in, not a reasoning problem. Thinking stays
             # on (the default on opus-5) so we don't hit the disabled-thinking quirks.
             output_config={
                 "effort": "low",

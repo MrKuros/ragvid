@@ -349,5 +349,16 @@ class Project:
 
 
 def available_providers() -> Iterable[str]:
-    """Provider names a UI can offer in a dropdown."""
-    return ("groq", "anthropic")
+    """Provider names a UI can offer in a dropdown.
+
+    Reads the live catalog rather than a hard-coded pair. This used to return
+    ("groq", "anthropic") and kept returning it after nine more providers
+    landed, so any UI built on the documented dropdown helper silently offered
+    two of eleven.
+
+    Includes the `custom` entry only when RAGVID_BASE_URL actually points
+    somewhere, matching what get_provider() will accept.
+    """
+    from .providers.base import catalog
+
+    return tuple(p.name for p in catalog())

@@ -263,12 +263,6 @@ def test_repr_names_the_clip_and_the_depth(project):
     assert repr(project) == "<Project clip.mp4 grades=1>"
 
 
-def test_available_providers_is_offerable_in_a_dropdown():
-    from ragvid.project import available_providers
-
-    assert set(available_providers()) == {"groq", "anthropic"}
-
-
 # ---- unplanned project ----------------------------------------------------
 # A GUI can press Export before Grade; the CLI never can, because every command
 # path loads a session that already holds at least one spec. Without the guard
@@ -345,3 +339,23 @@ def _lut_size(path) -> int:
         if line.startswith("LUT_3D_SIZE"):
             return int(line.split()[1])
     raise AssertionError("no LUT_3D_SIZE")
+
+
+def test_available_providers_tracks_the_catalog(monkeypatch):
+    """The documented dropdown helper must not drift from the real catalog.
+
+    It returned a hard-coded ("groq", "anthropic") and kept returning it after
+    nine more providers landed, so a UI built on docs/ARCHITECTURE.md's
+    "Provider dropdown -> available_providers()" row offered two of eleven.
+    """
+    from ragvid import available_providers
+    from ragvid.providers.base import CATALOG
+
+    got = list(available_providers())
+    assert set(got) >= set(CATALOG), "a catalogued provider is missing from the dropdown"
+
+    # `custom` appears only when there is somewhere for it to point.
+    monkeypatch.delenv("RAGVID_BASE_URL", raising=False)
+    assert "custom" not in available_providers()
+    monkeypatch.setenv("RAGVID_BASE_URL", "http://localhost:1234/v1")
+    assert "custom" in available_providers()

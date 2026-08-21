@@ -35,7 +35,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
   "can_undo": true,
   "history_depth": 3,
   "steps": [{"index":0,"label":"warm and nostalgic","rationale":"...","current":false}],
-  "api_version": 3,
+  "api_version": 4,
   "version": 7,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,
@@ -51,8 +51,9 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
             "rationale": "..." },
   "stats": { "mean": {"r":0.2,"g":0.15,"b":0.15}, "saturation": 0.48,
              "width": 720, "height": 405, "frames_sampled": 10 },
-  "providers": ["groq", "anthropic"],
-  "provider": "groq"
+  "providers": ["groq", "anthropic", "openai", "..."],
+  "provider": "groq",
+  "model": "openai/gpt-oss-120b"
 }
 ```
 
@@ -175,6 +176,44 @@ when none works. It is worth far less than a UI checkbox implies once `effects`
 are in play: measured at 1080p30, the full effect stack runs 0.42× realtime on
 libx264 and 0.48× on NVENC, because the filters — not the encoder — are the
 ceiling. Colour-only exports run 1.38×. Size the progress bar's ETA accordingly.
+
+## Providers and keys
+
+`GET /api/providers` → `200`
+
+```json
+{"providers": [
+  {"name": "groq", "label": "Groq", "model": "openai/gpt-oss-120b",
+   "needs_key": true, "env_var": "GROQ_API_KEY",
+   "configured": true, "hint": "…R0cl", "source": "environment",
+   "structured": "json_schema", "enforces_schema": true,
+   "keys_url": "https://console.groq.com/keys",
+   "note": "Fast and free to start. Enforces the schema, so grades come back complete.",
+   "active": true}
+]}
+```
+
+`enforces_schema` is the field a UI should surface. Filling 43 required numbers
+reliably needs strict JSON-schema decoding; providers without it are labelled
+best effort and may return an incomplete grade, which the server rejects with a
+`ProviderError` naming the missing fields rather than filling them with
+defaults.
+
+`source` is where the key came from — `"settings"`, `"environment"`, or absent.
+`hint` is the last four characters and is the **only** key-shaped value any
+route ever returns. There is no endpoint that reads a key back.
+
+`POST /api/provider` `{"provider": "ollama", "model": "llama3.1"}` → the new
+state. `model` is optional; omit it for the provider's default, or pass `""` to
+restore it.
+
+`POST /api/key` `{"provider": "openai", "key": "sk-…"}` stores a key;
+`{"provider": "openai", "key": null}` forgets it. The response is the provider
+list again, so a UI re-renders from one round trip. The stored file is created
+`0600` before it holds anything.
+
+Keys set here take precedence over the environment and over `.env`, because a
+key typed into the app should win over ambient configuration.
 
 ## Errors
 
