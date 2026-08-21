@@ -215,6 +215,13 @@ list again, so a UI re-renders from one round trip. The stored file is created
 Keys set here take precedence over the environment and over `.env`, because a
 key typed into the app should win over ambient configuration.
 
+Note that `POST /api/key` names its own provider and `POST /api/provider` is a
+separate call: storing a key does not switch to that provider. Keep those two
+apart in the UI as well. ragvid's own settings panel once aimed its key box at
+whichever provider was *active*, so adding a key for a second service meant
+selecting it first — which switched grading to a service that had no key yet
+and left the app unusable until the key was typed.
+
 ## Errors
 
 Any non-2xx carries:

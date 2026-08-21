@@ -1,89 +1,101 @@
 # ragvid
 
-Describe the vibe, get the grade.
+**Tell it the mood you want. It colours your video.**
+
+Type "gloomy, teal shadows, grainy" and ragvid works out the colour grade,
+shows you a preview, and lets you talk your way to the look you want — "less
+blue", "half as strong", "warmer highlights". When you like it, it renders the
+whole video.
+
+You can also hand it a photo instead of a description, and it will match your
+footage to that photo's colours.
+
+**Your video never leaves your computer.** Only your few words of description
+are sent away. No frames, no clips, no uploads.
+
+## Getting started
+
+You need [ffmpeg](https://ffmpeg.org/download.html) and
+[uv](https://docs.astral.sh/uv/getting-started/installation/) installed first.
+Then:
+
+```bash
+git clone https://github.com/MrKuros/ragvid && cd ragvid
+uv venv && uv pip install -e ".[dev]"
+uv run ragvid serve
+```
+
+That last line opens ragvid in your browser. Leave the terminal window open
+while you use it.
+
+**One more step the first time.** ragvid uses an AI service to turn your words
+into a grade, and those services need an account. Click **Settings**, pick a
+service, paste your key, Save. Groq is free to start and is a good first
+choice — the Settings panel links straight to the page where you get a key.
+
+Then: open a video, type a mood, and adjust from there.
+
+## What you can ask for
+
+Anything a colourist would understand:
+
+> `warm golden hour` · `cold and clinical` · `faded 70s film` ·
+> `teal shadows, orange skin` · `moody but keep faces natural` ·
+> `grainy and soft` · `bleach bypass` · `like an old VHS tape`
+
+Then nudge it in plain words: *less blue* · *brighter* · *half as strong* ·
+*more contrast, but don't blow out the sky* · *grainier*.
+
+Every adjustment is a small change to the look you already have, so you can
+keep going until it's right. **Ctrl-Z** steps back.
+
+## Which AI service?
+
+Free to start: **Groq** (fastest way in), or **Ollama** if you want to run a
+model on your own machine with no account and no bill at all.
+
+Also supported: OpenAI, Anthropic, xAI, Mistral, DeepSeek, Moonshot,
+OpenRouter, Together — and anything OpenAI-compatible.
+
+The Settings panel tells you which services reliably return a complete grade
+and which occasionally leave gaps. When one leaves a gap, ragvid says so
+instead of quietly making something up.
+
+Your key is stored on your own computer, in a file only you can read. ragvid
+never shows it again — just the last four characters, so you can tell which key
+is which.
+
+> **If you have ever pasted a key into a chat, a screenshot, or a shared file,
+> replace it.** Anyone who has seen it can use it, and it is billed to you.
+
+## Good to know
+
+**It costs very little.** ragvid sends a few words and gets back a small set of
+numbers — it never sends the video. Grading a two-hour film costs the same as
+grading a two-second clip.
+
+**Previews are instant, exports are not.** While you're adjusting, ragvid only
+draws three frames. The full render happens once, when you export, and effects
+like grain and glow make it slower — a heavy look can take about two and a half
+times the length of the clip. Turn off the effects you don't actually want.
+
+**Matching a photo needs no account at all.** That path is pure maths, done on
+your own computer, with no AI service involved.
+
+**One clip, one look.** If different parts of your video need different looks,
+split it into separate clips first. ragvid doesn't do cuts, pacing, or audio —
+your audio is copied across untouched.
+
+## For developers
+
+There's a terminal interface, and everything the app does is available as a
+Python API:
 
 ```bash
 ragvid grade clip.mp4 --vibe "gloomy, teal shadows, grainy"
 ragvid refine "less blue, half strength"
 ragvid export out.mp4
 ```
-
-Point it at a video and either a mood word or a reference image. It measures the
-footage, produces a colour grade, and lets you talk your way to the look you
-want. There is a local web UI too — `ragvid serve`.
-
-## How it works
-
-An LLM never sees your frames. It produces **43 numbers**, and everything after
-that is numpy and ffmpeg:
-
-```
-reference image ──▶ closed-form match ──┐
-                                        │   37 colour numbers
-                                        ├──▶ GradeSpec ──┬──▶ .cube LUT ──┐
-vibe word ────────▶ LLM ────────────────┘     (JSON)     │                ├──▶ ffmpeg
-                                            ▲            └──▶ 6 effects ──┘
-"less blue" ────────────────────────────────┘                (filters)
-```
-
-Three consequences worth knowing up front:
-
-- **Cheap.** One small JSON object per request, so grading a two-hour film costs
-  the same as grading a two-second clip.
-- **Refinable.** The `.cube` is a derived artifact, not the source of truth. You
-  cannot meaningfully adjust a baked LUT; you can adjust numbers.
-- **Offline for reference images.** That path is closed-form linear colour
-  transfer — no model, no network.
-
-Analysis samples ~10 frames and takes the median: clips drift, so trusting frame
-0 is a mistake. Application touches every frame, but it is a fast filter chain
-with no model in the loop.
-
-## Install
-
-```bash
-git clone https://github.com/MrKuros/ragvid && cd ragvid
-uv venv && uv pip install -e ".[dev]"
-```
-
-Requires `ffmpeg` (any recent build has the `lut3d` filter).
-
-Then run it and set a key:
-
-```bash
-uv run ragvid serve            # http://127.0.0.1:8765, opens a browser
-```
-
-Settings → pick a service → paste the key → Save. That panel is the only place
-keys are entered, and "Forget key" removes one. An environment variable or a
-`.env` still works; a key saved in Settings wins over both.
-
-Keys live in `~/.local/share/ragvid/settings.json`, created `0600` before it
-holds anything. A key is never printed, logged, or returned by the API — only
-its last four characters.
-
-`uv run` is what makes `ragvid` resolve without activating the venv; inside an
-activated venv the bare `ragvid ...` in this README works as written. `--port`
-picks a different port, and a taken port falls through to the next free one.
-
-## Providers
-
-`groq · anthropic · openai · xai · mistral · openrouter · deepseek · moonshot ·
-together · ollama`, plus any OpenAI-compatible endpoint via `RAGVID_BASE_URL`.
-
-They differ in one way that matters. Filling 43 required numbers reliably needs
-strict JSON-schema decoding, and not every provider enforces it. The Settings
-panel says which each one does; a best-effort provider that returns an
-incomplete grade raises an error naming the missing fields instead of quietly
-filling them with defaults.
-
-Groq is the default. Its free tier is 8000 tokens/min — fine interactively,
-roughly two calls a minute at this spec size.
-
-> **Rotate any key that has been shared.** `.env` is gitignored from the first
-> commit, but nothing protects a key that already leaked.
-
-## Commands
 
 | Command | Does |
 |---|---|
@@ -95,68 +107,20 @@ roughly two calls a minute at this spec size.
 | `ragvid export OUT` | Render the full video |
 | `ragvid serve` | Open the local web UI |
 
-`grade` and `refine` render a 3-frame contact sheet, not the whole file, so the
-refinement loop stays sub-second. Only `export` does the full render.
+API keys are the one thing the terminal cannot set — they are entered in the
+Settings panel and nowhere else, so a key can never reach your shell history or
+be read out of the process list by another user on the machine.
 
-## As a library
+A grade is **43 numbers**: 37 colour values baked into a `.cube` LUT, plus 6
+spatial effects that ffmpeg applies around it. A LUT maps one pixel at a time
+and cannot see its neighbours, so a `.cube` taken into Resolve carries the
+colour and none of the effects.
 
-The CLI is a thin shell over `Project`, which is the whole API — probe, plan,
-refine, bake, preview, export. Build a UI against this instead of
-reimplementing the flow.
-
-```python
-from ragvid import Project
-
-p = Project.create("clip.mp4", root="~/grades/clip")
-p.plan_from_vibe("gloomy")                              # or plan_from_reference(img)
-p.refine("less blue")
-p.set_spec(p.spec.model_copy(update={"contrast": 0.4})) # a slider moved
-p.undo()
-p.export("out.mp4", progress=lambda f: bar.set(f))      # 0.0 -> 1.0
-```
-
-Nothing in the core prints, reads argv, calls `sys.exit`, or assumes a working
-directory. Failures are typed (`InputError`, `RateLimited`, `FFmpegError`, …)
-and carry the fields a UI needs, so nothing is recovered by parsing a message.
-
-`python examples/api_tour.py` runs every call in order, no API key needed.
-
-## What a grade is
-
-**37 colour numbers**, baked into the LUT: gain, lift, gamma ([ASC CDL][cdl]),
-saturation, temperature/tint, contrast, exposure in stops, a shadow/highlight
-split with independent tint and lift, six hue qualifiers, a soft highlight
-shoulder, and a mix of the whole look back toward the source.
-
-**6 spatial effects**, applied by ffmpeg around the LUT: denoise, glow, softness
-(blur or sharpen), grain, vignette, chromatic fringing.
-
-That split is where the `.cube` stops. A 3D LUT maps one pixel to one pixel and
-cannot see its neighbours, so no effect can live in one — take a `.cube` into
-Resolve and you get the colour and nothing else.
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) covers that seam.
-
-Effects are not free, and the bill lands on export. Measured at 1080p30:
-
-| Export | Speed |
-|---|---|
-| colour only | **1.38×** realtime |
-| grain + vignette | **0.83×** |
-| all six effects | **0.42×** |
-
-`--gpu` does not rescue that: it swaps the encoder, and the encoder is not the
-bottleneck. Leave at zero the effects you do not actually want.
-
-One clip gets one look; for several looks, split into clips. Out of scope:
-pacing, cuts, and audio (stream-copied on export, never re-encoded).
-
-## Docs
-
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — layering, the load-bearing
-  evaluation order, and the gotchas that cost real debugging time
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the `Project` API to build
+  against, the load-bearing evaluation order, and the gotchas that cost real
+  debugging time
 - [`docs/WEB_API.md`](docs/WEB_API.md) — the local HTTP API behind `serve`
-
-[cdl]: https://en.wikipedia.org/wiki/ASC_CDL
+- `python examples/api_tour.py` — every call in order, no API key needed
 
 ## License
 
