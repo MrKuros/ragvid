@@ -1,9 +1,15 @@
-"""Anthropic provider. Same contract as Groq, via structured outputs on the same schema."""
+"""Anthropic provider. Separate from the OpenAI-compatible ones on purpose: a
+different SDK, and a different structured-output mechanism (`output_config`,
+not `response_format`).
+
+It sits at the top rung of the reliability ladder — the schema is enforced, so
+every field comes back — which is why it needs none of openai_compat's
+step-down logic.
+"""
 
 from __future__ import annotations
 
 import json
-import os
 
 from ragvid.errors import ProviderError, ProviderNotConfigured
 from ragvid.spec import GradeSpec
@@ -24,7 +30,9 @@ class AnthropicProvider:
         if self._client is None:
             import anthropic
 
-            key = os.environ.get("ANTHROPIC_API_KEY")
+            from ragvid import settings
+
+            key = settings.key("anthropic", "ANTHROPIC_API_KEY")
             if not key:
                 raise ProviderNotConfigured("anthropic", "ANTHROPIC_API_KEY")
             self._client = anthropic.Anthropic(api_key=key)

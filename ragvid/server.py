@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import errno
 import json
-import os
 import re
 import threading
 import traceback
@@ -23,9 +22,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .errors import InputError, RagvidError, SessionNotFound
+from .errors import InputError, ProviderError, RagvidError, SessionNotFound
 from .platform import data_dir, is_windows
-from .project import Project, available_providers
+from .project import Project
 from .session import Session
 from .spec import GradeSpec
 
@@ -39,7 +38,7 @@ MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # the server is still running the Python it was started with -- which otherwise
 # shows up as fields silently missing and routes 404ing, with nothing on screen
 # to explain it.
-API_VERSION = 3
+API_VERSION = 4
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -128,16 +127,26 @@ def _work_dir() -> Path:
     return data_dir() / "work"
 
 
-def _provider_name() -> str:
-    return (os.environ.get("RAGVID_PROVIDER") or "groq").strip().lower()
+def _active() -> dict:
+    """Which provider a grade would use right now, and with what model."""
+    from .providers.base import active_choice, info_for
+
+    name, model = active_choice()
+    try:
+        model = model or info_for(name).model
+    except ProviderError:
+        model = model or ""
+    return {"provider": name, "model": model}
 
 
 def _state_json() -> dict:
+    from .providers.base import catalog
+
     base = {
         "api_version": API_VERSION,
         "version": S.version,
-        "providers": list(available_providers()),
-        "provider": _provider_name(),
+        "providers": [p.name for p in catalog()],
+        **_active(),
     }
     p = S.project
     if p is None:
@@ -456,6 +465,61 @@ def r_export_status(req, q, name: str):
     return _ok(job)
 
 
+# ---- settings -------------------------------------------------------------
+# These live on the same 127.0.0.1 listener as everything else -- no new socket,
+# no wider bind. A key is only ever ACCEPTED here; nothing below ever returns
+# one, logs one, or puts one in an error. The most a caller learns about a
+# stored key is `hint`: an ellipsis and its last four characters.
+
+
+def _provider_arg(body: dict) -> str:
+    from .providers.base import info_for
+
+    name = str(body.get("provider") or "").strip().lower()
+    try:
+        info_for(name)
+    except ProviderError as exc:
+        # A name typed by a UI is bad input, not an upstream failure.
+        raise InputError("provider", str(exc)) from exc
+    return name
+
+
+def r_providers(req, q):
+    """Every provider, whether it is ready to use, and which one is active."""
+    from .providers.base import describe
+
+    return _ok({"providers": describe(), **_active()})
+
+
+def r_set_provider(req, q):
+    """Choose the provider (and optionally the model) for the next grade."""
+    from ragvid import settings
+
+    body = _json_body(req)
+    name = _provider_arg(body)
+    model = body.get("model")
+    settings.select(provider=name, model=None if model is None else str(model).strip())
+    return _ok(_state_json())
+
+
+def r_set_key(req, q):
+    """Store an API key, or clear it when `key` is empty or null.
+
+    Clearing removes the entry from settings.json outright, so the old bytes do
+    not linger in the file.
+    """
+    from ragvid import settings
+
+    body = _json_body(req)
+    name = _provider_arg(body)
+    key = body.get("key")
+    if key is None or not str(key).strip():
+        settings.clear_key(name)
+    else:
+        settings.set_key(name, str(key))
+    return r_providers(req, q)
+
+
 def r_index(req, q):
     body = INDEX.read_bytes() if INDEX.is_file() else PLACEHOLDER
     return 200, "text/html; charset=utf-8", body
@@ -476,6 +540,9 @@ ROUTES = {
     ("POST", "/api/reset"): r_reset,
     ("POST", "/api/revert"): r_revert,
     ("GET", "/api/browse"): r_browse,
+    ("GET", "/api/providers"): r_providers,
+    ("POST", "/api/provider"): r_set_provider,
+    ("POST", "/api/key"): r_set_key,
     ("POST", "/api/export"): r_export,
 }
 
