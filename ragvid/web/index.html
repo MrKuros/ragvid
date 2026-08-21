@@ -156,6 +156,10 @@
   .dfoot input { flex:1; background:var(--bg); border:1px solid var(--line);
                  border-radius:6px; padding:8px 11px; outline:none; }
   .empty-dir { color:var(--dim); padding:22px; text-align:center; font-size:14px; }
+  .dmsg { color:var(--dim); font-size:13px; }
+  .dmsg:empty { display:none; }
+  .dmsg.bad { color:#f3d9d6; background:#2a1c1c; border:1px solid #4a2a28;
+              border-radius:var(--r); padding:6px 10px; }
 
   /* ---- settings ---- */
   .prow { display:flex; gap:11px; align-items:center; width:100%; text-align:left;
@@ -272,6 +276,7 @@
   <div class="dhead"><div class="crumbs" id="crumbs"></div></div>
   <div class="dlist" id="dlist"></div>
   <div class="dfoot">
+    <span class="dmsg" id="browseMsg"></span>
     <input type="text" id="pathInput" placeholder="…or paste a path">
     <button id="pathGo">Open</button>
     <button id="saveGo" class="primary" hidden>Save here</button>
@@ -293,7 +298,7 @@
     <p class="keynote" id="keyNote"></p>
   </div>
   <div class="dfoot">
-    <span class="keynote" id="setMsg"></span>
+    <span class="dmsg keynote" id="setMsg"></span>
     <span class="spacer"></span>
     <button id="setClose">Done</button>
   </div>
@@ -353,6 +358,20 @@ function setBusy(on, label) {
 
 // ---- errors: branch on type, never parse the message -----------------------
 
+// An open <dialog> is in the top layer and its backdrop covers the banner, so an
+// error raised behind one was invisible -- the click just did nothing. Errors go
+// to the dialog's own message line whenever a dialog is up.
+function errorSlot() {
+  const dlg = document.querySelector("dialog[open]");
+  return dlg ? dlg.querySelector(".dmsg") : null;
+}
+
+function say(el, msg, bad) {
+  if (!el) return;
+  el.textContent = msg || "";
+  el.classList.toggle("bad", !!(msg && bad));
+}
+
 function showError(e) {
   const info = e.info || { type: "Error", message: e.message || "Something went wrong." };
   let msg = info.message;
@@ -365,6 +384,8 @@ function showError(e) {
   } else if (info.type === "InputError") {
     msg = `${info.message}. Try another file.`;
   }
+  const slot = errorSlot();
+  if (slot) return say(slot, msg, true);
   $("bannerMsg").textContent = msg;
   $("banner").classList.add("show");
 }
@@ -575,6 +596,7 @@ async function openBrowser(mode, path) {
   }
 }
 async function listDir(path) {
+  say($("browseMsg"), "");   // a failed hop must not leave its error over the next one
   try {
     const d = await call("/api/browse" + (path ? `?path=${encodeURIComponent(path)}` : ""));
     currentDir = d.path;
@@ -810,7 +832,7 @@ $("settingsBtn").onclick = () => { $("settings").showModal(); loadProviders(); }
 $("setClose").onclick = () => $("settings").close();
 
 async function loadProviders(msg) {
-  $("setMsg").textContent = msg || "";
+  say($("setMsg"), msg);
   try {
     const d = await call("/api/providers");
     providers = d.providers;
@@ -873,7 +895,7 @@ function pick(name) {
   const p = providers.find((x) => x.name === name) || {};
   if (p.configured) return useProvider(name);
   drawProviders();
-  $("setMsg").textContent = `Paste a key for ${p.label || name} below.`;
+  say($("setMsg"), `Paste a key for ${p.label || name} below.`);
 }
 
 async function useProvider(name, msg) {
