@@ -42,7 +42,7 @@ with no model in the loop.
 ## Install
 
 ```bash
-git clone https://github.com/MrKuros/ragvid && cd rag-video
+git clone https://github.com/MrKuros/ragvid && cd ragvid
 uv venv && uv pip install -e ".[dev]"
 ```
 
