@@ -798,8 +798,13 @@ $("strength").addEventListener("change", (e) => commit([["look_mix", parseFloat(
 // stored key is NEVER sent back by the server, so there is nothing to put in
 // the input and we never try -- it shows a reminder of the last four characters
 // instead.
+//
+// The highlighted row is the one the key box edits, which is NOT the same thing
+// as the one grades use: picking a service you have no key for must not switch
+// grading over to it. The header says which one is in use.
 
 let providers = [];
+let selected = null;            // which row the key box edits
 
 $("settingsBtn").onclick = () => { $("settings").showModal(); loadProviders(); };
 $("setClose").onclick = () => $("settings").close();
@@ -810,36 +815,43 @@ async function loadProviders(msg) {
     const d = await call("/api/providers");
     providers = d.providers;
     S.provider = d.provider;
-    drawProviders(d);
+    if (!providers.some((p) => p.name === selected)) {
+      selected = (providers.find((p) => p.active) || {}).name || null;
+    }
+    drawProviders();
   } catch (e) { showError(e); }
 }
 
-function drawProviders(d) {
+function drawProviders() {
   const list = $("plist");
   list.innerHTML = "";
   providers.forEach((p) => {
     const b = document.createElement("button");
-    b.className = "prow" + (p.active ? " on" : "");
+    b.className = "prow" + (p.name === selected ? " on" : "");
     b.type = "button";
     b.innerHTML = `<span class="nm"><b></b><small></small></span><span class="tag"></span>`;
     b.querySelector("b").textContent = p.label;
     b.querySelector("small").textContent = p.note;
     const tag = b.querySelector(".tag");
-    tag.textContent = p.configured ? (p.needs_key ? `ready ${p.hint || ""}` : "ready") : "needs a key";
+    tag.textContent = p.active ? "in use"
+                    : p.configured ? (p.needs_key ? `ready ${p.hint || ""}` : "ready")
+                    : "needs a key";
     if (p.configured) tag.classList.add("ready");
-    b.onclick = () => chooseProvider(p.name);
+    b.onclick = () => pick(p.name);
     list.append(b);
   });
   const active = providers.find((p) => p.active) || {};
-  $("setActive").textContent = active.model ? `using ${active.model}` : "";
+  $("setActive").textContent = active.label
+    ? `using ${active.label}${active.model ? ` · ${active.model}` : ""}` : "";
+  const target = providers.find((p) => p.name === selected) || {};
   $("keyInput").value = "";                       // never show a stored key
-  $("keyInput").placeholder = active.needs_key
-    ? `Paste the key for ${active.label || "this service"}`
+  $("keyInput").placeholder = target.needs_key
+    ? `Paste the key for ${target.label || "this service"}`
     : "This one needs no key";
-  $("keyInput").disabled = !active.needs_key;
-  $("keySave").disabled = !active.needs_key;
-  $("keyClear").hidden = active.source !== "settings";
-  $("keyNote").innerHTML = keyNote(active);
+  $("keyInput").disabled = !target.needs_key;
+  $("keySave").disabled = !target.needs_key;
+  $("keyClear").hidden = target.source !== "settings";
+  $("keyNote").innerHTML = keyNote(target);
 }
 
 function keyNote(p) {
@@ -853,26 +865,39 @@ function keyNote(p) {
   return `${escapeHtml(where)}${get} It is stored only on this computer, readable by you alone.`;
 }
 
-async function chooseProvider(name) {
+// Selecting a row only aims the key box at it. Switching what grades use is a
+// separate step, and one we refuse for a service with no key -- otherwise
+// clicking a row to add a key would break grading until the key was typed.
+function pick(name) {
+  selected = name;
+  const p = providers.find((x) => x.name === name) || {};
+  if (p.configured) return useProvider(name);
+  drawProviders();
+  $("setMsg").textContent = `Paste a key for ${p.label || name} below.`;
+}
+
+async function useProvider(name, msg) {
   try {
     render(await call("/api/provider", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider: name }),
     }));
-    loadProviders();
+    loadProviders(msg);
   } catch (e) { showError(e); }
 }
 
 async function sendKey(key) {
-  const active = providers.find((p) => p.active) || {};
-  if (!active.name) return;
+  const target = providers.find((p) => p.name === selected) || {};
+  if (!target.name) return;
   try {
     await call("/api/key", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider: active.name, key }),
+      body: JSON.stringify({ provider: target.name, key }),
     });
     $("keyInput").value = "";
-    loadProviders(key ? "Key saved." : "Key removed.");
+    // A key you just typed is a key you want to use.
+    if (key) return useProvider(target.name, `Key saved. Now using ${target.label}.`);
+    loadProviders("Key removed.");
   } catch (e) { showError(e); }
 }
 
