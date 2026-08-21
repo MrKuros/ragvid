@@ -380,28 +380,52 @@ def test_preview_tile_matches_the_single_frame_render(tmp_path, effects):
         assert np.abs(sheet[:, i * w:(i + 1) * w] - frame).max() == 0
 
 
-def test_progress_survives_a_source_that_floods_stderr(tmp_path):
-    """ffmpeg's stderr must never be a pipe we do not drain concurrently.
+def test_progress_survives_an_ffmpeg_that_floods_stderr(tmp_path):
+    """ffmpeg's stderr must never be a pipe we leave undrained.
 
-    A slightly corrupt source emits ~190 KB of decode warnings against a 64 KiB
-    pipe buffer, which deadlocked the export forever -- and since the server
-    serialises exports, blocked every later export for the life of the process.
+    _run_with_progress reads stdout for -progress and used to read stderr only
+    after that loop ended. Any render whose stderr exceeds the 64 KiB pipe
+    buffer therefore blocked forever: ffmpeg stalled writing stderr, we stalled
+    reading stdout. The server serialises exports, so one such job also blocked
+    every later export for the life of the process.
+
+    Volume comes from -loglevel trace rather than from a deliberately corrupted
+    file. Corruption looked realistic but measured the DECODER'S TOLERANCE, not
+    our pipe handling: the same bytes make ffmpeg 9 emit ~190 KB of warnings and
+    make older builds refuse the file outright with "error reading header", so
+    the test passed locally and failed in CI. trace output is a documented
+    loglevel that behaves the same everywhere -- measured 161 KB here, 2.5x the
+    buffer.
+
+    Run on a thread with a deadline: a regression must FAIL, not hang CI.
     """
-    src = ROOT / "test_files" / "test.mp4"
-    if not src.exists():
-        pytest.skip("no test_files/test.mp4")
-    data = bytearray(src.read_bytes())
-    rnd = np.random.default_rng(0)
-    for i in rnd.integers(len(data) // 10, len(data), 3000):
-        data[int(i)] = int(rnd.integers(256))
-    bad = tmp_path / "corrupt.mp4"
-    bad.write_bytes(bytes(data))
+    import threading
 
     seen = []
-    out = render.render_video(str(bad), identity_cube(tmp_path / "i.cube"),
-                              str(tmp_path / "out.mp4"), progress=seen.append)
+    box = {}
+
+    def go():
+        try:
+            box["stderr"] = render._run_with_progress(
+                ["-loglevel", "trace", "-i", SAMPLE, "-map", "0:v:0",
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                 str(tmp_path / "out.mp4")],
+                render.probe_duration(SAMPLE), seen.append,
+            )
+        except BaseException as exc:  # surfaced by the assertions below
+            box["error"] = exc
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(timeout=45)   # normal run is under a second; 45s is a deadlock, not slowness
+
+    assert not t.is_alive(), "render deadlocked on an undrained stderr pipe"
+    assert "error" not in box, box.get("error")
+    assert len(box["stderr"]) > 65536, (
+        f"only {len(box['stderr'])} bytes of stderr -- too small to prove the "
+        "pipe buffer was exceeded, so this test would pass even if it regressed"
+    )
     assert seen and seen[-1] == 1.0
-    assert Path(out).stat().st_size > 0
 
 
 def test_timeout_is_typed_and_leaves_no_partial_file(tmp_path):
