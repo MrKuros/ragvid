@@ -16,12 +16,15 @@ are sent away. No frames, no clips, no uploads.
 ## Getting started
 
 You need [ffmpeg](https://ffmpeg.org/download.html) and
-[uv](https://docs.astral.sh/uv/getting-started/installation/) installed first.
-Then:
+[uv](https://docs.astral.sh/uv/getting-started/installation/) installed first —
+on a Mac that's `brew install ffmpeg`, on Windows `winget install Gyan.FFmpeg`.
+Then, in a terminal (PowerShell on Windows):
 
 ```bash
-git clone https://github.com/MrKuros/ragvid && cd ragvid
-uv venv && uv pip install -e ".[dev]"
+git clone https://github.com/MrKuros/ragvid
+cd ragvid
+uv venv
+uv pip install -e ".[dev]"
 uv run ragvid serve
 ```
 
