@@ -4,7 +4,20 @@ version = "0.1.0"
 description = "Describe the vibe, get the grade. A conversational color grading CLI."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "mrkuros" }]
+keywords = ["color-grading", "colour", "video", "ffmpeg", "lut", "llm", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+]
 dependencies = [
     "numpy>=1.26",
     "pydantic>=2.7",
