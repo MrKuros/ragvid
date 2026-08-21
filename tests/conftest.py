@@ -70,3 +70,30 @@ def _run_from_repo_root():
     os.chdir(REPO)
     yield
     os.chdir(prev)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings(tmp_path, monkeypatch):
+    """Point the settings store at a throwaway dir for every test.
+
+    Without this the suite reads the developer's REAL settings file, so anyone
+    who has run `ragvid config --set-key groq` sees
+    test_robustness.py::test_missing_api_key_is_a_clear_error fail with
+    "DID NOT RAISE ProviderNotConfigured" -- a green suite on a clean machine
+    and a red one on a configured machine, which is the worst way to learn
+    about a test. Reproduced before this fixture existed, not theorised.
+
+    All three branches of platform.data_dir() are pinned, not just the Linux
+    one, so the isolation holds on macOS and Windows too. The provider key
+    variables are cleared for the same reason: a real key in the environment
+    must not decide whether a test passes.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))   # Linux/XDG
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))            # macOS
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))      # Windows
+    for var in ("GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                "XAI_API_KEY", "MISTRAL_API_KEY", "OPENROUTER_API_KEY",
+                "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY", "TOGETHER_API_KEY",
+                "RAGVID_API_KEY", "RAGVID_BASE_URL", "RAGVID_PROVIDER",
+                "RAGVID_MODEL"):
+        monkeypatch.delenv(var, raising=False)
