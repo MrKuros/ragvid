@@ -227,6 +227,36 @@ def _vf(effects, lut: str | None, *extra: str, tag: str = "",
     return ",".join(parts)
 
 
+def _source_bit_depth(video: str) -> int:
+    """Bits per component of the source's video stream, 8 if ffprobe can't say.
+
+    `bits_per_raw_sample` is the direct answer whenever the decoder sets it
+    (measured on ffmpeg n9.0.1: 8 for H.264 High, 10 for High 10, 12 for ProRes
+    4444). Some codecs leave it N/A, so fall back to the pixel format's own name
+    -- every deep format in ffmpeg ends in its depth plus a byte order
+    (yuv420p10le, p010le, gbrp12le) and no 8-bit one does (yuv420p, nv12, pal8,
+    bgra). Only the "> 8" verdict is load-bearing, so rgb48le reading as 48
+    rather than 16 is harmless.
+
+    Keyed ffprobe output, not `nk=1`: the two entries come back in the stream
+    struct's order, not the order they were asked for, so unkeyed lines cannot
+    be told apart. 8 is the safe default -- it is what this path pinned
+    unconditionally before.
+    """
+    proc = subprocess.run(
+        [ffprobe(), "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=bits_per_raw_sample,pix_fmt",
+         "-of", "default=noprint_wrappers=1", video],
+        capture_output=True, text=True,
+    )
+    info = dict(l.split("=", 1) for l in proc.stdout.splitlines() if "=" in l)
+    if info.get("bits_per_raw_sample", "N/A").isdigit():
+        return int(info["bits_per_raw_sample"])
+    if m := re.search(r"(\d{1,2})(?:le|be)$", info.get("pix_fmt", "")):
+        return int(m.group(1))
+    return 8
+
+
 def probe_duration(video: str) -> float:
     """Container duration in seconds, 0.0 if ffprobe can't say."""
     proc = subprocess.run(
@@ -379,7 +409,29 @@ def render_video(video: str, cube: str, out_path: str, effects=None,
         # lut3d negotiates yuv444p, which libx264 happily encodes into a file most
         # players and hardware decoders reject. Pin 4:2:0. The hw paths already
         # upload their own format (nv12) so they must not get -pix_fmt.
-        args += ["-pix_fmt", "yuv420p"]
+        #
+        # The CHROMA subsampling is the players' constraint; the BIT DEPTH is the
+        # source's, so it follows the source. Grading log to 8 bits throws away
+        # the reason for shooting log: the curve packs most of its code values
+        # into the shadows and the conversion stretches them straight back out.
+        # Measured on a 1024-step S-Log3 ramp exported through logspace's own
+        # Rec.709 conversion, counting distinct output levels in 10-bit code
+        # values: 635 from a 10-bit source, 160 from the same ramp at 8 bits --
+        # and 128 vs 67 in the bottom third, which is where a log curve keeps
+        # most of its information and where the banding is visible.
+        #
+        # libx264 ONLY, and the encoder name is the gate rather than `gpu`,
+        # because vf_suffix is empty for every hw encoder except VAAPI -- so this
+        # branch is reached with h264_nvenc/qsv/amf too. None of them can encode
+        # 10-bit H.264: NVENC accepts p010le input but its profiles stop at
+        # high444p, QSV takes nv12 only, and AMF is 8-bit out. 10-bit on those
+        # vendors means HEVC or AV1, which is a different deliverable. So a GPU
+        # export deliberately drops back to 8 bits -- export on the CPU to keep
+        # the depth. Asking them for high10 would fail the render outright.
+        if enc == "libx264" and _source_bit_depth(video) > 8:
+            args += ["-pix_fmt", "yuv420p10le", "-profile:v", "high10"]
+        else:
+            args += ["-pix_fmt", "yuv420p"]
     full = [*args, "-c:a", "copy", out_path]
     if progress:
         _run_with_progress(full, probe_duration(video), progress)

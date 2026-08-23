@@ -450,3 +450,63 @@ def test_run_has_no_default_timeout():
     import inspect
 
     assert inspect.signature(render._run).parameters["timeout"].default is None
+
+
+# ---- output bit depth ------------------------------------------------------
+# The -pix_fmt pin used to be yuv420p unconditionally, so a 10-bit log source
+# was graded and delivered at 8 bits -- which throws away the whole reason for
+# shooting log. 4:2:0 is still forced (lut3d negotiates yuv444p and libx264 will
+# happily write a file players reject); only the depth follows the source now.
+
+
+def _source(tmp_path: Path, pix_fmt: str) -> str:
+    out = str(tmp_path / f"src_{pix_fmt}.mp4")
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "testsrc2=size=320x180:rate=10:duration=1",
+         "-c:v", "libx264", "-pix_fmt", pix_fmt, out],
+        check=True,
+    )
+    return out
+
+
+@pytest.mark.parametrize("src_pix_fmt,want_pix_fmt,want_profile", [
+    ("yuv420p", "yuv420p", "High"),
+    ("yuv420p10le", "yuv420p10le", "High 10"),
+    ("yuv422p10le", "yuv420p10le", "High 10"),   # depth kept, chroma still forced to 4:2:0
+])
+def test_output_depth_follows_the_source(tmp_path, src_pix_fmt, want_pix_fmt, want_profile):
+    out = str(tmp_path / "out.mp4")
+    render.render_video(_source(tmp_path, src_pix_fmt),
+                        identity_cube(tmp_path / "id.cube"), out)
+    stream = ffprobe(out)["streams"][0]
+    assert stream["pix_fmt"] == want_pix_fmt
+    assert stream["profile"] == want_profile
+
+
+def test_source_bit_depth_reads_ffprobe(tmp_path):
+    assert render._source_bit_depth(_source(tmp_path, "yuv420p")) == 8
+    assert render._source_bit_depth(_source(tmp_path, "yuv420p10le")) == 10
+
+
+def test_source_bit_depth_defaults_to_8_when_unprobeable(tmp_path):
+    """An unreadable source must fall back to today's behaviour, not raise --
+    render_video's own error handling is what should report the bad input."""
+    assert render._source_bit_depth(str(tmp_path / "nope.mp4")) == 8
+
+
+def test_gpu_export_stays_8_bit(tmp_path):
+    """No H.264 hardware encoder here can do 10 bits -- NVENC's profiles stop at
+    high444p, QSV takes nv12 only, AMF is 8-bit out -- and vf_suffix is empty for
+    all of them except VAAPI, so the depth branch has to gate on the encoder
+    name. Asking nvenc for -profile:v high10 fails the render outright."""
+    src = _source(tmp_path, "yuv420p10le")
+    out = str(tmp_path / "gpu.mp4")
+    cube = identity_cube(tmp_path / "id.cube")
+    if render.detect_hw_encoder() is None:
+        with pytest.warns(UserWarning, match="libx264"):
+            render.render_video(src, cube, out, gpu=True)
+        assert ffprobe(out)["streams"][0]["pix_fmt"] == "yuv420p10le"  # fell back to CPU
+    else:
+        render.render_video(src, cube, out, gpu=True)
+        assert ffprobe(out)["streams"][0]["pix_fmt"] == "yuv420p"
