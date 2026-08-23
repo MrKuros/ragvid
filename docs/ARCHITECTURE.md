@@ -24,21 +24,41 @@ Read this before building a front end.
             groq · openai · anthropic · 8 more · custom
                                  │
                                  ▼
-                          spec.GradeSpec
-             (43 numbers + a rationale — the only currency)
+                        region.GradeStack
+              base GradeSpec + ordered (Region, GradeSpec) layers
                                  │
-          37 colour numbers ─────┴───── 6 spatial effects
-                    │                          │
-                    ▼                          ▼
-              lut.bake_cube               render.py filtergraph
-              33³ .cube (65³ if a         denoise · glow · softness ·
-              hue band is in use)         grain · vignette · fringe
+        ┌────────────────────────┼────────────────────────┐
+        ▼                        ▼                        ▼
+  37 colour numbers        6 spatial effects        0..n regions
+        │                        │                        │
+        ▼                        ▼                        ▼
+  lut.bake_cube            render.py filtergraph    region.mask() → PNG
+  33³ .cube (65³ if a      denoise · glow ·         + one .cube per layer,
+  hue band is in use)      softness · grain ·       composited around the
+                           vignette · fringe        base lut3d
 ```
 
 Three rules hold the whole thing together:
 
-1. **`GradeSpec` is the only currency.** Every planner produces one, every
-   consumer takes one. Nothing else crosses layers.
+1. **`GradeSpec` is the currency of one correction; `GradeStack` is the
+   frame.** A `GradeStack` is a base `GradeSpec` for the whole picture plus an
+   ordered list of `(Region, GradeSpec)` layers. Every planner produces one,
+   every consumer takes one, and nothing else crosses layers. A grade that
+   names no region is a stack with no layers (`stack.is_flat`), so a consumer
+   that only speaks `GradeSpec` still gets exactly one — `project.spec` and the
+   `.cube` are unchanged for it, byte for byte.
+
+   *This rule used to read "`GradeSpec` is the only currency", and it stopped
+   fitting the day a grade could apply to part of a frame (roadmap B1).* A
+   `GradeSpec` is a per-pixel colour map: 43 numbers that answer WHAT to do to
+   a colour, with no place to answer WHICH PIXELS. "Darken the top of the
+   frame" is not a missing field, it is a missing dimension — and widening
+   `GradeSpec` to hold a mask would have made every flat grade, which is almost
+   all of them, carry a region it does not use, and would have put a spatial
+   quantity inside the one object the `.cube` is baked from. So the spec stayed
+   exactly what it was and a container went around it. The roadmap called this
+   consequence in advance and asked for the rule to be revised in the same
+   commit as the code rather than quietly contradicted.
 2. **No pixels reach a model, ever.** Planners see statistics and words. The
    LUT and ffmpeg see pixels. They never meet.
 3. **Core modules have no I/O policy.** They don't print, don't read argv, don't
@@ -75,7 +95,8 @@ p.export("out.mp4", progress=lambda f: bar.set(f))     # the slow one
 | Open / create a project | `Project.open(root)` · `Project.create(video, root)` · `Project.exists(root)` |
 | Render current state | `project.to_dict()` — JSON-serializable, everything a view needs |
 | Undo stack | `project.history` (oldest first) · `project.can_undo` · `project.undo()` |
-| Sliders and numeric fields | `project.set_spec(spec)` — pushes to history, so undo covers slider drags too |
+| Sliders and numeric fields | `project.set_spec(spec)` — pushes to history, so undo covers slider drags too. A spec arriving this way is a FLAT grade: 43 numbers describe the whole frame, so any regional layers are dropped. `project.set_intent(intent)` is the path that keeps them |
+| Regions on the current grade | `project.stack` (base + layers) · `project.layers` · `to_dict()["layers"]`. A preview that ignores them shows a look the export will not produce |
 | Live preview | `project.preview()` — one ffmpeg call, independent of clip length |
 | Export with a bar | `project.export(path, progress=fn)` — `fn` receives 0.0–1.0 |
 | Provider dropdown | `available_providers()` |
@@ -112,8 +133,9 @@ a message string.
 ## Where state lives
 
 `<root>/.ragvid/` — `session.json` (source path, cached `ClipStats`, spec
-history), `current.cube`, `preview.png`. One folder per project; delete it to
-reset. `root` is explicit everywhere and defaults to the working directory,
+history, and the regional layers parallel to it), `current.cube`, `preview.png`,
+plus `layer<i>.cube` and `layer<i>.png` for each region on the current grade.
+One folder per project; delete it to reset. `root` is explicit everywhere and defaults to the working directory,
 which is what the CLI wants and what a GUI must override.
 
 `ragvid serve` has no cwd to fall back on, so its default root is the per-user
@@ -133,6 +155,16 @@ one RGB triple with no knowledge of the neighbouring pixel, so blur, grain,
 vignette, glow and chromatic fringing cannot be expressed in one at all — not
 approximately, structurally. They live in `render.py` as ffmpeg filters wrapped
 around `lut3d`, and `apply()` ignores `spec.effects` completely.
+
+**A region is the same seam, one category larger.** A LUT is indexed by colour,
+so it has nowhere to put an address: `GradeStack.layers` cannot bake into a
+`.cube` either. Each layer exports as its own `.cube` plus a greyscale mask PNG,
+composited around the base `lut3d` in the filter chain — see `_region_filters`
+for the graph and for the two alternatives that lost. The consequence for
+interop is blunt: **`look.json` is now the only lossless round-trip format.**
+A `.cube` carries the base grade's colour transform and nothing else; a `.cdl`
+carries less than that and names the regions it dropped in its `<Description>`.
+That is why roadmap A8 shipped before B1.
 
 That matters the moment a `.cube` leaves this tool. Take one into Resolve,
 Premiere or OBS and you get the entire colour transform, exactly: exposure,
@@ -221,6 +253,24 @@ LUTs will notice.
   field, add its guard — and add it to `is_identity()`, or
   `GradeSpec(exposure=3).is_identity()` returns True and the tests assert
   nothing. `python -m ragvid.spec` runs that gate plus the order's invariants.
+- **A region's mask is generated ONCE, in numpy.** `region.Region.mask()` is
+  the only place the geometry exists; `render.py` is handed the PNG it wrote
+  and blends with it, and `GradeStack.apply()` lerps with the same array. That
+  is not an optimisation. A mask re-derived as a `geq` expression for ffmpeg
+  would be a second implementation of the same falloff, and a preview that
+  composites a region differently from the export is the bug
+  `render_preview`'s per-tile comment already exists to prevent. Measured
+  still-path vs video-path at full chroma: max 2.0 code values, mean 0.11,
+  against 0.0 for the same render with no region — the residue is 8-bit
+  rounding of a blend that happens in YUV on one path and RGB on the other. The
+  export's own 4:2:0 costs 23 code values on the same frame with no region
+  present at all, so the composite is well inside the noise the pixel format
+  already makes.
+- **Layers compose in list order, each grading the accumulated result.**
+  `out = base.apply(x)`, then `out += (layer.spec.apply(out) - out) * mask` for
+  each layer in turn. So a layer holds ONE correction on top of the look rather
+  than a copy of the base with one field changed, and two overlapping regions
+  are a continuous lerp with the later one winning in proportion to its mask.
 - **`.cube` varies RED fastest.** Reversing it produces a plausible-looking file
   that grades channels wrongly.
 - **Statistics are display-space, not linear.** `spec.apply()`, the LUT and

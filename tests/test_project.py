@@ -306,7 +306,8 @@ def test_export_does_not_share_its_lut_with_live_rendering(project, tmp_path, mo
     project.set_spec(GradeSpec(saturation=2.5))
     seen = {}
 
-    def fake_render(video, cube, out, effects=None, gpu=False, progress=None, input_lut=None):
+    def fake_render(video, cube, out, effects=None, gpu=False, progress=None,
+                    input_lut=None, layers=None):
         seen["cube"] = Path(cube)
         seen["exists_during"] = Path(cube).is_file()
         Path(out).write_bytes(b"x")
@@ -519,3 +520,144 @@ def test_turning_balance_off_leaves_a_spec_that_has_no_verbs_alone(project):
     project.set_spec(GradeSpec(contrast=0.4))
     assert project.set_auto_balance(False) is True
     assert project.spec.contrast == 0.4 and len(project.history) == 1
+
+
+# ---- regions (roadmap B1) -------------------------------------------------
+#
+# The base spec and its regional layers are two halves of one grade, kept in
+# parallel lists exactly as `labels` and `intents` are. Every test here exists
+# because a parallel list is a chance to desync.
+
+
+def _regional() -> "Intent":
+    from ragvid.intent import Intent, Op
+
+    return Intent(ops=[Op(op="warmth"), Op(op="exposure", dir="down", target="top")])
+
+
+def test_a_regional_intent_lands_in_the_stack_not_in_the_spec(project):
+    project.set_intent(_regional())
+    assert len(project.layers) == 1
+    assert project.stack.base == project.spec
+    assert not project.stack.is_flat
+    assert project.layers[0].region.edge == "top"
+
+
+def test_a_flat_grade_has_no_layers_and_says_so(project):
+    from ragvid.intent import Intent, Op
+
+    project.set_intent(Intent(ops=[Op(op="warmth")]))
+    assert project.layers == [] and project.stack.is_flat
+
+
+def test_layers_survive_a_save_and_reopen(project):
+    project.set_intent(_regional())
+    reopened = Project.open(project.root)
+    assert reopened.stack == project.stack
+    assert reopened.layers[0].region.model_dump() == project.layers[0].region.model_dump()
+
+
+def test_undo_takes_the_layers_with_it(project):
+    from ragvid.intent import Intent, Op
+
+    project.set_intent(Intent(ops=[Op(op="warmth")]))
+    project.set_intent(_regional())
+    assert len(project.layers) == 1
+    project.undo()
+    assert project.layers == [], "the layers of the undone grade are still on screen"
+    assert len(project.session.layers) == len(project.session.specs) == 1
+
+
+def test_revert_and_reset_keep_the_parallel_lists_in_step(project):
+    from ragvid.intent import Intent, Op
+
+    project.set_intent(_regional())
+    project.set_intent(Intent(ops=[Op(op="contrast")]))
+    project.set_intent(_regional())
+    project.revert_to(0)
+    assert len(project.session.layers) == len(project.session.specs) == 1
+    assert len(project.layers) == 1
+    project.reset()
+    assert project.session.layers == []
+
+
+def test_a_hand_edited_spec_is_a_flat_grade(project):
+    """43 numbers describe the whole frame, so a spec arriving that way IS the
+    whole grade. Carrying layers forward would keep correcting a corner of an
+    image nothing in the incoming spec knows about."""
+    project.set_intent(_regional())
+    project.set_spec(GradeSpec(contrast=0.4))
+    assert project.layers == [] and project.stack.is_flat
+
+
+def test_a_session_written_before_regions_still_opens(project, tmp_path):
+    """Every field added after the first sessions were written keeps a default;
+    `layers` is no different, and an older session's grades WERE flat."""
+    import json
+
+    project.set_spec(GradeSpec(contrast=0.2))
+    path = Session.path(project.root)
+    raw = json.loads(path.read_text())
+    del raw["layers"]
+    path.write_text(json.dumps(raw))
+    reopened = Project.open(project.root)
+    assert reopened.layers == [] and reopened.spec.contrast == 0.2
+
+
+def test_to_dict_hands_a_ui_the_regions_it_has_to_draw(project):
+    """A UI that ignores the layers -- a WebGL preview especially -- draws a
+    picture the export will not produce."""
+    project.set_intent(_regional())
+    d = project.to_dict()
+    assert d["layers"][0]["region"]["edge"] == "top"
+    assert d["layers"][0]["spec"]["exposure"] < 0
+    assert "darkened the top" in d["spec"]["rationale"].lower()
+
+
+def test_bake_layers_writes_one_cube_and_one_mask_per_layer(project):
+    """A region cannot bake into a .cube, so the export grows a per-region LUT
+    plus a mask. The mask is at the SOURCE's resolution so one file serves the
+    still, the contact sheet and the export."""
+    from PIL import Image
+
+    project.set_intent(_regional())
+    made = project.bake_layers()
+    assert len(made) == 1
+    cube, mask = made[0]
+    assert Path(cube).is_file() and Path(mask).is_file()
+    assert Image.open(mask).size == (STATS.width, STATS.height)
+
+
+def test_a_flat_grade_bakes_no_layer_artifacts_at_all(project):
+    project.set_spec(GradeSpec(contrast=0.2))
+    assert project.bake_layers() == []
+
+
+def test_the_render_calls_are_handed_the_layers(project, tmp_path, monkeypatch):
+    """The one thing a preview must never do is show a look the export cannot
+    produce, so every render path has to receive the same layer list."""
+    seen = {}
+
+    def fake(name):
+        def go(*a, **kw):
+            seen[name] = kw.get("layers")
+            out = Path(a[2])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"x")
+            return str(out)
+        return go
+
+    monkeypatch.setattr("ragvid.render.render_preview", fake("preview"))
+    monkeypatch.setattr("ragvid.render.render_frame", fake("frame"))
+    monkeypatch.setattr("ragvid.render.render_video",
+                        lambda video, cube, out, effects=None, gpu=False, progress=None,
+                        input_lut=None, layers=None: seen.update(video=layers)
+                        or Path(out).write_bytes(b"x"))
+    project.set_intent(_regional())
+    project.preview()
+    project.frame(at=0.0)
+    project.export(tmp_path / "out.mp4")
+    assert [len(seen[k]) for k in ("preview", "frame", "video")] == [1, 1, 1]
+    # ... and the ungraded half of a before/after compare gets none of it.
+    project.preview(graded=False)
+    assert seen["preview"] is None

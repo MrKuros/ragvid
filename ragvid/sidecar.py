@@ -2,12 +2,15 @@
 
 A `.cube` is a per-pixel colour map, so `EffectSpec` (denoise, glow, softness,
 grain, vignette, fringe) cannot be in it — 6 of the spec's 43 numbers are
-spatial and live only in render.py's filter chain. Hand someone the cube alone
-and those six vanish with nothing to say they ever existed. That is the bug
-these two files close, from opposite ends:
+spatial and live only in render.py's filter chain. Nor can a REGION: a lookup
+table indexed by colour has nowhere to put an address, so a per-region grade
+(roadmap B1) is the same category of loss one step larger. Hand someone the
+cube alone and all of it vanishes with nothing to say it ever existed. That is
+the bug these two files close, from opposite ends:
 
-    look.json   the whole GradeSpec verbatim. Lossless, ragvid-only, and the
-                only thing that round-trips.
+    look.json   the whole GradeStack verbatim — base spec plus every
+                (region, spec) layer. Lossless, ragvid-only, and the only thing
+                that round-trips.
     .cdl        ASC CDL. Lossy — slope/offset/power/saturation are the only
                 fields that map — but every grading tool on the planet reads
                 it. What does not map is NAMED in the <Description>, which is
@@ -25,16 +28,20 @@ import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from .region import GradeStack, Layer
 from .spec import GradeSpec
 
 LOOK_FORMAT = "ragvid-look"
-LOOK_VERSION = 1
+# 2 added `layers`. Version 1 files still read: they have no regions, which is
+# exactly what an empty layer list means, so there is nothing to migrate.
+LOOK_VERSION = 2
 
 CUBE_NOTE = (
     "Lossless record of the grade. The accompanying .cube carries the 37 colour "
-    "fields only; `effects` (denoise, glow, softness, grain, vignette, fringe) is "
-    "spatial and cannot exist in a 3D LUT, so it is applied as an ffmpeg filter "
-    "chain at render time and is present in this file alone."
+    "fields of the BASE grade only; `effects` (denoise, glow, softness, grain, "
+    "vignette, fringe) and `layers` (per-region grades) are spatial and cannot "
+    "exist in a 3D LUT, so they are applied as an ffmpeg filter chain at render "
+    "time and are present in this file alone."
 )
 
 # Everything ASC CDL can actually express. `exposure` is here because it folds
@@ -47,37 +54,56 @@ _CDL_FIELDS = frozenset(
 _NS = "urn:ASC:CDL:v1.2"
 
 
-def write_look(spec: GradeSpec, path: str | Path) -> str:
-    """Write the full spec as JSON. Read it back with `read_look`."""
+def write_look(look: GradeStack | GradeSpec, path: str | Path) -> str:
+    """Write the full grade as JSON. Read it back with `read_look`.
+
+    Takes a bare GradeSpec too, and means the flat stack by it — most grades are
+    flat and a caller holding one correction should not have to wrap it.
+
+    `spec` stays the base grade under its original key so a version-1 reader
+    keeps working; `layers` is additive and absent when there are none, which
+    keeps a flat grade's sidecar byte-identical to what version 1 wrote apart
+    from the version number itself.
+    """
+    stack = look if isinstance(look, GradeStack) else GradeStack(base=look)
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(
-        json.dumps(
-            {
-                "format": LOOK_FORMAT,
-                "version": LOOK_VERSION,
-                "note": CUBE_NOTE,
-                "spec": json.loads(spec.model_dump_json()),
-            },
-            indent=2,
-        )
-    )
+    body = {
+        "format": LOOK_FORMAT,
+        "version": LOOK_VERSION,
+        "note": CUBE_NOTE,
+        "spec": json.loads(stack.base.model_dump_json()),
+    }
+    if stack.layers:
+        body["layers"] = [json.loads(l.model_dump_json()) for l in stack.layers]
+    out.write_text(json.dumps(body, indent=2))
     return str(out)
 
 
-def read_look(path: str | Path) -> GradeSpec:
-    """The inverse of `write_look`. No format-version branching until there is
-    a second version to branch on."""
-    return GradeSpec.model_validate(json.loads(Path(path).read_text())["spec"])
+def read_look(path: str | Path) -> GradeStack:
+    """The inverse of `write_look`. Always a GradeStack — `.base` is the spec.
+
+    No format-version branching: a version-1 file has no `layers` key and a
+    grade with no regions has an empty one, and those are the same grade.
+    """
+    raw = json.loads(Path(path).read_text())
+    return GradeStack(
+        base=GradeSpec.model_validate(raw["spec"]),
+        layers=[Layer.model_validate(l) for l in raw.get("layers") or []],
+    )
 
 
-def write_cdl(spec: GradeSpec, path: str | Path) -> str:
-    """Write an ASC CDL ColorDecisionList.
+def write_cdl(look: GradeStack | GradeSpec, path: str | Path) -> str:
+    """Write an ASC CDL ColorDecisionList for the BASE grade.
 
     Only slope/offset/power/saturation map. Everything else ragvid does is
     listed by name and value in <Description> — a silent drop here is the same
-    data-loss bug as the cube's missing effects, one file further along.
+    data-loss bug as the cube's missing effects, one file further along. A CDL
+    is one correction for every pixel by definition, so regional layers are
+    named and counted there rather than approximated into the base.
     """
+    stack = look if isinstance(look, GradeStack) else GradeStack(base=look)
+    spec = stack.base
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -85,7 +111,7 @@ def write_cdl(spec: GradeSpec, path: str | Path) -> str:
 
     root = ET.Element("ColorDecisionList", xmlns=_NS)
     cc = ET.SubElement(ET.SubElement(root, "ColorDecision"), "ColorCorrection", id=out.stem)
-    ET.SubElement(cc, "Description").text = _describe(spec)
+    ET.SubElement(cc, "Description").text = _describe(stack)
     sop = ET.SubElement(cc, "SOPNode")
     ET.SubElement(sop, "Slope").text = _fmt(slope)
     ET.SubElement(sop, "Offset").text = _fmt(spec.offset.as_array())
@@ -104,7 +130,8 @@ def _fmt(values) -> str:
     return " ".join(f"{float(v):.6f}" for v in values)
 
 
-def _describe(spec: GradeSpec) -> str:
+def _describe(stack: GradeStack) -> str:
+    spec = stack.base
     parts = []
     if spec.rationale:
         parts.append(f'ragvid look: "{spec.rationale}".')
@@ -112,6 +139,10 @@ def _describe(spec: GradeSpec) -> str:
     if spec.exposure:
         parts.append(f"exposure {spec.exposure:+.3f} stops is folded into slope.")
     dropped = _dropped(spec)
+    # Regions are not a field, so _dropped's identity diff cannot see them.
+    # They are still the largest thing a CDL leaves behind, so they are named
+    # here by the sentence that produced them.
+    dropped += [f"region grade ({l.spec.rationale or l.region.shape})" for l in stack.layers]
     if dropped:
         parts.append("NOT represented here: " + ", ".join(dropped) + ".")
         parts.append("The complete look is in the accompanying .look.json.")

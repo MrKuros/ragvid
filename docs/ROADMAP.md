@@ -83,7 +83,7 @@ Each is a compiler pass plus a verb or two. **None adds a control to the screen.
 
 | # | Item | Status | The sentence it unlocks |
 |---|---|---|---|
-| B1 | Regions — a grade that applies to part of the frame | **[none]** | "darken the top of the frame" |
+| B1 | Regions — a grade that applies to part of the frame | **[have]** | "darken the top of the frame", "warm the left side", "brighten the middle" — geometric only; `GradeStack` now wraps `GradeSpec`, and `docs/ARCHITECTURE.md` rule 1 was revised in the same commit. |
 | B2 | Semantic masks (sky / skin / faces / foliage) | **[none]** | "keep her skin natural", "make the sky moody" — highest-value item here |
 | B3 | Curves (master, per-channel, hue-vs-hue, hue-vs-sat, lum-vs-sat) | **[none]** | "crush the blacks but keep the highlights soft" |
 | B4 | Real HSL qualifier (arbitrary volume, matte finesse, despill) | **[partial]** | "kill the sodium streetlights" — six fixed bands cannot isolate one colour |
@@ -112,11 +112,11 @@ The only things allowed to touch the UI, one small element each.
 
 | # | Item | Status | UI cost |
 |---|---|---|---|
-| C1 | WebGL preview instead of ffmpeg-per-still | **[none]** | none visually; scrubbing becomes instant |
-| C2 | Real-time playback | **[none]** | a play button; follows from C1 |
+| C1 | WebGL preview instead of ffmpeg-per-still | **[have]** | none visually | Tetrahedral, matching `vf_lut3d.c`. Worst case 1 code value against ffmpeg over all 16.7M 8-bit colours. Declines the job (falls back) on spatial effects or regions rather than showing a look the export will not produce. |
+| C2 | Real-time playback | **[have]** | a play button, on the row the scrubber already occupied |
 | C3 | "What it did", as sentences | **[have]** | one list — replaced `#said` |
 | C4 | Per-item strength sliders | **[have]** | 43-slider panel deleted; `index.html` net −47 lines |
-| C5 | Clipping / exposure warning on the frame | **[none]** | one toggle; `ClipStats` already measures it |
+| C5 | Clipping / exposure warning on the frame | **[have]** | one toggle, same row |
 | C6 | Before/after compare | **[have]** | hold-to-see-original |
 | C7 | Undo / start over / history | **[have]** | — |
 

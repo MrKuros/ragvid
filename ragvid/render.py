@@ -4,11 +4,17 @@ Everything shells out to ffmpeg with an argv list (never a shell string), so the
 only escaping that matters is ffmpeg's own filtergraph syntax -- see
 `escape_path`.
 
-Every render entry point takes an optional `effects` (a spec.EffectSpec). That
-is the half of a look a 3D LUT cannot carry, because it reads neighbouring
-pixels -- so it is built as ffmpeg filters *around* the lut3d node rather than
-baked into the cube. Preview, frame and export all take it, and must: a preview
-that drops the effects shows a look the export will not produce.
+Every render entry point takes an optional `effects` (a spec.EffectSpec) and an
+optional `layers` (regional grades, roadmap B1). Both are halves of a look a 3D
+LUT cannot carry -- effects because they read neighbouring pixels, a region
+because it reads the pixel's ADDRESS -- so both are built as ffmpeg filters
+*around* the lut3d node rather than baked into the cube. Preview, frame and
+export all take both, and must: a preview that drops either one shows a look the
+export will not produce.
+
+`layers` is [(cube, mask PNG)]; region.py wrote the PNG and is the single source
+of the geometry. See `_region_filters` for the composite and for the two filter
+graphs that lost.
 """
 
 from __future__ import annotations
@@ -207,12 +213,78 @@ def _effect_filters(effects, tag: str = "") -> tuple[list[str], list[str]]:
     return pre, post
 
 
+def _region_filters(layers, tag: str = "") -> list[str]:
+    """Regional grades as ffmpeg fragments: one masked composite per layer.
+
+    `layers` is [(cube path, mask PNG path)] in evaluation order -- region.py's
+    order, which is the order the person said things in. Each fragment splits
+    the stream, runs that layer's own lut3d on one copy, and blends the two
+    through the mask:
+
+        split -> [b]lut3d -> alphamerge(mask) -> overlay onto [a]
+
+    WHY THE MASK IS A FILE. It is a PNG that region.Region.mask() wrote from the
+    same numpy array GradeStack.apply() lerps with, so the still path, the video
+    path and the pure-python path composite through ONE geometry. The two
+    alternatives both re-derive it inside ffmpeg and are therefore a second
+    implementation to keep in step:
+
+      * `blend=all_expr='A*(1-M)+B*M'` with M written in X/Y/W/H. One filter,
+        no extra file -- and an expression evaluated per pixel per plane, which
+        on 1080p is 6.2M evaluations a frame before any grading happens. Also
+        the smoothstep has to be spelled out three times or hidden in st()/ld(),
+        and neither survives filtergraph quoting comfortably.
+      * `geq` to synthesise the mask, then `maskedmerge`. Same per-pixel
+        expression cost, plus a trap: maskedmerge is PER PLANE, so a grey mask
+        converted to yuv420p carries the ramp in Y and a flat 128 in U/V --
+        every chroma pixel blends at 50% and the region's colour smears across
+        the whole frame. Dodging that means pinning `format=gbrp`, which throws
+        away the 10-bit path this project shipped two commits ago.
+
+    `overlay=format=auto` keeps the working format the inputs already agreed on,
+    so a 10-bit source stays 10-bit through the composite; the mask is 8-bit
+    because every alpha format overlay can blend with is (measured cost: 0.58
+    code values worst case).
+
+    `scale2ref` is not optional and is not a resize: alphamerge REFUSES a mask
+    whose dimensions differ from the frame, and the mask is written at the size
+    ffprobe reported while the frame is what the decoder produced. Those differ
+    on any clip carrying rotation side data -- a phone video reports 1920x1080
+    and decodes to 1080x1920 -- which would fail the export outright rather than
+    look slightly wrong. When the sizes already agree (every other clip) it is a
+    passthrough. bilinear, not the bicubic default: a mask is a monotone ramp
+    and bicubic overshoots at the ends of one, which is a step in the falloff.
+
+    `tag` keeps the labels unique, exactly as _effect_filters' glow does --
+    render_preview splices one copy per tile into a single filter_complex and
+    duplicate labels are a hard parse error.
+    """
+    out = []
+    for i, (cube, mask) in enumerate(layers or []):
+        n = f"rvr{tag}{i}"
+        out.append(
+            f"split[{n}a][{n}b];"
+            f"[{n}b]{_lut_filter(cube)}[{n}g];"
+            f"movie=filename={escape_path(mask)}[{n}m];"
+            f"[{n}m][{n}g]scale2ref=flags=bilinear[{n}ms][{n}gs];"
+            f"[{n}gs][{n}ms]alphamerge[{n}o];"
+            f"[{n}a][{n}o]overlay=format=auto"
+        )
+    return out
+
+
 def _vf(effects, lut: str | None, *extra: str, tag: str = "",
-        input_lut: str | None = None) -> str:
+        input_lut: str | None = None, layers=None) -> str:
     """Compose one filter chain: effects around `lut`, then `extra` at the end.
 
     Built *around* _lut_filter's bare node rather than inside it, the same way
     the odd-dimension crop and the hw-encoder suffix already are.
+
+    `layers` are regional grades and sit immediately after the base lut3d: they
+    are colour corrections, so everything in `post` (glow, softness, grain,
+    vignette) must see the finished colour, exactly as it does today. With no
+    layers this function emits byte-identical output to before -- no split, no
+    overlay, nothing to round.
 
     `input_lut` is a TECHNICAL LUT -- a camera vendor's log-to-Rec.709 transform
     -- and it runs before the grade, because that is the only order that means
@@ -223,7 +295,8 @@ def _vf(effects, lut: str | None, *extra: str, tag: str = "",
     """
     pre, post = _effect_filters(effects, tag)
     technical = [_lut_filter(input_lut)] if input_lut else []
-    parts = [*pre, *technical, *([lut] if lut else []), *post, *(e for e in extra if e)]
+    parts = [*pre, *technical, *([lut] if lut else []), *_region_filters(layers, tag),
+             *post, *(e for e in extra if e)]
     return ",".join(parts)
 
 
@@ -309,7 +382,7 @@ def _encoder_args(gpu: bool) -> tuple[list[str], str, str]:
 # ---- rendering ------------------------------------------------------------
 
 def render_preview(video: str, cube: str | None, out_png: str, effects=None,
-                   n_frames: int = 3, input_lut: str | None = None) -> str:
+                   n_frames: int = 3, input_lut: str | None = None, layers=None) -> str:
     """Contact sheet: n_frames evenly spaced, LUT + effects, hstacked into one PNG.
 
     One ffmpeg process with n seek-before-input inputs, so cost is independent
@@ -329,9 +402,14 @@ def render_preview(video: str, cube: str | None, out_png: str, effects=None,
     # 0.396 in the preview vs 0.196 in the export), and glow/softness/fringe
     # bleeding over the tile seams. A preview that does not match the export is
     # the one thing this function must not be.
+    #
+    # Regions inherit that for free and could not survive without it: a mask is
+    # in frame-relative coordinates, so one applied to the sheet would stretch
+    # "the top of the frame" across three frames at a third of the strength.
+    # Per tile it is the same _vf the single-frame and export paths build.
     lut = _lut_filter(cube)
     graph = ";".join(
-        f"[{i}:v]{_vf(effects, lut, tag=str(i), input_lut=input_lut) or 'null'}[rvp{i}]"
+        f"[{i}:v]{_vf(effects, lut, tag=str(i), input_lut=input_lut, layers=layers) or 'null'}[rvp{i}]"
         for i in range(n_frames)
     )
     if n_frames > 1:
@@ -344,7 +422,7 @@ def render_preview(video: str, cube: str | None, out_png: str, effects=None,
 
 
 def render_frame(video: str, cube: str | None, out_png: str, effects=None,
-                 at: float = 0.0, input_lut: str | None = None) -> str:
+                 at: float = 0.0, input_lut: str | None = None, layers=None) -> str:
     """One frame at `at` seconds, LUT + effects. The check-before-you-render call.
 
     Seeking before -i makes this independent of clip length, so scrubbing a
@@ -352,14 +430,14 @@ def render_frame(video: str, cube: str | None, out_png: str, effects=None,
     lets a UI re-render on every drag of a scrubber.
     """
     args = ["-ss", f"{max(0.0, at):.3f}", "-i", video]
-    if vf := _vf(effects, _lut_filter(cube), input_lut=input_lut):
+    if vf := _vf(effects, _lut_filter(cube), input_lut=input_lut, layers=layers):
         args += ["-vf", vf]
     _run([*args, "-frames:v", "1", "-update", "1", out_png], timeout=120)
     return out_png
 
 
 def _render_gif(video: str, cube: str, out_path: str, effects=None, progress=None,
-                input_lut: str | None = None) -> str:
+                input_lut: str | None = None, layers=None) -> str:
     """Render to an animated GIF.
 
     GIF is not just "another container": the encoder takes pal8, so the
@@ -373,7 +451,7 @@ def _render_gif(video: str, cube: str, out_path: str, effects=None, progress=Non
     dithering, in one pass over the input.
     """
     fc = (
-        f"[0:v]{_vf(effects, _lut_filter(cube), input_lut=input_lut)},split[g1][g2];"
+        f"[0:v]{_vf(effects, _lut_filter(cube), input_lut=input_lut, layers=layers)},split[g1][g2];"
         "[g1]palettegen=stats_mode=diff[pal];"
         "[g2][pal]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
     )
@@ -386,7 +464,8 @@ def _render_gif(video: str, cube: str, out_path: str, effects=None, progress=Non
 
 
 def render_video(video: str, cube: str, out_path: str, effects=None,
-                 gpu: bool = False, progress=None, input_lut: str | None = None) -> str:
+                 gpu: bool = False, progress=None, input_lut: str | None = None,
+                 layers=None) -> str:
     """Full render. Audio is stream-copied, never re-encoded.
 
     `progress` is an optional callable taking a 0.0-1.0 float, called as ffmpeg
@@ -394,7 +473,7 @@ def render_video(video: str, cube: str, out_path: str, effects=None,
     """
     if Path(out_path).suffix.lower() == ".gif":
         return _render_gif(video, cube, out_path, effects, progress=progress,
-                           input_lut=input_lut)
+                           input_lut=input_lut, layers=layers)
     pre, enc, vf_suffix = _encoder_args(gpu)
     # H.264 at 4:2:0 needs even dimensions, and plenty of real sources are odd
     # (a 720x405 GIF, anything cropped by hand) -- libx264 refuses outright with
@@ -403,7 +482,7 @@ def render_video(video: str, cube: str, out_path: str, effects=None,
     # every frame. A no-op when the dimensions are already even, so it costs
     # nothing to apply unconditionally and saves probing for the size.
     vf = _vf(effects, _lut_filter(cube), "crop=trunc(iw/2)*2:trunc(ih/2)*2", vf_suffix,
-             input_lut=input_lut)
+             input_lut=input_lut, layers=layers)
     args = [*pre, "-i", video, "-map", "0:v:0", "-map", "0:a:0?", "-vf", vf, "-c:v", enc]
     if not vf_suffix:
         # lut3d negotiates yuv444p, which libx264 happily encodes into a file most

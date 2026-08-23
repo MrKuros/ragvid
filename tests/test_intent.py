@@ -169,3 +169,76 @@ def test_a_reduced_strength_quotes_the_number_the_compiler_will_use():
             assert "strength" not in line
         else:
             assert f"{STRENGTH_MIX[s]:.0%}" in line
+
+
+# ---- regions (roadmap B1) -------------------------------------------------
+
+
+def test_a_region_reads_as_a_sentence_a_person_would_say():
+    """The list of phrases IS the UI, so "darkened the top" is the requirement,
+    not "exposure -0.35 in region linear/top"."""
+    lines = describe(Intent(ops=[
+        Op(op="exposure", dir="down", target="top"),
+        Op(op="exposure", target="center", amount="subtle"),
+        Op(op="warmth", target="left"),
+        Op(op="tint", dir="down", target="right"),
+        Op(op="contrast", target="center"),
+        Op(op="saturation", dir="down", target="edges"),
+        Op(op="shadows", target="bottom"),
+    ]))
+    assert lines == [
+        "darkened the top",
+        "brightened the middle a little",
+        "warmed the left side up",
+        "pushed the right side green",
+        "added contrast in the middle",
+        "drained the colour at the edges",
+        "lifted the shadows in the bottom",
+    ]
+
+
+def test_a_tint_verb_in_a_region_still_names_a_colour():
+    """`target` answers "which colour to add" for the two tint verbs and "which
+    pixels" for everything else. A region takes the second job and leaves the
+    first, so the sentence has to fall back to the same default colour the
+    compiler does -- it used to print a literal "{c}"."""
+    from ragvid.intent import DEFAULT_TINT
+
+    assert describe(Intent(ops=[Op(op="shadow_tint", target="top")])) == \
+        [f"pushed {DEFAULT_TINT['shadow_tint']} into the shadows in the top"]
+    assert describe(Intent(ops=[Op(op="highlight_tint", target="center")])) == \
+        [f"pushed {DEFAULT_TINT['highlight_tint']} into the highlights in the middle"]
+
+
+def test_a_colour_target_still_reads_as_a_colour():
+    """The two kinds of target share one field, so the regions must not have
+    changed what a colour name does."""
+    assert describe(Intent(ops=[Op(op="saturation", dir="down", target="green")])) == \
+        ["drained the colour in the greens"]
+    assert describe(Intent(ops=[Op(op="shadow_tint", target="teal")])) == \
+        ["pushed teal into the shadows"]
+
+
+def test_a_region_on_a_texture_verb_never_reaches_the_sentence():
+    """grain lives in the ffmpeg chain and cannot be masked, so promising it in
+    the list would describe a move that did not happen."""
+    op = Op(op="grain", target="top")
+    assert op.target == ""
+    assert describe(Intent(ops=[op])) == ["added grain"]
+
+
+@pytest.mark.parametrize("region", ["top", "bottom", "left", "right", "center", "edges"])
+def test_every_region_word_is_in_the_schema_and_has_a_geometry(region):
+    """A word the model can emit that the compiler cannot resolve would compile
+    to a silent no-op with a sentence attached."""
+    from ragvid.region import for_target
+
+    assert region in TARGETS
+    assert region in json.dumps(Intent.llm_json_schema())
+    assert for_target(region) is not None
+
+
+def test_a_colour_name_is_not_a_region():
+    from ragvid.region import for_target
+
+    assert for_target("green") is None and for_target("") is None

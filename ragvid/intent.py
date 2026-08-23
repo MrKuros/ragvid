@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from typing import Literal, get_args
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # The verb vocabulary. Sixteen words, each a thing a person says out loud about
 # a picture. `dir` means up/down on that axis and is documented per verb below.
@@ -79,14 +79,32 @@ AMOUNTS = get_args(Amount)
 # What the op acts on. "" is the whole frame and is the overwhelming default.
 # Colour names route saturation/exposure onto the hue qualifiers and name the
 # colour for the two tint verbs. This is also the field regions and semantic
-# masks land in (roadmap B1/B2) — "sky", "skin", "background" — which is why it
-# is a target rather than six separate optional fields. Only the colours are
-# implemented today; `skin` is accepted and treated as a hue family, not a mask.
+# masks land in (roadmap B1/B2) — which is why it is a target rather than six
+# separate optional fields. `skin` is a hue family, not a mask; a real skin
+# matte needs a segmentation model and is roadmap B2, not this.
+#
+# The last six are GEOMETRIC REGIONS and are a different kind of answer to
+# "which pixels": a colour name selects by what the pixel IS, a region selects
+# by where it SITS. region.py holds the geometry each word means, so the word
+# and the shape cannot drift apart.
 Target = Literal[
     "", "red", "orange", "yellow", "green", "cyan", "teal", "blue",
     "magenta", "purple", "skin",
+    "top", "bottom", "left", "right", "center", "edges",
 ]
 TARGETS = get_args(Target)
+
+# The region words, in one tuple so compiler.py and describe() agree on which
+# targets are spatial without either of them holding a second list.
+REGIONS = ("top", "bottom", "left", "right", "center", "edges")
+
+# The six EffectSpec verbs. They are ALREADY spatial -- they live in render.py's
+# filter chain, not in the LUT -- so masking one means masking a filter rather
+# than masking a grade, which is a different piece of plumbing and not this
+# item. A region on one of these is dropped on the way in (see Op), because the
+# alternative is describe() printing "added grain in the top" for something that
+# happened everywhere.
+EFFECT_OPS = ("grain", "glow", "vignette", "softness", "denoise", "fringe")
 
 # How much of the whole look survives -> GradeSpec.look_mix. A separate field
 # rather than a verb because it is a property of the request, not an operation,
@@ -108,6 +126,16 @@ class Op(BaseModel):
     dir: Direction = "up"
     amount: Amount = "moderate"
     target: Target = ""
+
+    @model_validator(mode="after")
+    def _drop_unmaskable_region(self) -> "Op":
+        # Normalised HERE and not in the compiler, so that the sentence, the
+        # compiled grade and whatever the UI sends back all read the same field.
+        # A verb the compiler cannot honour must not survive as far as
+        # describe(), which would then report a move that never happened.
+        if self.target in REGIONS and self.op in EFFECT_OPS:
+            self.target = ""
+        return self
 
 
 class Intent(BaseModel):
@@ -180,6 +208,14 @@ _PHRASES: dict[str, tuple[str, str]] = {
 # Verbs whose `target` selects WHICH PIXELS, rather than naming a colour to add.
 SELECTIVE = ("saturation", "exposure")
 
+# How each region reads in a sentence. "center" is `the middle` because nobody
+# says "the center of the frame" out loud, and the sentence is the UI.
+REGION_NAMES = {
+    "top": "the top", "bottom": "the bottom",
+    "left": "the left side", "right": "the right side",
+    "center": "the middle", "edges": "the edges",
+}
+
 _ADVERB = {"subtle": " a little", "moderate": "", "strong": " a lot"}
 
 # Default colour for a tint verb that arrived without one. Not an invention:
@@ -198,9 +234,17 @@ def describe(intent: Intent) -> list[str]:
     for item in intent.ops:
         up, down = _PHRASES[item.op]
         phrase = up if item.dir == "up" else down
-        colour = item.target or DEFAULT_TINT.get(item.op, "")
+        # A region answers "which pixels"; a colour name answers either "which
+        # pixels" (SELECTIVE) or "which colour to add" (the two tint verbs). So
+        # the tint verbs still need a colour even when the target is a region --
+        # the compiler falls back to DEFAULT_TINT there and this has to say the
+        # same word, or the sentence names a colour the grade did not use.
+        colour = DEFAULT_TINT.get(item.op, "") if item.target in REGIONS else \
+            (item.target or DEFAULT_TINT.get(item.op, ""))
         phrase = phrase.format(c=colour) if "{c}" in phrase else phrase
-        if item.target and item.op in SELECTIVE:
+        if item.target in REGIONS:
+            phrase = _in_region(phrase, item.target)
+        elif item.target and item.op in SELECTIVE:
             phrase += _in_the(item.target)
         out.append(phrase + _ADVERB[item.amount])
     if intent.strength != "full":
@@ -210,3 +254,18 @@ def describe(intent: Intent) -> list[str]:
 
 def _in_the(target: str) -> str:
     return " in the skin tones" if target == "skin" else f" in the {target}s"
+
+
+def _in_region(phrase: str, target: str) -> str:
+    """A verb's phrase, aimed at a region. "darkened it" -> "darkened the top".
+
+    Substitution rather than a second phrase table: the pronoun in "darkened
+    it" / "warmed it up" is exactly the slot the region fills, so naming the
+    region there gives the sentence a person would say. The verbs with no
+    pronoun ("added contrast") take " in the middle" on the end instead, which
+    is the only other shape English offers here.
+    """
+    name = REGION_NAMES[target]
+    if " it" in phrase:
+        return phrase.replace(" it", " " + name, 1)
+    return f"{phrase} {'at' if target == 'edges' else 'in'} {name}"

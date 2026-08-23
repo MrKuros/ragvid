@@ -182,6 +182,13 @@ def _state_json() -> dict:
         # refine, or a provider on the direct path). The page must degrade to
         # `spec.rationale`, not render an empty list.
         "intent": intent_view(p.intent),
+        # Regional layers, empty for the flat grade almost everything is. The
+        # live WebGL preview samples the base cube only, so it gates itself off
+        # whenever this is non-empty and falls back to the server-rendered
+        # frame -- a preview that ignored the regions would show a look the
+        # export does not produce, which is the disagreement render_preview's
+        # per-tile comment exists to prevent.
+        "layers": p.to_dict().get("layers", []),
         # Auto-balance: whether it is on, and what it does to THIS clip in its
         # own words ("" when there is nothing to correct). Both, because the UI
         # shows one row that is the report and the off switch at once.

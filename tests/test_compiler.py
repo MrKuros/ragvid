@@ -712,3 +712,147 @@ def test_an_unmeasured_hue_strength_is_not_read_as_no_cast():
     assert compile_intent(Intent(), st, balance=True).rationale.startswith("Neutralised")
     legacy = st.model_copy(update={"hue_strength": 0.0})
     assert "cast" not in compile_intent(Intent(), legacy, balance=True).rationale
+
+
+# ---- regions (roadmap B1) -------------------------------------------------
+#
+# A region op is compiled into a LAYER, never into the base. So the tests here
+# measure two things the flat compiler could not have: that the base is exactly
+# what it would have been without the regional op, and that the layer moves the
+# pixels the sentence pointed at.
+
+
+def test_a_regional_op_leaves_the_base_grade_bit_for_bit_alone():
+    """The base is the grade for every pixel; a request about the top of the
+    frame must not leak into it. array_equal, not allclose -- a leak of one ulp
+    is a leak."""
+    from ragvid.compiler import compile_stack
+
+    plain = compile_stack(Intent(ops=[Op(op="warmth")]), STATS)
+    with_region = compile_stack(
+        Intent(ops=[Op(op="warmth"), Op(op="exposure", dir="down", target="top")]), STATS)
+    assert with_region.base.model_dump(exclude={"rationale"}) == \
+        plain.base.model_dump(exclude={"rationale"})
+    assert np.array_equal(with_region.base.apply(IMG), plain.base.apply(IMG))
+    assert len(with_region.layers) == 1 and plain.is_flat
+
+
+def test_an_intent_with_no_region_still_compiles_flat():
+    """The overwhelmingly common case, and the identity property the whole
+    design rests on: no region asked for, no container overhead added."""
+    from ragvid.compiler import compile_stack
+
+    assert compile_stack(Intent(), STATS).is_flat
+    assert compile_stack(Intent(ops=[Op(op="saturation", target="green")]), STATS).is_flat
+    assert compile_stack(Intent(), STATS).base.is_identity()
+
+
+def test_the_layer_carries_the_move_and_the_region_carries_the_place():
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(one("exposure", dir="down", target="top"), STATS)
+    layer, = stack.layers
+    assert layer.spec.exposure < -0.1, "the darkening has to be IN the layer"
+    assert stack.base.is_identity(), "and nowhere else"
+    assert layer.region.shape == "linear" and layer.region.edge == "top"
+
+
+def test_a_regional_op_darkens_only_its_own_half_of_a_real_frame():
+    """Measured on pixels, through the stack -- the only evidence that counts."""
+    from ragvid.compiler import compile_stack
+
+    img = np.tile(IMG[:3600].reshape(60, 60, 3), (1, 1, 1))
+    stack = compile_stack(one("exposure", dir="down", target="top"), STATS)
+    got = stack.apply(img)
+    top = (got[:20] @ LUMA).mean() - (img[:20] @ LUMA).mean()
+    bottom = (got[-20:] @ LUMA).mean() - (img[-20:] @ LUMA).mean()
+    assert top < -0.02, f"the top only moved {top:+.4f}"
+    assert bottom == 0.0, f"the bottom moved {bottom:+.4f}"
+
+
+def test_two_regions_become_two_layers_in_the_order_asked_for():
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(Intent(ops=[
+        Op(op="exposure", dir="down", target="bottom"),
+        Op(op="warmth", target="left"),
+    ]), STATS)
+    assert [l.region.edge for l in stack.layers] == ["bottom", "left"]
+
+
+def test_two_ops_on_the_same_region_share_one_layer():
+    """One region, one mask, one .cube -- and the two moves compose inside the
+    layer exactly as two global moves compose inside the base."""
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(Intent(ops=[
+        Op(op="exposure", dir="down", target="top"),
+        Op(op="saturation", dir="down", target="top"),
+    ]), STATS)
+    layer, = stack.layers
+    assert layer.spec.exposure < 0 and layer.spec.saturation < 1.0
+
+
+def test_a_region_on_a_texture_verb_is_dropped_rather_than_promised():
+    """grain/glow/vignette are already ffmpeg filters, so a region on one cannot
+    be honoured. It is cleared at the Intent boundary, which is what keeps
+    describe() from reporting a move that never happened."""
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(one("grain", target="top"), STATS)
+    assert stack.is_flat and stack.base.effects.grain > 0
+    assert "top" not in stack.base.rationale
+
+
+def test_a_regional_verb_never_looks_its_region_up_as_a_hue():
+    """`_exposure` routes a colour target onto the hue bands. A region target is
+    a different question and must not reach that table -- it used to raise."""
+    from ragvid.compiler import compile_stack
+
+    for target in ("top", "bottom", "left", "right", "center", "edges"):
+        stack = compile_stack(one("exposure", dir="down", target=target), STATS)
+        assert not stack.layers[0].spec.has_hue_qualifiers()
+
+
+def test_the_rationale_names_the_regional_move_too():
+    """The sentence list is the UI. A move that landed in a layer going
+    unmentioned is the same silent drop, one level up."""
+    stack_rationale = compile_intent(
+        Intent(ops=[Op(op="warmth"), Op(op="exposure", dir="down", target="top")]),
+        STATS).rationale
+    assert stack_rationale == "Warmed it up, darkened the top."
+
+
+def test_strength_reaches_the_layers_as_well_as_the_base():
+    """"half strength" modifies everything that was asked for, including the
+    half of it that was about a corner of the frame."""
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(Intent(ops=[Op(op="exposure", dir="down", target="top")],
+                                strength="subtle"), STATS)
+    assert stack.base.look_mix == stack.layers[0].spec.look_mix == 0.4
+
+
+def test_compile_intent_is_exactly_the_base_of_compile_stack():
+    """vibe.py and every provider path still return one GradeSpec, so the two
+    entry points must not be able to disagree."""
+    from ragvid.compiler import compile_stack
+
+    intent = Intent(ops=[Op(op="warmth"), Op(op="contrast", target="center")])
+    for balance in (False, True):
+        assert compile_intent(intent, STATS, balance=balance) == \
+            compile_stack(intent, STATS, balance=balance).base
+
+
+def test_the_balance_runs_once_for_the_clip_and_not_once_per_region():
+    """Auto-balance is a property of the footage, not of a corner of it. A
+    second copy inside a layer would apply the cast correction twice wherever
+    the mask is on."""
+    from ragvid.compiler import compile_stack
+
+    cast = clip_stats(mean=RGB(r=0.45, g=0.40, b=0.34), dominant_hue=30.0,
+                      hue_strength=0.03, saturation=0.2)
+    stack = compile_stack(one("exposure", dir="down", target="top"), cast, balance=True)
+    assert not stack.base.is_identity(), "the balance has to be in the base"
+    assert stack.layers[0].spec.slope == RGB.of(1.0)
+    assert stack.layers[0].spec.offset == RGB.of(0.0)

@@ -1,4 +1,8 @@
-"""Intent + measured statistics -> GradeSpec. Pure, deterministic, no model.
+"""Intent + measured statistics -> GradeStack. Pure, deterministic, no model.
+
+`compile_stack` is the whole answer -- a base GradeSpec plus a layer per region
+named (roadmap B1) -- and `compile_intent` is its base, which is the whole
+answer too for every intent that names no region.
 
 THE LOAD-BEARING CLAIM: this file has to be BETTER than the model guessing, not
 merely cheaper. It gets there one way — by consulting the measurement. "Moderate
@@ -43,8 +47,9 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ragvid.intent import DEFAULT_TINT, OPS, STRENGTH_MIX, Intent, Op, describe
+from ragvid.intent import DEFAULT_TINT, OPS, REGIONS, STRENGTH_MIX, Intent, Op, describe
 from ragvid.match import match_reference
+from ragvid.region import GradeStack, Layer, for_target
 from ragvid.spec import LUMA, RGB, GradeSpec
 
 if TYPE_CHECKING:  # probe imports nothing from us; keeps the dependency one-way
@@ -538,12 +543,12 @@ def _balance(d: dict, stats: "ClipStats", m: _Measured) -> list[str]:
 # ---- the compiler ----------------------------------------------------------
 
 
-def compile_intent(intent: Intent, stats: "ClipStats", balance: bool = False) -> GradeSpec:
-    """Typed verbs + measured statistics -> a full GradeSpec. No model, no I/O.
+def compile_stack(intent: Intent, stats: "ClipStats", balance: bool = False) -> GradeStack:
+    """Typed verbs + measured statistics -> a GradeStack. No model, no I/O.
 
-    An empty Intent compiles to the identity grade bit-for-bit; that is the
-    property the whole design rests on, since it means an Intent only ever
-    describes DEPARTURES from the source.
+    An empty Intent compiles to a FLAT stack whose base is the identity grade
+    bit-for-bit; that is the property the whole design rests on, since it means
+    an Intent only ever describes DEPARTURES from the source.
 
     `balance` runs the auto-balance pass first (roadmap A6): neutralise the clip
     from its own measurements, then apply the creative look on top of a known
@@ -552,30 +557,73 @@ def compile_intent(intent: Intent, stats: "ClipStats", balance: bool = False) ->
     a caller's decision and not this function's. When it is on it announces
     itself in `rationale` ahead of the intent's own sentences, because a silent
     correction fighting the user's grade is worse than no correction at all.
+
+    REGIONS SPLIT THE INTENT IN TWO (roadmap B1). Ops with no region target
+    compile into the base exactly as they always did; ops that name one are
+    grouped by region — in first-mention order — and each group compiles into a
+    layer of its own, from a FRESH identity spec. So a layer's GradeSpec holds
+    one correction, and the base is bit-for-bit what it would have been if the
+    regional ops had not been asked for. The balance is deliberately not
+    repeated per layer: it is a property of the clip, not of a corner of it.
     """
-    d = GradeSpec.identity().model_dump()
     m = _measure(stats)
+    d = GradeSpec.identity().model_dump()
 
     # Before the verbs: they add into the same CDL and later steps, so the look
     # lands on top of the corrected base rather than beside it.
     said = _balance(d, stats, m) if balance else []
+    _run_ops([o for o in intent.ops if o.target not in REGIONS], d, m, intent.strength)
 
-    for item in intent.ops:
+    # The model no longer writes the rationale — the sentences ARE the intent,
+    # so they cannot drift from what the numbers do. Every op is named here,
+    # regional ones included: the list is what the UI shows, and a move the user
+    # asked for going unmentioned because it landed in a layer would be the same
+    # silent-drop bug one level up.
+    text = ", ".join(said + describe(intent))
+    d["rationale"] = (text[0].upper() + text[1:] + ".") if text else ""
+
+    layers = []
+    # dict.fromkeys, not a set: layer order is evaluation order (region.py), so
+    # it has to be the order the person said things in and nothing else.
+    for target in dict.fromkeys(o.target for o in intent.ops if o.target in REGIONS):
+        ops = [o for o in intent.ops if o.target == target]
+        ld = GradeSpec.identity().model_dump()
+        _run_ops(ops, ld, m, intent.strength)
+        ld["rationale"] = ", ".join(describe(Intent(ops=ops)))
+        layers.append(Layer(region=for_target(target), spec=GradeSpec(**ld).sanitize()))
+
+    return GradeStack(base=GradeSpec(**d).sanitize(), layers=layers)
+
+
+def compile_intent(intent: Intent, stats: "ClipStats", balance: bool = False) -> GradeSpec:
+    """The base grade of `compile_stack` — the whole answer whenever no op names
+    a region, and every consumer that only speaks GradeSpec still gets one."""
+    return compile_stack(intent, stats, balance=balance).base
+
+
+def _run_ops(ops: list[Op], d: dict, m: _Measured, strength: str) -> None:
+    """Compile a group of ops into one spec dict, then close it out.
+
+    Shared by the base and by every layer so that a regional correction is
+    computed by exactly the code path a global one is — the alternative is two
+    implementations of "moderate warm" that drift.
+    """
+    for item in ops:
         k = UNIT[item.amount] * (1.0 if item.dir == "up" else -1.0)
+        # A region target has ALREADY answered "which pixels", so inside the
+        # group the verb acts on all of them. Without this, `_exposure` would
+        # look "top" up in the hue-band table and raise.
+        if item.target in REGIONS:
+            item = item.model_copy(update={"target": ""})
         _COMPILERS[item.op](d, k, item, m)
 
     _protect_highlights(d, m)
 
     # look_mix last: it is the outermost operation in apply() (step 9) and it
-    # scales everything above it, exactly as the word "strength" implies.
-    d["look_mix"] = STRENGTH_MIX[intent.strength]
-
-    # The model no longer writes the rationale — the sentences ARE the intent,
-    # so they cannot drift from what the numbers do.
-    text = ", ".join(said + describe(intent))
-    d["rationale"] = (text[0].upper() + text[1:] + ".") if text else ""
-
-    return GradeSpec(**d).sanitize()
+    # scales everything above it, exactly as the word "strength" implies. A
+    # layer gets the same mix as the base: strength is "how much of what I asked
+    # for", and half of a look is half of its regional half too.
+    d["look_mix"] = STRENGTH_MIX[strength]
 
 
 def _protect_highlights(d: dict, m: _Measured) -> None:

@@ -510,3 +510,228 @@ def test_gpu_export_stays_8_bit(tmp_path):
     else:
         render.render_video(src, cube, out, gpu=True)
         assert ffprobe(out)["streams"][0]["pix_fmt"] == "yuv420p"
+
+
+# ---- regions: a grade over part of the frame (roadmap B1) -----------------
+#
+# A region is spatial, so like `effects` it composites AROUND the lut3d node
+# rather than inside it. Everything here measures pixels: a filter graph that
+# parses is not evidence that the mask landed where the sentence said.
+
+
+def darken_cube(path: Path, stops: float = -1.0, size: int = 17) -> str:
+    """A .cube that halves (or doubles) every value. Written here for the same
+    reason identity_cube is: this file tests render.py and nothing else."""
+    g = np.linspace(0.0, 1.0, size)
+    k = 2.0 ** stops
+    lines = [f"LUT_3D_SIZE {size}", ""]
+    for b in g:
+        for gg in g:
+            for r in g:
+                lines.append(" ".join(f"{min(v * k, 1.0):.6f}" for v in (r, gg, b)))
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+def region_layer(tmp_path: Path, target: str = "top", stops: float = -1.0):
+    """[(cube, mask png)] for one region, exactly as Project.bake_layers builds it."""
+    from ragvid.region import for_target
+
+    cube = darken_cube(tmp_path / f"{target}.cube", stops)
+    mask = for_target(target).write_png(tmp_path / f"{target}.png", W, H)
+    return [(cube, mask)]
+
+
+def test_no_layers_leaves_the_lut3d_node_alone():
+    """The bare-lut3d string is asserted in test_platform; this asserts the
+    region wrapper cannot perturb it. A grade with no regions must produce the
+    byte-identical filter chain it produced before regions existed."""
+    bare = render._lut_filter("/tmp/x.cube")
+    assert render._vf(None, bare, layers=None) == bare
+    assert render._vf(None, bare, layers=[]) == bare
+    assert render._region_filters(None) == [] and render._region_filters([]) == []
+
+
+def test_a_region_fragment_is_grammatical_inside_a_real_graph(tmp_path):
+    """String equality cannot tell you a fragment is chainable once spliced: the
+    composite is five chains pretending to be one filter, and a malformed one
+    only surfaces when ffmpeg refuses the whole -vf."""
+    layers = region_layer(tmp_path)
+    chain = render._vf(EffectSpec(glow=0.5), render._lut_filter(layers[0][0]),
+                       "crop=trunc(iw/2)*2:trunc(ih/2)*2", layers=layers)
+    render._run(["-f", "lavfi", "-i", f"testsrc2=s={W}x{H}:d=0.2", "-vf", chain,
+                 "-frames:v", "2", "-f", "null", "-"], timeout=60)
+
+
+def test_awkward_mask_filename_survives_the_filtergraph_parser(tmp_path):
+    """Same escaping contract the cube path has: the mask is a file path inside
+    a filter option, so a comma or a colon in it must not split the graph."""
+    from ragvid.region import for_target
+
+    d = tmp_path / "wei,rd: dir"
+    layers = [(darken_cube(tmp_path / "c.cube"),
+               for_target("top").write_png(d / "ma,sk.png", W, H))]
+    out = str(tmp_path / "f.png")
+    render.render_frame(SAMPLE, layers[0][0], out, at=1.0, layers=layers)
+    assert Image.open(out).size == (W, H)
+
+
+def test_the_region_darkens_the_top_and_leaves_the_bottom_alone(tmp_path):
+    """The measurement the feature exists for. A flat grey source, so the mask
+    is readable straight off the rendered frame."""
+    grey = tmp_path / "grey.mp4"
+    render._run(["-f", "lavfi", "-i", f"color=c=0x808080:s={W}x{H}:d=1:r=10",
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", str(grey)], timeout=60)
+    out = tmp_path / "f.png"
+    render.render_frame(str(grey), None, str(out), at=0.5,
+                        layers=region_layer(tmp_path, "top", stops=-0.5))
+    got = np.asarray(Image.open(out).convert("RGB")).astype(float)
+
+    top, bottom = got[:H // 3].mean(), got[-(H // 3):].mean()
+    assert top < 100.0, f"the top barely moved: {top:.2f} of a 128 source"
+    assert abs(bottom - 128.0) <= 1.0, f"the bottom moved to {bottom:.2f}"
+
+
+def test_the_masked_edge_is_soft_all_the_way_through_ffmpeg(tmp_path):
+    """The falloff has to survive the 8-bit mask, the alpha merge and the blend.
+
+    A hard edge bands visibly; so does a mask quantised to a handful of levels.
+    Measured through the real filter chain, not in numpy.
+    """
+    grey = tmp_path / "grey.mp4"
+    render._run(["-f", "lavfi", "-i", f"color=c=0x808080:s={W}x{H}:d=1:r=10",
+                 "-c:v", "ffv1", str(grey)], timeout=60)
+    out = tmp_path / "f.png"
+    render.render_frame(str(grey), None, str(out), at=0.5,
+                        layers=region_layer(tmp_path, "top", stops=-1.0))
+    col = np.asarray(Image.open(out).convert("RGB")).astype(float)[:, W // 2, 0]
+
+    d = np.diff(col)
+    assert (d >= -1.0).all(), "the ramp must not reverse"
+    assert d.max() <= 4.0, f"a single row jumps {d.max():.0f} code values"
+    assert np.count_nonzero((col > 65) & (col < 127)) > H // 5, "the ramp is too short to be soft"
+
+
+def test_the_still_path_and_the_video_path_composite_identically(tmp_path):
+    """A region built one way for the preview and another for the export is the
+    same bug as filtering the contact sheet after stacking it.
+
+    Both paths are compared at FULL chroma resolution, because the export's own
+    4:2:0 already costs 23 code values on testsrc2's hard colour edges with NO
+    region present at all -- measuring through it would report the pixel format,
+    not the composite. At full chroma the no-region control is exactly 0.0 and
+    the region path is 2.0 max / 0.11 mean, which is the 8-bit rounding of
+    blending in YUV on one path and RGB on the other.
+    """
+    layers = region_layer(tmp_path, "top")
+    cube = layers[0][0]
+    still_png = tmp_path / "still.png"
+    render.render_frame(SAMPLE, cube, str(still_png), at=1.5, layers=layers)
+    still = np.asarray(Image.open(still_png).convert("RGB")).astype(float)
+
+    vf = render._vf(None, render._lut_filter(cube),
+                    "crop=trunc(iw/2)*2:trunc(ih/2)*2", layers=layers)
+    mkv = tmp_path / "v.mkv"
+    render._run(["-ss", "1.5", "-i", SAMPLE, "-vf", vf, "-frames:v", "1",
+                 "-c:v", "ffv1", "-pix_fmt", "gbrp", str(mkv)], timeout=120)
+    vid_png = tmp_path / "v.png"
+    render._run(["-i", str(mkv), "-frames:v", "1", "-update", "1", str(vid_png)], timeout=60)
+    vid = np.asarray(Image.open(vid_png).convert("RGB")).astype(float)
+
+    err = np.abs(still - vid)
+    assert err.max() <= 4.0, f"still vs video path: {err.max():.0f} code values"
+    assert err.mean() < 0.6
+
+
+def test_the_preview_tile_composites_the_region_like_the_single_frame(tmp_path):
+    """Per-tile again, this time for regions: the mask is in frame-relative
+    coordinates, so one applied to the hstacked sheet would smear every region
+    across three frames -- exactly what the effects fragment used to do."""
+    layers = region_layer(tmp_path, "center")
+    cube = layers[0][0]
+    n = 3
+    duration = render.probe_duration(SAMPLE)
+    sheet_png = tmp_path / "sheet.png"
+    render.render_preview(SAMPLE, cube, str(sheet_png), n_frames=n, layers=layers)
+    sheet = np.asarray(Image.open(sheet_png).convert("RGB")).astype(int)
+    w = sheet.shape[1] // n
+    for i in range(n):
+        frame_png = tmp_path / f"f{i}.png"
+        render.render_frame(SAMPLE, cube, str(frame_png), at=duration * (i + 0.5) / n,
+                            layers=layers)
+        frame = np.asarray(Image.open(frame_png).convert("RGB")).astype(int)
+        assert np.abs(sheet[:, i * w:(i + 1) * w] - frame).max() == 0
+
+
+def test_a_mask_sized_from_ffprobe_survives_a_frame_the_decoder_rotated(tmp_path):
+    """alphamerge REFUSES a mask whose size differs from the frame.
+
+    The mask is written at the size ffprobe reported and the frame is what the
+    decoder produced, and those disagree on any clip carrying rotation side data
+    -- a phone video reports 1920x1080 and decodes to 1080x1920. Without the
+    scale2ref that recovers it, the export fails outright with "Input frame
+    sizes do not match" rather than looking slightly wrong. Simulated here by
+    handing the chain a transposed mask directly.
+    """
+    from ragvid.region import for_target
+
+    layers = [(darken_cube(tmp_path / "c.cube"),
+               for_target("top").write_png(tmp_path / "m.png", H, W))]  # transposed
+    out = tmp_path / "f.png"
+    render.render_frame(SAMPLE, None, str(out), at=1.0, layers=layers)
+    got = np.asarray(Image.open(out).convert("RGB")).astype(float)
+    assert got.shape[:2] == (H, W)
+    assert got[:60].mean() < got[-60:].mean(), "the rescaled mask still darkens the top"
+
+
+def test_odd_dimensions_still_export_with_a_region(tmp_path):
+    """The even-dimension crop runs AFTER the composite, so the mask sees the
+    source's real size. Getting that order wrong is an export that dies at the
+    very last step on a hand-cropped clip."""
+    odd = tmp_path / "odd.mkv"
+    render._run(["-f", "lavfi", "-i", "color=c=red:s=321x241:d=0.5:r=10",
+                 "-c:v", "ffv1", "-pix_fmt", "gbrp", str(odd)], timeout=60)
+    from ragvid.region import for_target
+
+    layers = [(darken_cube(tmp_path / "c.cube"),
+               for_target("center").write_png(tmp_path / "m.png", 321, 241))]
+    out = tmp_path / "odd.mp4"
+    render.render_video(str(odd), layers[0][0], str(out), layers=layers)
+    assert ffprobe(str(out))["streams"][0]["width"] == 320
+
+
+def test_a_region_does_not_drag_a_10_bit_export_down_to_8(tmp_path):
+    """`overlay=format=auto` is what keeps the depth. The alternative graphs
+    considered here (maskedmerge over gbrp) would silently truncate exactly the
+    log footage the 10-bit path was added for."""
+    src = tmp_path / "s10.mp4"
+    render._run(["-f", "lavfi", "-i", f"testsrc2=s={W}x{H}:d=1:r=10", "-c:v", "libx264",
+                 "-pix_fmt", "yuv420p10le", "-profile:v", "high10", str(src)], timeout=60)
+    from ragvid.region import for_target
+
+    layers = [(darken_cube(tmp_path / "c.cube"),
+               for_target("top").write_png(tmp_path / "m.png", W, H))]
+    out = tmp_path / "o.mp4"
+    render.render_video(str(src), layers[0][0], str(out), layers=layers)
+    assert ffprobe(str(out))["streams"][0]["pix_fmt"] == "yuv420p10le"
+
+
+def test_two_regions_composite_in_order_through_ffmpeg(tmp_path):
+    """The numpy stack composes layer-on-layer; the filter chain must do the
+    same, or the export disagrees with everything else in the project."""
+    from ragvid.region import for_target
+
+    grey = tmp_path / "grey.mkv"
+    render._run(["-f", "lavfi", "-i", f"color=c=0x808080:s={W}x{H}:d=1:r=10",
+                 "-c:v", "ffv1", str(grey)], timeout=60)
+    layers = [
+        (darken_cube(tmp_path / "a.cube"), for_target("top").write_png(tmp_path / "a.png", W, H)),
+        (darken_cube(tmp_path / "b.cube"), for_target("left").write_png(tmp_path / "b.png", W, H)),
+    ]
+    out = tmp_path / "f.png"
+    render.render_frame(str(grey), None, str(out), layers=layers)
+    got = np.asarray(Image.open(out).convert("RGB")).astype(float)[..., 0]
+    tl, tr, bl, br = got[5, 5], got[5, -5], got[-5, 5], got[-5, -5]
+    assert br == 128.0, "neither region reaches the bottom right"
+    assert tr == bl == 64.0, "one region each: half of 128"
+    assert tl == 32.0, f"both regions, composed: expected 32, got {tl}"

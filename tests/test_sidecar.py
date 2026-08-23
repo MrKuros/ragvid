@@ -56,13 +56,15 @@ def _floats(el) -> list[float]:
 def test_look_json_round_trips_the_spec_field_for_field(tmp_path):
     """The whole justification for the file: everything the cube drops survives."""
     write_look(RICH, tmp_path / "out.look.json")
-    assert read_look(tmp_path / "out.look.json") == RICH
+    assert read_look(tmp_path / "out.look.json").base == RICH
+    assert read_look(tmp_path / "out.look.json").is_flat, "no regions were asked for"
 
 
 def test_look_json_header_names_what_the_cube_does_not_carry(tmp_path):
     raw = json.loads(Path(write_look(RICH, tmp_path / "o.look.json")).read_text())
-    assert raw["format"] == "ragvid-look" and raw["version"] == 1
+    assert raw["format"] == "ragvid-look" and raw["version"] == 2
     assert "effects" in raw["note"] and "3D LUT" in raw["note"]
+    assert "layers" not in raw, "a flat grade writes no layer list"
     assert raw["spec"]["effects"]["grain"] == 0.4
 
 
@@ -151,7 +153,7 @@ def project(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "ragvid.render.render_video",
         lambda video, cube, out, effects=None, gpu=False, progress=None,
-        input_lut=None: Path(out).write_bytes(b"x"),
+        input_lut=None, layers=None: Path(out).write_bytes(b"x"),
     )
     p = Project.create(video, root=tmp_path / "proj")
     p.set_spec(RICH)
@@ -164,5 +166,59 @@ def test_export_writes_the_video_and_both_sidecars(project, tmp_path):
     look = tmp_path / "graded.look.json"
     cdl = tmp_path / "graded.cdl"
     assert look.is_file() and cdl.is_file()
-    assert read_look(look) == RICH
+    assert read_look(look).base == RICH
     assert _floats(_cc(cdl).find(f"{NS}SOPNode/{NS}Slope"))[0] == pytest.approx(1.2 * 2 ** 0.5)
+
+
+# ---- regions: look.json is now the ONLY lossless format --------------------
+#
+# A .cube is a per-pixel colour map and a region is an address, so a regional
+# grade cannot round-trip through one at all. That is why A8 shipped first.
+
+
+def _regional_stack():
+    from ragvid.region import GradeStack, Layer, for_target
+
+    return GradeStack(base=RICH, layers=[
+        Layer(region=for_target("top"),
+              spec=GradeSpec(exposure=-0.35, rationale="darkened the top")),
+        Layer(region=for_target("center"), spec=GradeSpec(saturation=1.4)),
+    ])
+
+
+def test_look_json_round_trips_the_regions_too(tmp_path):
+    """The whole justification for the file, one category larger than before."""
+    stack = _regional_stack()
+    write_look(stack, tmp_path / "r.look.json")
+    assert read_look(tmp_path / "r.look.json") == stack
+
+
+def test_the_layer_geometry_survives_field_for_field(tmp_path):
+    """A region that reloads with a different softness is a different picture,
+    and nothing in the file would say so."""
+    stack = _regional_stack()
+    back = read_look(write_look(stack, tmp_path / "r.look.json"))
+    for got, want in zip(back.layers, stack.layers):
+        assert got.region.model_dump() == want.region.model_dump()
+        assert got.spec == want.spec
+
+
+def test_a_bare_spec_still_writes_a_flat_look(tmp_path):
+    """Most grades are flat and a caller holding one correction should not have
+    to wrap it."""
+    assert read_look(write_look(RICH, tmp_path / "f.look.json")).base == RICH
+
+
+def test_the_cdl_names_the_regions_it_cannot_carry(tmp_path):
+    """A CDL is one correction for every pixel by definition. A silent drop here
+    is the same data-loss bug as the cube's missing effects."""
+    desc = _cc(write_cdl(_regional_stack(), tmp_path / "r.cdl")).find(f"{NS}Description").text
+    assert "region grade" in desc
+    assert "darkened the top" in desc
+    assert "look.json" in desc
+
+
+def test_the_cdl_of_a_regional_grade_still_carries_the_base(tmp_path):
+    """Naming what it dropped must not stop it exporting what it can."""
+    cc = _cc(write_cdl(_regional_stack(), tmp_path / "r.cdl"))
+    assert _floats(cc.find(f"{NS}SOPNode/{NS}Slope"))[0] == pytest.approx(1.2 * 2 ** 0.5)

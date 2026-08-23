@@ -24,6 +24,7 @@ from typing import Callable, Iterable
 
 from .errors import InputError, NoGrade
 from .intent import Intent, describe
+from .region import GradeStack, Layer
 from .session import Session
 from .spec import GradeSpec
 
@@ -187,6 +188,23 @@ class Project:
         return self.session.spec
 
     @property
+    def stack(self) -> GradeStack:
+        """The current grade INCLUDING its regional layers (roadmap B1).
+
+        `self.spec` is the base — one correction for every pixel — and is still
+        what every consumer that predates regions reads. This is the whole
+        answer, and it is what the renderer and the `look.json` sidecar take.
+        Flat (`stack.is_flat`) for every grade that names no region, which is
+        almost all of them.
+        """
+        return GradeStack(base=self.spec, layers=list(self.session.region_layers))
+
+    @property
+    def layers(self) -> list[Layer]:
+        """The current grade's regional layers, oldest first. [] when flat."""
+        return list(self.session.region_layers) if self.session.specs else []
+
+    @property
     def intent(self) -> Intent | None:
         """The typed verbs the current grade was compiled from, or None.
 
@@ -233,6 +251,7 @@ class Project:
         del self.session.specs[index + 1:]
         del self.session.labels[index + 1:]
         del self.session.intents[index + 1:]
+        del self.session.layers[index + 1:]
         self.save()
         return True
 
@@ -320,11 +339,19 @@ class Project:
         and read back through `self.intent` — it is what "what it did" is drawn
         from, and what `set_intent` re-compiles when one item is adjusted.
         """
+        from .compiler import compile_stack
         from .vibe import plan_vibe
 
         spec, intent = plan_vibe(vibe, self.stats, provider=provider,
                                  balance=self.session.auto_balance)
-        return self._push(spec, label=vibe, intent=intent)
+        # plan_vibe returns the base spec, which is all a flat grade has. When
+        # the model named a region the layers are in the compile it already ran,
+        # so re-run it: compile_intent IS compile_stack().base, the function is
+        # pure and takes microseconds, and re-deriving beats widening a return
+        # type that three provider paths and vibe.py's direct path all share.
+        layers = compile_stack(intent, self.stats,
+                               balance=self.session.auto_balance).layers if intent else []
+        return self._push(spec, label=vibe, intent=intent, layers=layers)
 
     def plan_from_reference(self, image: str | Path) -> GradeSpec:
         """Match a reference image. Closed form — no model, no network."""
@@ -338,7 +365,14 @@ class Project:
                           label=f"photo: {image.name}")
 
     def refine(self, instruction: str, provider=None) -> GradeSpec:
-        """Adjust the current grade in words. Uses cached stats, never re-probes."""
+        """Adjust the current grade in words. Uses cached stats, never re-probes.
+
+        Flattens: refine hands the model 43 numbers and takes 43 back, so the
+        result describes the whole frame and any regional layers are dropped,
+        exactly as in set_spec. Adjusting a regional grade without losing its
+        regions means editing the verbs -- set_intent, which is the path the
+        per-item strength controls already take.
+        """
         from .refine import refine_spec
 
         return self._push(refine_spec(self.spec, instruction, self.stats, provider=provider),
@@ -360,6 +394,12 @@ class Project:
         described by any list of verbs, and carrying the previous one forward
         would leave sentences on screen claiming things the numbers no longer
         do. Editing a grade that HAS an Intent goes through set_intent instead.
+
+        No regional layers either, and for the same reason: 43 numbers describe
+        the whole frame, so a spec that arrived this way IS the whole grade.
+        Carrying layers forward would keep applying a correction to a corner of
+        an image nothing in the incoming spec knows about. set_intent is the
+        path that keeps them, because verbs are what regions attach to.
         """
         return self._push(spec.sanitize(), label=label)
 
@@ -372,10 +412,10 @@ class Project:
         had (compile_intent is pure) and the one that did moves along its own
         axis rather than along whichever spec field happened to carry it.
         """
-        from .compiler import compile_intent
+        from .compiler import compile_stack
 
-        spec = compile_intent(intent, self.stats, balance=self.session.auto_balance)
-        return self._push(spec, label=label, intent=intent)
+        stack = compile_stack(intent, self.stats, balance=self.session.auto_balance)
+        return self._push(stack.base, label=label, intent=intent, layers=stack.layers)
 
     @property
     def auto_balance(self) -> bool:
@@ -415,6 +455,7 @@ class Project:
         self.session.specs.clear()
         self.session.labels.clear()
         self.session.intents.clear()
+        self.session.layers.clear()
         self.save()
         return True
 
@@ -425,9 +466,9 @@ class Project:
         self.save()
         return True
 
-    def _push(self, spec: GradeSpec, label: str = "",
-              intent: Intent | None = None) -> GradeSpec:
-        self.session.push(spec, label, intent)
+    def _push(self, spec: GradeSpec, label: str = "", intent: Intent | None = None,
+              layers: list[Layer] | None = None) -> GradeSpec:
+        self.session.push(spec, label, intent, layers)
         self.save()
         return spec
 
@@ -448,6 +489,34 @@ class Project:
         out.parent.mkdir(parents=True, exist_ok=True)
         bake_cube(self.spec, str(out), size=size)
         return out
+
+    def bake_layers(self, dir: str | Path | None = None) -> list[tuple[str, str]]:
+        """Bake the regional layers into [(cube, mask PNG)] for render.py.
+
+        One .cube per layer plus one mask, because a region is spatial and a
+        .cube has no way to hold it (docs/ARCHITECTURE.md: the same seam
+        `effects` already sits on, one file further along). [] for a flat grade,
+        which is what keeps every existing render byte-identical.
+
+        The mask is written at the SOURCE's measured resolution, not the
+        preview's: every render path here decodes full frames and only crops
+        afterwards, so one mask fits the still, the contact sheet and the export
+        — which is the cheapest possible way to guarantee they composite the
+        same. `dir` defaults to the session dir; export passes its private temp
+        dir for the same reason it bakes a private cube there.
+        """
+        from .lut import bake_cube
+
+        out_dir = Path(dir) if dir else self.state_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        made = []
+        for i, layer in enumerate(self.layers):
+            cube = out_dir / f"layer{i}.cube"
+            bake_cube(layer.spec, str(cube))
+            mask = layer.region.write_png(out_dir / f"layer{i}.png",
+                                          self.stats.width, self.stats.height)
+            made.append((str(cube), mask))
+        return made
 
     def preview(self, n_frames: int = 3, path: str | Path | None = None,
                 graded: bool = True) -> Path:
@@ -470,7 +539,8 @@ class Project:
         )
         out.parent.mkdir(parents=True, exist_ok=True)
         render_preview(self.source, cube, str(out), effects, n_frames=n_frames,
-                       input_lut=self.input_lut)
+                       input_lut=self.input_lut,
+                       layers=self.bake_layers() if graded else None)
         return out
 
     def frame(self, at: float = 0.0, graded: bool = True,
@@ -490,7 +560,8 @@ class Project:
         out = Path(path) if path else self.state_dir / name
         out.parent.mkdir(parents=True, exist_ok=True)
         render_frame(self.source, cube, str(out), effects, at=at,
-                     input_lut=self.input_lut)
+                     input_lut=self.input_lut,
+                     layers=self.bake_layers() if graded else None)
         return out
 
     def export(self, out_path: str | Path, gpu: bool = False,
@@ -505,13 +576,15 @@ class Project:
         what was asked for. Measured, not theorised: exporting at saturation 2.5
         and then nudging the slider to 0 produced a greyscale file.
 
-        `spec.effects` rides along as an ffmpeg filter chain -- it is spatial, so
-        it is not in the cube and would otherwise be silently dropped from the
-        one render that matters. That covers the exported *file*; it does not
-        cover the cube once it leaves ragvid, which is why two sidecars land
-        beside the video: `<stem>.look.json` (the whole spec, lossless, the only
-        round-trip format) and `<stem>.cdl` (ASC CDL, lossy but universal, with
-        everything it cannot carry named in its Description).
+        `spec.effects` and the regional layers both ride along as ffmpeg filter
+        chains -- they are spatial, so they are not in the cube and would
+        otherwise be silently dropped from the one render that matters. That
+        covers the exported *file*; it does not cover the cube once it leaves
+        ragvid, which is why two sidecars land beside the video:
+        `<stem>.look.json` (the whole STACK, lossless, the only round-trip
+        format now that a grade can be spatial) and `<stem>.cdl` (ASC CDL, lossy
+        but universal, with everything it cannot carry named in its
+        Description).
 
         Note this makes the *file* safe, not the spec: `self.spec` is read when
         the render starts, so a caller that wants the grade frozen at the moment
@@ -525,10 +598,11 @@ class Project:
         with tempfile.TemporaryDirectory(prefix="ragvid-export-") as tmp:
             cube = self.bake(Path(tmp) / "export.cube")
             render_video(self.source, str(cube), str(out), self.spec.render_effects(),
-                         gpu=gpu, progress=progress, input_lut=self.input_lut)
+                         gpu=gpu, progress=progress, input_lut=self.input_lut,
+                         layers=self.bake_layers(tmp))
         # with_name, not with_suffix: a multi-dot suffix is not accepted there.
-        write_look(self.spec, out.with_name(out.stem + ".look.json"))
-        write_cdl(self.spec, out.with_name(out.stem + ".cdl"))
+        write_look(self.stack, out.with_name(out.stem + ".look.json"))
+        write_cdl(self.stack, out.with_name(out.stem + ".cdl"))
         return out
 
     # ---- interop ----------------------------------------------------------
@@ -542,6 +616,10 @@ class Project:
             "input_format": self.input_format,
             "duration": self.duration,
             "spec": self.spec.model_dump() if self.is_planned else None,
+            # The regional half of the grade (roadmap B1). A UI that ignores it
+            # draws a picture the export will not produce -- and a WebGL preview
+            # in particular has to build the same mask this list describes.
+            "layers": [l.model_dump() for l in self.layers],
             "intent": intent_view(self.intent),
             "auto_balance": self.auto_balance,
             "balance": balance_text(self.stats),

@@ -518,3 +518,190 @@ def test_identity_tolerance_matches_the_apply_guard():
     for e in (1e-13, 1e-12, 5e-10):
         s = GradeSpec(exposure=e)
         assert s.is_identity() and np.array_equal(s.apply(g), g)
+
+
+# ---- regions: the container around the spec (roadmap B1) -------------------
+#
+# A GradeSpec is the currency of ONE correction and cannot say which pixels;
+# region.GradeStack is the container that can. These tests live here because
+# the stack's evaluation order is spec math -- and because the identity gate
+# above is exactly what a container is most likely to break.
+
+
+def test_a_flat_stack_is_bit_for_bit_its_base():
+    """No regions => byte-identical output to before regions existed.
+
+    array_equal, not allclose: a lerp against a mask of 1.0 costs ~1 ulp, so an
+    unguarded container would pass an atol test while shifting every saved
+    grade -- the same trap the module docstring describes for apply()'s steps.
+    """
+    from ragvid.region import GradeStack
+
+    img = np.random.default_rng(7).random((16, 24, 3))
+    for spec in (GradeSpec.identity(), GradeSpec(contrast=0.4, temperature=-1200.0)):
+        assert np.array_equal(GradeStack(base=spec).apply(img), spec.apply(img))
+
+
+def test_the_identity_stack_still_hashes_to_the_identity_lut():
+    """The bit-for-bit gate, through the container this time. If a stack with no
+    layers ever stops reproducing this hash, every grade on disk has shifted."""
+    from ragvid.region import GradeStack
+
+    grid = _grid(33).reshape(1, -1, 3)   # (h, w, 3): a stack grades images
+    table = GradeStack(base=GradeSpec.identity()).apply(grid).reshape(-1, 3)
+    assert hashlib.sha256(np.ascontiguousarray(table).tobytes()).hexdigest() == (
+        "517467be3ba6b7a8afe71a05c847061dc597f0ea92e41b422164b579fbc74291"
+    )
+
+
+def test_a_full_frame_region_equals_the_same_grade_applied_globally():
+    """A mask of 1 everywhere must reproduce the global grade.
+
+    Not bit-for-bit, and deliberately so: the lerp `x + (g-x)*1.0` is the ulp
+    the docstring warns about, and paying it is what keeps the mask a plain
+    array instead of a special case. Measured max error 1.1e-16 -- under half a
+    code value at 53 bits, let alone at 8.
+    """
+    from ragvid.region import GradeStack, Layer, Region
+
+    img = np.random.default_rng(3).random((12, 20, 3))
+    spec = GradeSpec(exposure=-0.4, saturation=1.3, contrast=0.25)
+    full = Region(shape="linear", edge="top", extent=9.0, softness=0.0)
+    assert full.mask(20, 12).min() == 1.0
+    stacked = GradeStack(base=GradeSpec.identity(),
+                         layers=[Layer(region=full, spec=spec)]).apply(img)
+    assert np.abs(stacked - spec.apply(img)).max() < 1e-15
+
+
+def test_an_empty_region_changes_nothing_at_all():
+    """The other rail: a mask of 0 is bit-exact, because x + (g-x)*0 == x.
+
+    Measured against `base.apply`, not against the source: apply() is only
+    bit-exact on the LUT grid (its saturation step is `L + (x-L)*1.0`, which is
+    exact when L lands on the value and ~1 ulp off when it does not), so the
+    source is the wrong oracle for anything but the grid.
+    """
+    from ragvid.region import GradeStack, Layer, Region
+
+    img = np.random.default_rng(4).random((8, 8, 3))
+    base = GradeSpec(contrast=0.3)
+    none = Region(shape="linear", edge="top", extent=-9.0, softness=0.0)
+    assert none.mask(8, 8).max() == 0.0
+    out = GradeStack(base=base,
+                     layers=[Layer(region=none, spec=GradeSpec(exposure=2.0))]).apply(img)
+    assert np.array_equal(out, base.apply(img))
+
+
+def test_the_region_is_where_it_says_it_is():
+    """"darken the top" must darken the top and leave the bottom exactly alone."""
+    from ragvid.region import GradeStack, Layer, for_target
+
+    img = np.full((90, 60, 3), 0.5)
+    stack = GradeStack(base=GradeSpec.identity(),
+                       layers=[Layer(region=for_target("top"),
+                                     spec=GradeSpec(exposure=-0.35))])
+    out = stack.apply(img)
+    top, bottom = out[:30].mean(), out[-30:].mean()
+    assert top < 0.45, f"the top barely moved: {top:.4f} from 0.5"
+    # EXACTLY unchanged, not approximately: the falloff of "top" ends at 0.6 of
+    # the frame, so the whole bottom third has a mask of 0 and the lerp there is
+    # bit-exact. A region whose name does not survive this is mis-shaped.
+    assert np.array_equal(out[-30:], img[-30:]), f"the bottom moved to {bottom:.4f}"
+
+
+def test_the_soft_edge_is_monotonic_with_no_step():
+    """A hard edge bands badly through an 8-bit encode, so the falloff has to be
+    a real ramp: monotone, and with no jump big enough to read as a contour.
+
+    The bound is the smoothstep's own maximum slope (1.5) over the ramp's height
+    in pixels -- a step edge would be 1.0 in a single row and fail it by 30x.
+    """
+    from ragvid.region import for_target
+
+    m = for_target("top").mask(40, 200)
+    col = m[:, 0]
+    assert col[0] == 1.0 and col[-1] == 0.0
+    d = np.diff(col)
+    assert np.all(d <= 0.0), "the mask must fall monotonically from the top"
+    # The ramp spans `softness` (0.4) of the frame, and smoothstep's steepest
+    # slope is 1.5, so no single row may move more than 1.5/(0.4*200). A step
+    # edge would move 1.0 in one row and miss it by 50x.
+    assert np.abs(d).max() < 1.5 / (0.4 * 200) + 1e-12
+    # ... and it is a genuine ramp, not a step with rounded corners: 40% of the
+    # frame is strictly between the two plateaus.
+    assert 0.3 < np.count_nonzero((col > 0.01) & (col < 0.99)) / len(col) < 0.6
+
+
+def test_overlapping_regions_compose_in_list_order():
+    """Two layers over the same pixels compose as lerps, in the order asked for.
+
+    Documented order = evaluation order: layer i grades the result of 0..i-1.
+    So the reference here is the composition itself, and swapping the two must
+    produce a different (not merely rounded) picture.
+    """
+    from ragvid.region import GradeStack, Layer, for_target
+
+    img = np.full((80, 80, 3), 0.5)
+    a = Layer(region=for_target("top"), spec=GradeSpec(exposure=-0.5))
+    b = Layer(region=for_target("left"), spec=GradeSpec(saturation=0.0))
+    ab = GradeStack(base=GradeSpec.identity(), layers=[a, b]).apply(img)
+    ba = GradeStack(base=GradeSpec.identity(), layers=[b, a]).apply(img)
+
+    # Where only one mask reaches, order cannot matter.
+    assert np.abs(ab[5, -5] - ba[5, -5]).max() < 1e-12    # top right: `a` only
+    assert np.abs(ab[-5, 5] - ba[-5, 5]).max() < 1e-12    # bottom left: `b` only
+    # Explicit reference for the overlap, spelled out the way the docstring says.
+    m_a = for_target("top").mask(80, 80)[..., None]
+    m_b = for_target("left").mask(80, 80)[..., None]
+    want = img + (a.spec.apply(img) - img) * m_a
+    want = want + (b.spec.apply(want) - want) * m_b
+    assert np.abs(ab - want).max() < 1e-12
+
+
+def test_a_radial_region_is_an_ellipse_around_its_centre():
+    from ragvid.region import Region, for_target
+
+    m = for_target("center").mask(100, 100)
+    assert m[50, 50] == 1.0 and m[0, 0] < 0.01
+    # Wider than tall by construction (rx 0.6, ry 0.75), so the mask reaches
+    # further down the frame than across it.
+    assert m[50, 5] < m[5, 50]
+    off = Region(shape="radial", cx=0.2, cy=0.2, rx=0.15, ry=0.15, softness=0.4)
+    o = off.mask(100, 100)
+    assert o[20, 20] == 1.0 and o[80, 80] == 0.0
+    # Symmetric about the centre it was given, and falling away from it. Column
+    # 10 and column 29 are the pair equidistant from x = 0.2 once pixel centres
+    # are accounted for (10.5/100 and 29.5/100).
+    assert o[20, 10] == pytest.approx(o[20, 29]) and o[10, 20] == pytest.approx(o[29, 20])
+    assert o[20, 20] == 1.0 > o[20, 30] > o[20, 33] > o[20, 36] == 0.0
+
+
+def test_invert_swaps_inside_and_outside_exactly():
+    from ragvid.region import for_target
+
+    inside = for_target("center").mask(60, 40)
+    outside = for_target("edges").mask(60, 40)
+    assert np.array_equal(inside + outside, np.ones_like(inside))
+
+
+def test_a_mask_is_resolution_independent():
+    """The same Region has to mask a 4K export and a 480p preview identically,
+    or the frame someone approved is not the frame they get."""
+    from ragvid.region import for_target
+
+    def half_crossing(h: int) -> float:
+        col = for_target("top").mask(4, h)[:, 0]
+        return float(np.argmax(col < 0.5)) / h
+
+    # The 50% point, as a fraction of the frame. One row of the coarser mask is
+    # 1/24, and the two must agree inside that.
+    assert abs(half_crossing(24) - half_crossing(240)) < 1 / 24
+
+
+def test_a_stack_refuses_a_flat_array_of_pixels():
+    """GradeSpec.apply takes any (..., 3) because a colour map does not care how
+    the pixels are arranged. A region does -- that is the whole point."""
+    from ragvid.region import GradeStack
+
+    with pytest.raises(ValueError):
+        GradeStack(base=GradeSpec.identity()).apply(np.zeros((10, 3)))

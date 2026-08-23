@@ -316,8 +316,8 @@ Return {"ops": [...], "strength": ...}. Each op has four fields:
           right one whenever the sentence just names a change ("warmer"). "subtle" is
           for "a touch", "slightly", "a hint of", "just barely". "strong" is for
           "really", "very", "heavily", "way more", "push it".
-  target  "" — the whole picture — for every verb except the four listed under TARGET
-          below. Leave it "".
+  target  "" — the whole picture — unless the sentence names a colour or a part of
+          the frame. See TARGET below.
 
 VERBS — TONE. Most looks live here.
   exposure    up = brighter overall, down = darker overall.
@@ -350,12 +350,21 @@ VHS, clean, noisy.
   denoise   up = cleaner, less sensor noise. Costs fine detail.
   fringe    up = more chromatic aberration at the edges. Cheap lens, VHS, dream.
 
-TARGET, in full. The allowed values are "", red, orange, yellow, green, cyan, teal,
-blue, magenta, purple and skin. It means two different things, and only on four verbs:
-  - on saturation and exposure it SELECTS which pixels move, by their existing colour:
-    "drain the greens", "darken the reds", "keep the skin, kill everything else".
-  - on shadow_tint and highlight_tint it NAMES THE COLOUR being added.
-Every other verb ignores target. Leave it "" on all of them.
+TARGET, in full. It answers WHICH PIXELS, and takes either a colour or a place.
+
+COLOURS: red, orange, yellow, green, cyan, teal, blue, magenta, purple, skin.
+  - on saturation and exposure a colour SELECTS which pixels move, by the colour they
+    already are: "drain the greens", "darken the reds", "keep the skin, kill the rest".
+  - on shadow_tint and highlight_tint a colour NAMES THE COLOUR being added.
+  Every other verb ignores a colour target. Leave it "" on them.
+
+PLACES: top, bottom, left, right, center, edges. A place means the move applies only to
+that part of the frame and the rest of the picture is left alone — "darken the top",
+"warm the left side", "brighten the middle", "drop the edges off". Use a place ONLY when
+the sentence actually points at one; a look that is about the whole picture takes "".
+  - center is the middle of the frame, edges is everything but the middle.
+  - places work on every TONE and COLOUR verb. The TEXTURE verbs cannot take one, because
+    they are applied to the whole frame after the colour: leave their target "".
 
 STRENGTH is how much of the whole look survives against the untouched footage: "full",
 "strong", "moderate" or "subtle". Use "full" unless the user asked for the look itself to
@@ -374,7 +383,8 @@ HOW TO CHOOSE:
   asked for a darker one.
 - One op per verb. Two warmth ops in one list compose into a bigger push than either of
   them asked for; say it once, with the right amount.
-- Texture verbs and colour targets stay out of a grade that did not ask for them.
+- Texture verbs, colour targets and place targets stay out of a grade that did not ask
+  for them.
 - Order does not matter. The compiler decides the order the moves are applied in.
 - You are not told what this footage looks like, and you do not need to be. "Warmer" on
   an already-orange clip and on a blue one is the same request; how far it actually goes

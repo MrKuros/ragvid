@@ -14,6 +14,14 @@ shoulder and a whole-look mix.
 cannot live in a 3D LUT at all and `apply()` ignores it completely. render.py
 wires it into ffmpeg filters.
 
+A GradeSpec is therefore the currency of ONE correction, for every pixel in the
+frame. It answers WHAT to do to a colour and has no place to answer WHICH
+PIXELS -- a lookup table indexed by colour has nowhere to put an address. That
+second question belongs to region.py, whose GradeStack wraps a base GradeSpec
+plus an ordered list of (Region, GradeSpec) layers. Nothing here knows about it,
+deliberately: a grade with no regions is a stack with no layers, and this file
+stays byte-identical for it.
+
 EVALUATION ORDER IS LOAD-BEARING. Reviewers and reimplementations must match:
 
     0. src         the input, captured for the look_mix lerp at step 9

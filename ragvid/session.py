@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from .errors import SessionCorrupt, SessionNotFound
 from .intent import Intent
+from .region import Layer
 from .spec import GradeSpec
 
 if TYPE_CHECKING:  # ponytail: import at runtime only in load(), so session.py
@@ -55,6 +56,14 @@ class Session:
     # describes, and pretending otherwise would put sentences on screen that
     # nothing compiled.
     intents: list[Intent | None] = field(default_factory=list)
+    # The regional half of each grade (roadmap B1), one list per spec and
+    # parallel to it exactly as `labels` and `intents` are. Kept BESIDE the spec
+    # rather than inside it because a GradeSpec is the currency of one
+    # correction and a region is a second question -- which pixels -- that a
+    # per-pixel colour map has no place to answer. Empty is the common case and
+    # means today's flat grade; `Project.stack` reassembles the two halves into
+    # the region.GradeStack a renderer wants.
+    layers: list[list[Layer]] = field(default_factory=list)
     # Neutralise the clip's measured cast and black point before the creative
     # look (roadmap A6). A property of the PROJECT, not of one grade: it is the
     # base every look in this session sits on, so it lives here rather than
@@ -71,10 +80,17 @@ class Session:
     def intent(self) -> Intent | None:
         return self.intents[-1] if self.intents else None
 
-    def push(self, spec: GradeSpec, label: str = "", intent: Intent | None = None) -> None:
+    @property
+    def region_layers(self) -> list[Layer]:
+        """The current grade's regional layers, [] when it is a flat grade."""
+        return self.layers[-1] if self.layers else []
+
+    def push(self, spec: GradeSpec, label: str = "", intent: Intent | None = None,
+             layers: list[Layer] | None = None) -> None:
         self.specs.append(spec)
         self.labels.append(label)
         self.intents.append(intent)
+        self.layers.append(list(layers or []))
 
     def pop(self) -> bool:
         """Step back one step. False only when there is nothing left.
@@ -91,6 +107,8 @@ class Session:
             self.labels.pop()
         if self.intents:
             self.intents.pop()
+        if self.layers:
+            self.layers.pop()
         return True
 
     # ---- persistence ------------------------------------------------------
@@ -116,6 +134,8 @@ class Session:
                     "specs": [json.loads(s.model_dump_json()) for s in self.specs],
                     "labels": self.labels,
                     "intents": [i.model_dump() if i else None for i in self.intents],
+                    "layers": [[json.loads(l.model_dump_json()) for l in ls]
+                               for ls in self.layers],
                     "auto_balance": self.auto_balance,
                 },
                 indent=2,
@@ -152,6 +172,11 @@ class Session:
             intents = list(raw.get("intents") or [])
             intents += [None] * (len(specs) - len(intents))
             intents = [Intent(**i) if i else None for i in intents[:len(specs)]]
+            # Same backfill again, for the same reason: every session written
+            # before regions has no `layers` key, and an empty list per spec is
+            # the honest answer -- that grade WAS flat.
+            layers = [[Layer(**l) for l in ls] for ls in (raw.get("layers") or [])]
+            layers += [[] for _ in range(len(specs) - len(layers))]
             # .get, not ["input_lut"]: sessions written before log support have
             # no such key and must still open. Same for input_format, which
             # arrived later still -- an older session with a vendor .cube set
@@ -160,6 +185,7 @@ class Session:
                        input_lut=raw.get("input_lut") or None,
                        input_format=raw.get("input_format") or None,
                        specs=specs, labels=labels[:len(specs)], intents=intents,
+                       layers=layers[:len(specs)],
                        # Missing key -> the default, same as every field added
                        # after the first sessions were written. An older session
                        # opens balanced, which is what a new one would do.
