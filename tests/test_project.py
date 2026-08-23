@@ -7,15 +7,18 @@ deliberately, so a plain `spec` read never drags numpy or ffmpeg in.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from ragvid.errors import InputError, SessionNotFound
 from ragvid.probe import ClipStats
 from ragvid.project import Project
 from ragvid.session import Session
-from ragvid.spec import RGB, GradeSpec
+from ragvid.intent import Intent, Op
+from ragvid.spec import LUMA, RGB, GradeSpec
 
 STATS = ClipStats(
     mean=RGB(r=0.2, g=0.3, b=0.4),
@@ -193,6 +196,103 @@ def test_refine_never_reprobes(project, monkeypatch):
     assert seen["instruction"] == "less contrast"
     assert seen["stats"] == STATS and seen["spec"].contrast == 0.4
     assert len(project.history) == 2
+
+
+# ---- refine: editing the verb list (roadmap B7) ----------------------------
+#
+# The defect these pin: refine used to hand the model 43 numbers and take 43
+# back, and 43 numbers can only describe the whole frame -- so a regional grade
+# lost its region on the next sentence. Judged by grading a real frame through
+# the stack and comparing the masked part with the rest, because a layer still
+# being in the session is not proof that any pixel of it moved.
+
+
+class FakeSchemaProvider:
+    """A provider that can constrain decoding, so Project.refine routes to the
+    verb list.
+
+    `plan` answers with a plausible flat warm spec instead of raising, on
+    purpose: that is exactly what the 43-number path returned before this
+    change, so the test below fails on the old code by MEASURING a flattened
+    frame rather than by noticing which method got called.
+    """
+
+    name = "fake"
+    schema_enforced = True
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.used: list[str] = []
+
+    def plan(self, system, user):
+        self.used.append("plan")
+        return GradeSpec(temperature=800.0, rationale="Warmer.")
+
+    def plan_json(self, system, user, schema):
+        self.used.append("plan_json")
+        return json.loads(self.reply.model_dump_json())
+
+
+DARK_TOP = [Op(op="exposure", dir="down", amount="strong", target="top")]
+
+
+def _top_vs_bottom(image) -> float:
+    """Luma of the masked strip minus luma of the untouched one."""
+    luma = image @ LUMA
+    return float(luma[:8].mean() - luma[-8:].mean())
+
+
+def test_a_regional_grade_survives_a_refine(project):
+    """"darken the top", then "make it warmer". The region has to still be there
+    afterwards, and the masked area still measurably darker than the rest."""
+    frame = np.full((64, 64, 3), 0.5)
+    project.set_intent(Intent(ops=list(DARK_TOP)), label="darken the top")
+    first = project.stack.apply(frame)
+    gap = _top_vs_bottom(first)
+    assert gap < -0.05, "the region did nothing to begin with; nothing to preserve"
+
+    p = FakeSchemaProvider(Intent(ops=DARK_TOP + [Op(op="warmth", dir="up")]))
+    project.refine("make it warmer", provider=p)
+    second = project.stack.apply(frame)
+
+    # PIXELS FIRST, and in this order deliberately: on the pre-change code the
+    # 43-number path answers with a flat spec and this measurement is what
+    # catches it (the masked strip and the rest of the frame come back equal),
+    # not the bookkeeping assertions below it.
+    # Measured: the masked strip sits -0.1922 luma below the untouched one
+    # before the refine and -0.1928 after; on the pre-change code it was 0.0000.
+    assert _top_vs_bottom(second) < -0.05
+    assert abs(_top_vs_bottom(second) - gap) < 0.02
+    # ... and the refine actually happened, everywhere.
+    warm = lambda im: float((im[..., 0] - im[..., 2]).mean())  # noqa: E731
+    assert warm(second) > warm(first) + 0.01
+
+    assert p.used == ["plan_json"]                       # the verbs, not the floats
+    assert [(o.op, o.target) for o in project.intent.ops] == [
+        ("exposure", "top"), ("warmth", "")]
+    assert len(project.layers) == 1
+
+
+def test_refine_falls_back_to_the_43_number_path_below_the_schema_rung(project):
+    """A capability test, exactly as in plan_vibe. An endpoint that cannot
+    constrain decoding still refines, and still flattens while doing it -- that
+    is the documented deal, not a regression."""
+    class Weak:
+        name = "fake"
+        schema_enforced = False
+
+        def plan(self, system, user):
+            return GradeSpec(temperature=800.0, rationale="Warmer.")
+
+        def plan_json(self, system, user, schema):
+            raise AssertionError("an endpoint without schema support must not be asked")
+
+    project.set_intent(Intent(ops=list(DARK_TOP)), label="darken the top")
+    project.refine("make it warmer", provider=Weak())
+
+    assert project.spec.temperature == 800.0
+    assert project.layers == []       # 43 numbers describe the whole frame
+    assert project.intent is None     # ... and no list of verbs describes them
 
 
 # ---- editing and history --------------------------------------------------

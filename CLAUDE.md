@@ -35,7 +35,7 @@ prompt → LLM → Intent (typed verbs, no numbers) → compiler → GradeStack 
 The model **never emits a number**. It picks from a closed vocabulary of 16
 verbs with a direction and a coarse amount (`subtle`/`moderate`/`strong`), and
 deterministic code in `compiler.py` decides magnitudes by consulting what was
-actually measured off the footage. `intent.py`'s schema is 779 bytes against
+actually measured off the footage. `intent.py`'s schema is 824 bytes against
 `GradeSpec`'s 2692.
 
 This is the load-bearing decision in the project. Measured against the older
@@ -66,12 +66,14 @@ worse than falling back.
 | `lut.py` | Bakes a spec to a `.cube`. 33³, escalating to 65³ when hue qualifiers are active. |
 | `logspace.py` | S-Log3 / V-Log / C-Log3 / LogC3 / N-Log transfer functions and generated conversion LUTs. |
 | `render.py` | The ffmpeg filter chain: technical LUT → grade → region layers → spatial effects. |
+| `segment.py` | The local segmentation model behind semantic masks. Optional extra; `onnxruntime` is imported lazily. |
+| `refine.py` | "Less blue" — edits the verb list on the intent path, the 43 numbers on the direct one. |
 | `sidecar.py` | `look.json` (lossless) and `.cdl` (universal) written beside every export. |
 | `vibe.py` | The system prompts and the planning entry points. |
 | `looks.py` | The retrieval corpus, used by the direct path only. |
 | `project.py` | Orchestrates probe → plan → bake → preview → export. |
 | `session.py` | Persistence, history, undo. |
-| `server.py` | The local HTTP server. `API_VERSION` currently **9**. |
+| `server.py` | The local HTTP server. `API_VERSION` currently **10**. |
 | `web/index.html` | The whole UI, one file. WebGL preview + the "what it did" list. |
 
 ## Invariants — break these and something silently corrupts
@@ -114,10 +116,12 @@ asserts its exact string. New filters compose *around* it.
 `EXPECTED_API` must agree, and a test asserts it. Bump both when the shape
 changes, so a stale page announces itself instead of silently dropping fields.
 
-**Pixels never leave the machine.** (The rule used to be "pixels never reach a
-model". If semantic masks land, the honest restatement is this one, with a
-*local* segmentation model — and it should be an explicit documented decision,
-not a side effect of shipping a feature.)
+**No pixels leave the machine.** Planners — the things that cost money and
+travel over a network — see statistics and words, never an image. Exactly one
+model sees pixels and it runs locally: the segmentation model in `segment.py`.
+The rule used to read "pixels never reach a model"; `docs/ARCHITECTURE.md`
+rule 2 records what it was, why it stopped fitting, and why the new wording is
+stricter in the direction that matters.
 
 ## Working rules
 
@@ -146,7 +150,7 @@ undo. "No exception raised" and "the tests pass" are not evidence.
 ```
 uv run ragvid serve              # the app, opens a browser
 uv run ragvid serve --no-browser --port 8765
-uv run pytest -q                 # 684 tests, ~2 min
+uv run pytest -q                 # 751 tests, ~2 min
 ```
 
 Keys are entered in the GUI only. There is no CLI path for a key and no
@@ -155,24 +159,25 @@ by construction.
 
 ## Where it stands
 
-Tier A is complete: the intent/compiler architecture, 16-bit measurement,
-10-bit output, built-in log transforms, auto-balance, CDL + `look.json`
-sidecars. Tier C is complete except what depends on regions: WebGL preview
-(within 1 code value of ffmpeg over all 16.7M 8-bit colours), playback,
-clipping toggle, the "what it did" list, per-item strength. The 43-slider
-panel is gone — `index.html` got *smaller*.
+Tier A is complete. Tier C is complete. Tier B is complete except B3 curves,
+B4 a real HSL qualifier, B5 keyframes and B6 protect/exclude verbs.
 
-B1 (geometric regions) landed. **B2 — semantic masks** ("keep her skin
-natural", "make the sky moody") is the next real step and the one Resolve
-users pay for. The per-region plumbing is built and tested, so B2 now needs
-only a mask *source*: a local segmentation model, plus the rule restatement
-above.
+A sentence can name **what** to do (16 verbs), **how much** (three amounts plus
+a whole-look strength), and **which pixels** — by colour (ten hue families,
+including skin), by place (top/bottom/left/right/center/edges) or by thing
+(sky/foliage/person/water/buildings, via the local segmentation model). Refine
+edits that list rather than the numbers, so a second sentence no longer
+destroys the first one's regions.
 
-Also open: B3 curves, B7 relative edits (so "a stop brighter" works on
-refine — `refine.py` deliberately stays on the direct path, because an
-`Intent` describes departures from the source and `compile_intent` starts from
-identity, so routing refinement through it would discard the grade the user
-already accepted).
+Semantic masks are sampled **once**, not per frame: inference is 244 ms, so a
+10-minute clip would cost 58 minutes of segmentation against a 14-minute
+export. The honest consequence — a subject leaving frame keeps its grade — is
+documented in `segment.py`.
+
+Next: **B3 curves** ("crush the blacks but keep the highlights soft") is the
+largest remaining gap in what a sentence can express. **A7** is measured and
+unused — `ClipStats.cuts` knows a clip spans a cut and nothing says so, while
+one look across a cut is the wrong answer.
 
 ## Things that bit us, so they don't again
 

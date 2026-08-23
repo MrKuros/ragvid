@@ -366,6 +366,16 @@ the sentence actually points at one; a look that is about the whole picture take
   - places work on every TONE and COLOUR verb. The TEXTURE verbs cannot take one, because
     they are applied to the whole frame after the colour: leave their target "".
 
+THINGS: sky, foliage, person, water, buildings. A thing means the move applies only to
+the pixels that are part of it, wherever in the frame they sit — "make the sky moody",
+"drop the buildings back", "warm the water up". Name one ONLY when the sentence names
+it; a thing this clip does not contain grades nothing at all.
+  - things work on every TONE and COLOUR verb, exactly as places do, and the TEXTURE
+    verbs cannot take one for the same reason.
+  - skin is in the COLOURS list above and not here, on purpose: it is a hue family, so it
+    follows a face through movement and through a cut, which an outline drawn per frame
+    does not.
+
 STRENGTH is how much of the whole look survives against the untouched footage: "full",
 "strong", "moderate" or "subtle". Use "full" unless the user asked for the look itself to
 be held back — "half strength", "dial it back", "a subtle version", "just a hint of it".
@@ -391,6 +401,63 @@ HOW TO CHOOSE:
   is measured from the clip, not guessed by you.
 
 Return only the JSON object."""
+
+# REFINEMENT IS THE SAME JOB WITH A DIFFERENT SUBJECT, so this is INTENT_SYSTEM
+# plus a tail rather than a second prompt. Two consequences, both wanted: the
+# verb vocabulary is defined once, so intent.py growing a target word is a
+# prompt edit here and nothing else (the guard test in tests/test_providers.py
+# iterates OPS/AMOUNTS/STRENGTHS/TARGETS over BOTH strings), and the tail
+# inherits the no-digit rule for free -- a magnitude quoted here would be a
+# number for the model to copy, which is the one thing this path exists to stop.
+#
+# NO CLIP STATISTICS HERE EITHER, for the reason above plan_intent: the numbers
+# come from compiler.py re-reading the clip, and the model is choosing between
+# "subtle" and "moderate", which no measurement helps it do.
+#
+# The last paragraph is the one that costs something to leave out. The verb list
+# cannot say "crop it" or "sharpen just her face", and a model asked to return a
+# list will always return a list -- so the honest answer to an unsayable request
+# has to be spelled out, or it comes back as an invented op the user never asked
+# for and cannot attribute.
+REFINE_INTENT_SYSTEM = INTENT_SYSTEM + """
+
+YOU ARE NOW EDITING A LIST OF MOVES THAT ALREADY EXISTS, NOT WRITING A NEW ONE.
+You are given the moves already applied to this clip -- the same JSON shape you return
+-- and one short adjustment request. Return the WHOLE edited list, not a diff.
+
+THE COPY RULE, WHICH MATTERS MORE THAN EVERY OTHER RULE HERE. Every op the request does
+not talk about comes back exactly as it was handed to you: same op, same dir, same
+amount, same target. Copy it, do not re-judge it. It is in the list because the user
+asked for it on an earlier turn and kept it, and dropping one because it looks unrelated
+to the new sentence is the failure mode of this task. The target is part of the copy: an
+op aimed at a part of the frame, or at one colour, still names that part or that colour
+after a request about something else entirely. When in doubt, copy.
+
+HOW TO MAKE THE EDIT THE REQUEST ASKS FOR:
+- MORE OR LESS OF A MOVE THAT IS ALREADY THERE -- keep that op, and move its amount
+  along the ladder subtle - moderate - strong. "a bit less warm" on a moderate warmth op
+  pointing up leaves it pointing up and makes it subtle. That ladder has those rungs and
+  no others, so an op already at strong that is asked for even more stays at strong.
+- THE OPPOSITE OF A MOVE THAT IS ALREADY THERE -- flip its dir, and put its amount back
+  to moderate unless the sentence says how far to go.
+- SOMETHING THE LIST DOES NOT MENTION AT ALL -- add one new op for it, chosen exactly as
+  you would have chosen it in a fresh grade.
+- A MOVE TO STOP ENTIRELY -- "take the grain out", "lose the vignette", "forget the
+  warmth", "leave the top alone" -- delete that op from the list. Deleting is NOT the
+  same as making it subtle: a subtle op still changes the picture, and somebody asking
+  for a move to go away wants it gone. Shrink the amount when the sentence asks for
+  less of something; delete the op when it asks for none of it.
+- THE WHOLE LOOK HELD BACK, OR LET OUT AGAIN -- "half strength", "dial it back", "a
+  subtle version of that", "go all in" -- change `strength` and leave every op alone.
+  strength is a ladder too, from full down through strong and moderate to subtle, and it
+  is read against the list you were given: dialling back a look that is already held
+  back lands one rung further down, not back at the top.
+
+IF THE REQUEST CANNOT BE SAID IN THIS VOCABULARY AT ALL -- a crop, a speed change, text
+on screen, one object in the frame, a different clip -- return the list you were given,
+complete and unchanged. A move invented to look responsive is worse than no move at all:
+the picture changes for a reason nobody asked for, and the user cannot tell which of
+their earlier moves did it."""
 
 
 def plan_intent(vibe: str, stats: "ClipStats", provider=None,

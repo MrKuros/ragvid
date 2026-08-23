@@ -18,10 +18,11 @@ from ragvid.probe import ClipStats
 from ragvid.providers.base import CATALOG, DEFAULTS, describe, get_provider, load_env
 from ragvid.providers.groq import FALLBACK_MODEL, GroqProvider, parse_reset
 from ragvid.providers.openai_compat import parse_json_reply
-from ragvid.refine import refine_spec
+from ragvid.refine import refine_intent, refine_spec
 from ragvid.spec import RGB, GradeSpec
 from ragvid.vibe import (
     INTENT_SYSTEM,
+    REFINE_INTENT_SYSTEM,
     SYSTEM,
     ask_intent,
     format_stats,
@@ -254,21 +255,29 @@ def _intent_reply(intent: Intent) -> str:
     return intent.model_dump_json()
 
 
-def test_the_intent_prompt_explains_every_word_the_model_can_emit():
+# Both prompts, always: the refine one is INTENT_SYSTEM plus a tail, so a word
+# added to intent.py has to reach the model down either path or the vocabulary
+# silently means two different things depending on which turn you are on.
+INTENT_PROMPTS = [("plan", INTENT_SYSTEM), ("refine", REFINE_INTENT_SYSTEM)]
+
+
+@pytest.mark.parametrize("which, prompt", INTENT_PROMPTS, ids=["plan", "refine"])
+def test_the_intent_prompt_explains_every_word_the_model_can_emit(which, prompt):
     """The sibling of the GradeSpec.model_fields guard above, and the same bug:
     a verb the prompt never mentions is a verb the model never emits, which
     makes the compiler pass behind it dead code that nobody notices is dead."""
     for word in OPS + AMOUNTS + STRENGTHS:
-        assert word in INTENT_SYSTEM, f"intent prompt never mentions {word}"
+        assert word in prompt, f"{which} prompt never mentions {word}"
     for target in TARGETS:
-        assert not target or target in INTENT_SYSTEM, f"intent prompt never mentions {target}"
+        assert not target or target in prompt, f"{which} prompt never mentions {target}"
 
 
-def test_the_intent_prompt_contains_no_digit_anywhere():
+@pytest.mark.parametrize("which, prompt", INTENT_PROMPTS, ids=["plan", "refine"])
+def test_the_intent_prompt_contains_no_digit_anywhere(which, prompt):
     """The one claim this path lives or dies on. A range, a Kelvin figure or a
     default quoted in the prompt is a magnitude for the model to copy, and the
     numbers are supposed to come from compiler.py reading the clip."""
-    assert not re.search(r"\d", INTENT_SYSTEM)
+    assert not re.search(r"\d", prompt), which
 
 
 def test_ask_intent_sends_the_strict_schema_and_only_the_sentence():
@@ -363,6 +372,41 @@ def test_the_direct_path_is_still_reachable_by_name():
     """It is refine.py's foundation and the fallback; a swap that quietly
     orphaned it would be a deletion wearing a routing change as a disguise."""
     assert plan_direct("gloomy", STATS, provider=FakeProvider()) == CANNED
+
+
+# ---- refine_intent: editing the verb list (roadmap B7) ---------------------
+
+
+def test_refine_intent_sends_the_current_verbs_and_nothing_else():
+    """The whole point of the path: the model is shown a short list of words it
+    can edit, not 43 floats it has to transcribe."""
+    current = Intent(ops=[Op(op="exposure", dir="down", target="top"),
+                          Op(op="warmth", dir="up")], strength="full")
+    reply = Intent(ops=[Op(op="exposure", dir="down", target="top"),
+                        Op(op="warmth", dir="up", amount="subtle")], strength="full")
+    p = FakeIntentProvider([_intent_reply(reply)])
+
+    assert refine_intent(current, "a bit less warm", STATS, provider=p) == reply
+
+    sent = p.calls[0]
+    assert sent["system"] == REFINE_INTENT_SYSTEM
+    assert sent["schema"] == Intent.llm_json_schema()
+    assert json.loads(_json_block(sent["user"])) == current.model_dump()
+    assert "a bit less warm" in sent["user"]
+    # Same deliberate omission as plan_intent: the measurement is compiler.py's
+    # input, not the model's. It cannot help choose between two adverbs.
+    everything = sent["system"] + sent["user"]
+    assert "0.2137" not in everything and "0.1735" not in everything
+
+
+def test_a_refine_reply_that_is_not_an_intent_fails_like_the_planning_call():
+    """A half-answer here is worse than elsewhere: every field of Intent has a
+    default, so a dropped `ops` would compile to identity and read as "the model
+    threw your accepted grade away", which is the defect this path fixes."""
+    p = FakeIntentProvider(['{"ops": [{"op": "crop", "dir": "up", '
+                            '"amount": "moderate", "target": ""}], "strength": "full"}'])
+    with pytest.raises(ProviderError, match="not an intent"):
+        refine_intent(Intent(ops=[Op(op="warmth", dir="up")]), "crop it", STATS, provider=p)
 
 
 # ---- sanitizing insane model output ---------------------------------------

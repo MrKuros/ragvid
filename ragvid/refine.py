@@ -1,20 +1,57 @@
-"""Conversational refinement: adjust an existing GradeSpec by a plain-English request.
+"""Conversational refinement: adjust a grade that already exists, in words.
 
-DELIBERATELY STILL ON THE DIRECT PATH, even though vibe.plan_vibe now defaults
-to intent -> compiler. An Intent describes departures from the SOURCE and
-compile_intent always starts from identity, so routing a refinement through it
-would silently discard the grade the user already accepted -- the exact failure
-THE COPY RULE below exists to prevent. Refining against an existing spec needs a
-verb vocabulary for "relative to what is already there" (roadmap B7), not a
-different transport.
+TWO FUNCTIONS, AND WHAT DIFFERS IS THE SUBJECT, NOT THE TRANSPORT (roadmap B7).
+
+`refine_intent` edits the VERB LIST. The model is handed the ops the user already
+accepted -- "darkened the top, warmed it up" -- and returns an edited list, which
+compiler.py re-compiles against the clip. Editing five words is dramatically more
+tractable than editing forty-three floats, and it is the only version that can
+keep a region: the region lives on the op's `target`, so copying the op copies
+where it applies. It is also the only version that can be RELATIVE, because the
+list is the memory of what the full-strength grade actually was -- the bake-off's
+"warm it up, but at half strength" came back byte-identical to its own "warmer"
+on the direct path for exactly that reason (vibe.py's docstring has the numbers).
+
+`refine_spec` is the fallback, for an endpoint that cannot constrain decoding to
+the Intent schema and for a grade that has no Intent behind it at all (a photo
+match, a hand-edited spec). It hands the model all 43 numbers and takes 43 back,
+so it FLATTENS: 43 numbers can only describe the whole frame, and any regional
+layer is dropped. That is the defect the intent path exists to fix, and it stays
+here because on those endpoints the alternative is no refinement at all.
+
+MEASURED, not argued (one two-turn run of scripts/bakeoff_intent.py --refine,
+gpt-oss-120b, six sentences on test_files/test.mp4, every second-turn grade
+applied to real frames and re-measured): the verb list took 15/16 checks and 5/6
+sentences clean at 4116 tokens a sentence; the 43-number path took 13/16 and 4/6
+at 8332. The two it alone got right are the two a fresh set of 43 numbers cannot
+express, both of them relative:
+
+  * "a bit less warm" moved the direct path's measured warmth by -0.0040 -- it
+    landed 89% of the way back at its own full-strength grade, i.e. it barely
+    moved -- against -0.0112 and 40% for the verb list.
+  * "a stop brighter" after "moody but keep it natural" cost the direct path
+    0.077 of measured chroma while overshooting luma by +0.379, where the verb
+    list flipped one op's direction and moved luma +0.097 with chroma flat.
+
+And the region: "darken the top" then "make it warmer" kept its layer here (top
+minus bottom luma -0.1236 against the source at turn one, -0.1230 after the
+refine, one layer). The direct path had no layer to keep.
+
+The older note said an Intent could not carry a refinement because it describes
+departures from the SOURCE and compile_intent starts from identity. That is still
+true and is not an obstacle: the current Intent IS the departure from the source,
+so re-compiling an edited copy of it reproduces every move the user accepted
+rather than discarding them.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ragvid.errors import ProviderError
+from ragvid.intent import Intent
 from ragvid.spec import GradeSpec
-from ragvid.vibe import SYSTEM, format_stats
+from ragvid.vibe import REFINE_INTENT_SYSTEM, SYSTEM, format_stats
 
 if TYPE_CHECKING:
     from ragvid.probe import ClipStats
@@ -75,3 +112,55 @@ def refine_spec(
         "Return the full modified spec."
     )
     return provider.plan(SYSTEM + REFINE_RULES, user).sanitize()
+
+
+def refine_intent(
+    current: Intent, instruction: str, stats: "ClipStats", provider=None
+) -> Intent:
+    """Return `current` with `instruction` applied to its VERBS, not its numbers.
+
+    The Intent comes back, not a spec: the caller re-compiles it (project.refine
+    goes through set_intent), which is what re-derives every number from this
+    clip and rebuilds the regional layers. A move nobody touched therefore lands
+    on exactly the value it had, because compile_intent is pure.
+
+    `stats` IS NOT SHOWN TO THE MODEL, deliberately, for the reason spelled out
+    above plan_intent: the measurement is what compiler.py consults, and a model
+    choosing between "subtle" and "moderate" is not helped by knowing the median
+    luma. It stays in the signature because it makes this interchangeable with
+    refine_spec at the one call site that picks between them.
+
+    WHAT THIS CANNOT DO, and it is a real limit rather than a gap to fill later:
+    a request outside the vocabulary ("crop it", "sharpen just her face") has no
+    op to become, so the prompt tells the model to return the list unchanged.
+    The user then sees a frame that did not move, which is the honest answer --
+    an invented op would change the picture for a reason nobody asked for. The
+    fallback for a genuinely unsayable request is another verb, not another
+    transport.
+
+    DELETING AN OP IS NOT THE SAME AS SHRINKING IT, and the prompt says so
+    explicitly: "subtle" still moves the picture. "less grain" wants a smaller
+    grain op, "take the grain out" wants no grain op at all, and only the second
+    one can return the clip to where it started on that axis.
+    """
+    if provider is None:
+        from ragvid.providers import get_provider
+
+        provider = get_provider()
+
+    user = (
+        "The moves already applied to this clip, which the user has accepted:\n"
+        f"{current.model_dump_json(indent=2)}\n\n"
+        f'The user\'s adjustment request: "{instruction}"\n\n'
+        "Return the whole edited list."
+    )
+    # Same call-and-judge as vibe.ask_intent, and duplicated on purpose: eight
+    # lines of local code beat importing a private helper across modules, and a
+    # half-answer has to raise here for the same reason it does there -- every
+    # field of Intent has a default, so it would otherwise compile to a grade
+    # that quietly does less than the user already had.
+    raw = provider.plan_json(REFINE_INTENT_SYSTEM, user, Intent.llm_json_schema())
+    try:
+        return Intent(**raw)
+    except Exception as exc:  # pydantic ValidationError: a verb outside the vocabulary
+        raise ProviderError(provider.name, f"returned JSON that is not an intent: {exc}") from exc

@@ -84,12 +84,12 @@ Each is a compiler pass plus a verb or two. **None adds a control to the screen.
 | # | Item | Status | The sentence it unlocks |
 |---|---|---|---|
 | B1 | Regions — a grade that applies to part of the frame | **[have]** | "darken the top of the frame", "warm the left side", "brighten the middle" — geometric only; `GradeStack` now wraps `GradeSpec`, and `docs/ARCHITECTURE.md` rule 1 was revised in the same commit. |
-| B2 | Semantic masks (sky / skin / faces / foliage) | **[none]** | "keep her skin natural", "make the sky moody" — highest-value item here |
+| B2 | Semantic masks (sky / foliage / person / water / buildings) | **[have]** | "make the sky moody". Local SegFormer-B0/ADE20K, 15.1 MB, behind `pip install ragvid[masks]`. `skin` stays a hue qualifier — ADE20K has no skin class, and a qualifier tracks a face through a cut where a per-frame matte does not. `compiler.py` and `render.py` needed zero changes, which is the proof it is a mask source and not an architecture. |
 | B3 | Curves (master, per-channel, hue-vs-hue, hue-vs-sat, lum-vs-sat) | **[none]** | "crush the blacks but keep the highlights soft" |
 | B4 | Real HSL qualifier (arbitrary volume, matte finesse, despill) | **[partial]** | "kill the sodium streetlights" — six fixed bands cannot isolate one colour |
 | B5 | Keyframes / change over time | **[none]** | "get darker as he walks into the tunnel" |
 | B6 | Protect / exclude verbs | **[none]** | "…but don't touch skin" — needs B2; the most-repeated real note in grading |
-| B7 | Relative edits against the measured clip | **[partial]** | "a stop brighter", "twice as warm as that" |
+| B7 | Relative edits against the measured clip | **[have]** | "a stop brighter", "a bit less warm" — refine edits the verb list, not the 43 numbers, so regions survive it. |
 
 **B1 + B2 is the moat.** It is what Resolve users pay for (Magic Mask), and the
 one case where a sentence is genuinely a *better* interface than a tracker and a
@@ -112,7 +112,7 @@ The only things allowed to touch the UI, one small element each.
 
 | # | Item | Status | UI cost |
 |---|---|---|---|
-| C1 | WebGL preview instead of ffmpeg-per-still | **[have]** | none visually | Tetrahedral, matching `vf_lut3d.c`. Worst case 1 code value against ffmpeg over all 16.7M 8-bit colours. Declines the job (falls back) on spatial effects or regions rather than showing a look the export will not produce. |
+| C1 | WebGL preview instead of ffmpeg-per-still | **[have]** | none visually | Tetrahedral, matching `vf_lut3d.c`. Worst case 1 code value against ffmpeg over all 16.7M 8-bit colours; 6 with two geometric regions composited, of which the masks contribute exactly 0. Declines the job on spatial effects and on any non-analytic region shape. |
 | C2 | Real-time playback | **[have]** | a play button, on the row the scrubber already occupied |
 | C3 | "What it did", as sentences | **[have]** | one list — replaced `#said` |
 | C4 | Per-item strength sliders | **[have]** | 43-slider panel deleted; `index.html` net −47 lines |

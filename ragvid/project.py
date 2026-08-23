@@ -367,14 +367,41 @@ class Project:
     def refine(self, instruction: str, provider=None) -> GradeSpec:
         """Adjust the current grade in words. Uses cached stats, never re-probes.
 
-        Flattens: refine hands the model 43 numbers and takes 43 back, so the
-        result describes the whole frame and any regional layers are dropped,
-        exactly as in set_spec. Adjusting a regional grade without losing its
-        regions means editing the verbs -- set_intent, which is the path the
-        per-item strength controls already take.
-        """
-        from .refine import refine_spec
+        TWO PATHS, picked the way plan_vibe picks: a capability test, not a
+        preference. With an Intent behind the current grade AND an endpoint that
+        can constrain decoding, the model edits the VERB LIST (refine_intent) and
+        set_intent re-compiles it. Regions survive that for free -- a region is
+        the op's `target`, so copying the op copies where it applies -- and so
+        does everything else the user accepted, because the edited list still
+        names it. "A stop brighter" and "half strength" are edits to an op's
+        amount and to intent.strength, which is roadmap B7.
 
+        Otherwise it falls back to refine_spec, which hands the model 43 numbers
+        and takes 43 back. That FLATTENS: 43 numbers can only describe the whole
+        frame, so regional layers are dropped exactly as in set_spec. It is what
+        a photo match, a hand-edited spec and a non-schema endpoint get, and on
+        those the alternative is no refinement at all.
+
+        The provider is resolved here rather than inside refine_*, because the
+        routing question is `schema_enforced` and only an instance answers it.
+        Resolved ONLY when there is an Intent to route: with none, the answer is
+        refine_spec whatever the endpoint can do, and constructing a provider to
+        learn that would make the no-Intent path fail on a missing key it never
+        needed.
+        """
+        from .refine import refine_intent, refine_spec
+
+        intent = self.intent
+        if intent is not None:
+            if provider is None:
+                from .providers import get_provider
+
+                provider = get_provider()
+            if getattr(provider, "schema_enforced", False):
+                return self.set_intent(
+                    refine_intent(intent, instruction, self.stats, provider=provider),
+                    label=instruction,
+                )
         return self._push(refine_spec(self.spec, instruction, self.stats, provider=provider),
                           label=instruction)
 
@@ -509,14 +536,32 @@ class Project:
 
         out_dir = Path(dir) if dir else self.state_dir
         out_dir.mkdir(parents=True, exist_ok=True)
+        # A semantic region's mask comes from the picture, so one frame is
+        # decoded for the whole stack -- once, because inference is 244 ms.
+        frame = self._mask_frame() if self.stack.needs_frame else None
         made = []
         for i, layer in enumerate(self.layers):
             cube = out_dir / f"layer{i}.cube"
             bake_cube(layer.spec, str(cube))
             mask = layer.region.write_png(out_dir / f"layer{i}.png",
-                                          self.stats.width, self.stats.height)
+                                          self.stats.width, self.stats.height,
+                                          frame)
             made.append((str(cube), mask))
         return made
+
+    def _mask_frame(self):
+        """One UNGRADED frame from the middle of the clip, for semantic masks.
+
+        Ungraded because segmentation reads the picture the camera captured --
+        GradeStack.apply passes the source frame for the same reason. Its own
+        path, not `frame_source.png`, so a compare render is not clobbered.
+        """
+        import numpy as np
+        from PIL import Image
+
+        png = self.frame(at=self.duration / 2.0, graded=False,
+                         path=self.state_dir / "mask_frame.png")
+        return np.asarray(Image.open(png).convert("RGB"))
 
     def preview(self, n_frames: int = 3, path: str | Path | None = None,
                 graded: bool = True) -> Path:

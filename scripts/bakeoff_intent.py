@@ -43,17 +43,20 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from ragvid.compiler import compile_intent  # noqa: E402
+from ragvid.compiler import compile_intent, compile_stack  # noqa: E402
 from ragvid.intent import describe  # noqa: E402
 from ragvid.probe import _ANALYSIS_WIDTH, _ffprobe, _grab, _stats_from_frames, _unit  # noqa: E402
 from ragvid.providers import get_provider  # noqa: E402
+from ragvid.refine import refine_intent, refine_spec  # noqa: E402
+from ragvid.region import GradeStack  # noqa: E402
 from ragvid.spec import LUMA, GradeSpec  # noqa: E402
-from ragvid.vibe import ask_intent, plan_vibe  # noqa: E402
+from ragvid.vibe import ask_intent, plan_direct  # noqa: E402
 
 SRC = REPO / "test_files" / "test.mp4"
 FRAMES = 6           # enough moments to average over; each is a full decode
 SLEEP = 25.0         # seconds between calls. See the docstring: 8000 TPM.
 CALL_BUDGET = 25     # hard stop, counting failures. Two other agents share the key.
+REFINE_BUDGET = 26   # --refine needs 20 (see REFINEMENTS); the slack is for a retry.
 
 # A moment "moved" if it moved by more than this, in display units (0-1). 0.010
 # is ~2.5 8-bit code values: comfortably visible, and far above the arithmetic
@@ -111,6 +114,48 @@ PROMPTS: list[tuple[str, dict]] = [
 ]
 
 
+# ---- turn two: refining a grade the user already accepted (roadmap B7) -----
+#
+# THE SECOND TURN IS THE WHOLE POINT HERE, and it is judged the same way the
+# first one is: apply the resulting grade to real frames and re-measure. What
+# differs is the baseline. A refinement is relative, so every check below is
+# against TURN ONE's measured moments, not against the source -- "a bit less
+# warm" is a claim about the grade the user is already looking at.
+#
+# The two paths differ in SUBJECT, not transport. Direct hands the model 43
+# numbers and takes 43 back (refine_spec); intent hands it the verb list and
+# takes an edited list back (refine_intent), which the compiler re-reads the
+# clip for. Both then produce a GradeStack, and the stack is what gets applied.
+#
+# (prompt, instruction, checks). `want`/`keep` are judged turn one -> turn two.
+# `between` demands the moment land strictly between the source and turn one --
+# the check a reset and an overshoot both fail, and neither can fake. `region`
+# demands the masked part of the frame still measurably differ from the rest,
+# which is the defect: 43 numbers can only describe the whole frame.
+#
+# Turn one is CACHED per (path, prompt), so the three refinements of "warmer"
+# cost one grading call each path rather than three. Same first turn, three
+# different second sentences, which is also the fairest comparison available.
+REFINEMENTS: list[tuple[str, str, dict]] = [
+    ("darken the top", "make it warmer",
+     dict(want={"warm": "up"}, keep=(), region=True)),
+    ("warmer", "a bit less warm",
+     dict(want={"warm": "down"}, keep=("luma",), between="warm")),
+    ("warmer", "keep that, but at half strength",
+     dict(want={"warm": "down"}, keep=("luma",), between="warm")),
+    # Nothing about warmth in the second sentence, so the warmth from turn one
+    # has to be exactly where it was. Grain itself is spatial and unmeasurable
+    # here (see the module docstring), which is why it is the perfect probe for
+    # whether an unrelated refine damages what it was not asked about.
+    ("warmer", "add some grain",
+     dict(want={}, keep=("warm", "luma", "sat"))),
+    ("moody but keep it natural", "a stop brighter",
+     dict(want={"luma": "up"}, keep=("sat",))),
+    ("crushed blacks", "actually, lift the blacks back up",
+     dict(want={"black": "up"}, keep=("white",))),
+]
+
+
 # ---- measurement -----------------------------------------------------------
 
 
@@ -140,6 +185,35 @@ def graded(spec: GradeSpec, pixels: np.ndarray) -> dict[str, float]:
     """`spec` applied to the source pixels, re-measured. Effects are not applied
     (they are spatial; see the module docstring)."""
     return moments(np.clip(spec.apply(pixels), 0.0, 1.0))
+
+
+def _grade_frames(stack: GradeStack, images: list[np.ndarray]) -> list[np.ndarray]:
+    """Every frame through the whole stack — base AND regional layers.
+
+    GradeSpec.apply would be enough for a flat grade and is what the single-turn
+    run uses, but a region cannot be applied to a bag of pixels: the mask is a
+    function of WHERE the pixel sits. So the second turn measures images.
+    """
+    return [np.clip(stack.apply(im), 0.0, 1.0) for im in images]
+
+
+def _moments_of(out: list[np.ndarray]) -> dict[str, float]:
+    return moments(np.concatenate([f.reshape(-1, 3) for f in out]))
+
+
+def _region_gap(out: list[np.ndarray]) -> float:
+    """Mean luma of the top eighth of the frame minus the bottom eighth.
+
+    The one measurement that can tell a regional grade from a flat one. A flat
+    grade moves both strips together and leaves this at whatever the source's
+    own composition made it; "darken the top" pushes it down.
+    """
+    gaps = []
+    for f in out:
+        luma = f @ LUMA
+        h = max(1, luma.shape[0] // 8)
+        gaps.append(float(luma[:h].mean() - luma[-h:].mean()))
+    return float(np.mean(gaps))
 
 
 def judge(before: dict, after: dict, want: dict, keep: tuple) -> list[tuple[str, bool, float]]:
@@ -211,7 +285,8 @@ def _dry_provider():
     intent = Intent(ops=[Op(op="warmth", dir="up")]).model_dump_json()
 
     def create(model, messages, **kwargs):
-        body = intent if messages[0]["content"] == INTENT_SYSTEM else warm
+        # startswith, not ==: REFINE_INTENT_SYSTEM is INTENT_SYSTEM plus a tail.
+        body = intent if messages[0]["content"].startswith(INTENT_SYSTEM) else warm
         usage = type("U", (), {"prompt_tokens": len(messages[0]["content"]) // 4,
                                "completion_tokens": len(body) // 4})()
         message = type("M", (), {"content": body})()
@@ -224,12 +299,131 @@ def _dry_provider():
     return OpenAICompatProvider("dry", "", "dry", env_var=None, client=client)
 
 
+def _pause(sleep: float, first: bool) -> bool:
+    if not first:
+        time.sleep(sleep)
+    return False
+
+
+def _turn_one(path: str, prompt: str, stats, provider, images: list[np.ndarray]) -> dict:
+    """Grade the clip, both paths, and measure the result through the stack."""
+    if path == "direct":
+        spec = plan_direct(prompt, stats, provider=provider)
+        stack, intent, said = GradeStack(base=spec), None, spec.rationale
+    else:
+        intent = ask_intent(prompt, provider=provider)
+        stack = compile_stack(intent, stats)
+        said = "; ".join(describe(intent)) or "(nothing)"
+    out = _grade_frames(stack, images)
+    return {"stack": stack, "intent": intent, "said": said,
+            "moments": _moments_of(out), "gap": _region_gap(out)}
+
+
+def _turn_two(path: str, instruction: str, one: dict, stats, provider) -> tuple[GradeStack, str]:
+    """The refinement. Direct edits 43 numbers, intent edits the verb list."""
+    if path == "direct":
+        spec = refine_spec(one["stack"].base, instruction, stats, provider=provider)
+        # No layers, and that is the finding rather than an omission: refine_spec
+        # returns one GradeSpec, which can only describe the whole frame.
+        return GradeStack(base=spec), spec.rationale
+    intent = refine_intent(one["intent"], instruction, stats, provider=provider)
+    return compile_stack(intent, stats), "; ".join(describe(intent)) or "(nothing)"
+
+
+def _between(name: str, src: dict, m1: dict, m2: dict) -> tuple[str, bool, float]:
+    """The refined moment must land strictly BETWEEN the source and turn one.
+
+    Both failure modes fail this and nothing else catches both: a reset lands
+    back at the source, an overshoot lands past the grade it was refining, and a
+    model that ignored the instruction lands exactly on turn one.
+    """
+    a, b, v = src[name], m1[name], m2[name]
+    lo, hi = min(a, b), max(a, b)
+    frac = (v - a) / (b - a) if abs(b - a) > _EPS else 0.0
+    return (f"{name} between source and turn one ({frac:.0%} of the way)",
+            lo + MOVE / 2 < v < hi - MOVE / 2, v - b)
+
+
+def refine_bakeoff(stats, images, before, provider, meter, sleep: float) -> list[dict]:
+    """Two turns per sentence, per path. See REFINEMENTS for what is checked."""
+    src_gap = _region_gap(images)
+    rows: list[dict] = []
+    cache: dict[tuple[str, str], dict] = {}
+    first = True
+
+    for prompt, instruction, expect in REFINEMENTS:
+        result = {"prompt": f"{prompt!r} then {instruction!r}"}
+        for path in ("direct", "intent"):
+            try:
+                key = (path, prompt)
+                if key not in cache:
+                    first = _pause(sleep, first)
+                    meter.spend(path)
+                    cache[key] = _turn_one(path, prompt, stats, provider, images)
+                one = cache[key]
+                first = _pause(sleep, first)
+                meter.spend(path)
+                stack, said = _turn_two(path, instruction, one, stats, provider)
+            except Exception as exc:  # a 429, a refusal, a malformed reply
+                result[path] = {"error": f"{type(exc).__name__}: {exc}"}
+                print(f"  {path:7s} FAILED: {type(exc).__name__}: {exc}")
+                continue
+            out = _grade_frames(stack, images)
+            after = _moments_of(out)
+            checks = judge(one["moments"], after, expect["want"], expect["keep"])
+            if "between" in expect:
+                checks.append(_between(expect["between"], before, one["moments"], after))
+            if expect.get("region"):
+                # THE RAW GAP UNDER-DISCRIMINATES, and the first live run showed
+                # exactly how: this clip's top is its sky, so ANY global
+                # darkening narrows the top-vs-bottom luma gap. The direct path
+                # answered "darken the top" by darkening everything and scored
+                # -0.0414 on this check with no region at all, against the verb
+                # list's -0.1236 with one. So both are reported: the gap, and
+                # then the part of it the LAYERS produced, which is the gap
+                # minus the same grade applied flat. That second number is 0.0000
+                # for a grade of 43 numbers however good it is, which is the
+                # defect rather than an unfair check.
+                checks.append(("region graded at turn one", one["gap"] - src_gap < -MOVE,
+                               one["gap"] - src_gap))
+                flat = _region_gap(_grade_frames(GradeStack(base=stack.base), images))
+                checks.append(("region SURVIVES the refine", _region_gap(out) - src_gap < -MOVE,
+                               _region_gap(out) - src_gap))
+                checks.append(("... and the layers are what did it",
+                               _region_gap(out) - flat < -MOVE, _region_gap(out) - flat))
+            result[path] = {
+                "turn1": one["said"], "summary": said, "checks": checks,
+                "moments": after, "layers": len(stack.layers),
+                "deltas": {k: after[k] - one["moments"][k] for k in after},
+            }
+        rows.append(result)
+        _report_refine(result)
+    return rows
+
+
+def _report_refine(result: dict) -> None:
+    print(f"\n{result['prompt']}")
+    for path in ("direct", "intent"):
+        r = result[path]
+        if "error" in r:
+            print(f"  {path:7s} ERROR {r['error']}")
+            continue
+        marks = "  ".join(f"{'PASS' if ok else 'FAIL'} {name} ({d:+.4f})"
+                          for name, ok, d in r["checks"])
+        print(f"  {path:7s} {marks}")
+        print(f"          turn one: {r['turn1'][:88]}")
+        print(f"          turn two: {r['summary'][:88]}   [{r['layers']} layer(s)]")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--sleep", type=float, default=SLEEP)
     ap.add_argument("--prompts", type=int, default=len(PROMPTS))
     ap.add_argument("--clip", default=str(SRC))
     ap.add_argument("--dry", action="store_true", help="run the harness offline, no model")
+    ap.add_argument("--refine", action="store_true",
+                    help="the TWO-TURN run (roadmap B7): grade, then refine, and judge "
+                         "the second frame against the first")
     args = ap.parse_args()
     if args.dry:
         args.sleep = 0.0
@@ -253,10 +447,26 @@ def main() -> int:
           f"({len(pixels):,} pixels)")
     print("  source: " + "  ".join(f"{k} {v:+.4f}" for k, v in before.items()))
 
+    budget = REFINE_BUDGET if args.refine else CALL_BUDGET
     provider = _dry_provider() if args.dry else get_provider()
     print(f"  provider {provider.name} model {provider.model}  "
-          f"sleep {args.sleep:.0f}s  budget {CALL_BUDGET} calls\n")
-    meter = Meter(provider, CALL_BUDGET)
+          f"sleep {args.sleep:.0f}s  budget {budget} calls\n")
+    meter = Meter(provider, budget)
+
+    if args.refine:
+        # A region is a function of WHERE a pixel sits, so the second turn needs
+        # frames, not the flat (N, 3) block the single-turn run measures.
+        images = [_unit(f).reshape(f.shape) for f in frames]
+        rows = refine_bakeoff(stats, images, before, provider, meter, args.sleep)
+        print("\n" + "=" * 78)
+        _totals(rows, meter)
+        print(f"{meter.calls} calls spent of a {budget} budget")
+        out = REPO / "out" / f"bakeoff_refine{'_dry' if args.dry else ''}.json"
+        out.parent.mkdir(exist_ok=True)
+        out.write_text(json.dumps({"source": before, "rows": rows}, indent=2,
+                                  default=str) + "\n")
+        print(f"\nfull measurements -> {out.relative_to(REPO)}")
+        return 0
 
     rows = []
     first = True
@@ -269,7 +479,11 @@ def main() -> int:
             meter.spend(path)
             try:
                 if path == "direct":
-                    spec, _ = plan_vibe(prompt, stats, provider=provider)
+                    # plan_direct, NOT plan_vibe: plan_vibe routes on
+                    # schema_enforced now, so against a real Groq key it would
+                    # run the intent path under the "direct" label and the
+                    # comparison would silently be intent against itself.
+                    spec = plan_direct(prompt, stats, provider=provider)
                     summary = spec.rationale
                 else:
                     intent = ask_intent(prompt, provider=provider)
@@ -291,7 +505,9 @@ def main() -> int:
 
     print("\n" + "=" * 78)
     _totals(rows, meter)
-    out = REPO / "out" / "bakeoff_intent.json"
+    # A dry run writes its own file: canned numbers overwriting a real
+    # measurement is how evidence gets lost, and it happened once here.
+    out = REPO / "out" / f"bakeoff_intent{'_dry' if args.dry else ''}.json"
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps({"source": before, "rows": rows}, indent=2, default=float) + "\n")
     print(f"\nfull measurements -> {out.relative_to(REPO)}")
