@@ -31,39 +31,38 @@ work, and **uv**, which runs ragvid.
 No package manager? [ffmpeg downloads](https://ffmpeg.org/download.html) ·
 [uv install guide](https://docs.astral.sh/uv/getting-started/installation/).
 
-### 2. Download ragvid
+### 2. Install ragvid
 
 Open a terminal — **PowerShell** on Windows, **Terminal** on macOS and Linux —
-and run these one line at a time:
+and run:
 
 ```bash
-git clone https://github.com/MrKuros/ragvid
-cd ragvid
+uv tool install ragvid
 ```
 
-### 3. Set it up
+That is the whole install. There is no folder to keep, nothing to download by
+hand, and no second step. It takes a minute the first time and never again.
+
+To update later: `uv tool upgrade ragvid`.
+
+### 3. Start it
 
 ```bash
-uv venv
-uv pip install -e ".[dev]"
-```
-
-This takes a minute the first time and never again.
-
-### 4. Start it
-
-```bash
-uv run ragvid serve
+ragvid serve
 ```
 
 ragvid opens in your browser at **http://127.0.0.1:8765**. Leave the terminal
 window open while you use it — closing it stops ragvid. To stop it deliberately,
 press **Ctrl-C** in that window.
 
-Next time, steps 1 to 3 are done: `cd ragvid` and `uv run ragvid serve` is all
-you need.
+Next time, `ragvid serve` is all you need.
 
-### 5. Connect an AI service
+> **"ragvid: command not found"?** uv installed it somewhere your terminal has
+> not been told about. Run `uv tool update-shell`, close the terminal, open a
+> new one. If you would rather not touch anything, `uvx ragvid serve` works
+> without it.
+
+### 4. Connect an AI service
 
 ragvid asks the first time you open it. Click **Connect a service**, pick one,
 paste your key, Save. **Groq** is free to start and the panel links straight to
@@ -84,6 +83,31 @@ Then nudge it in plain words: *less blue* · *brighter* · *half as strong* ·
 
 Every adjustment is a small change to the look you already have, so you can
 keep going until it's right. **Ctrl-Z** steps back.
+
+You can also say **which part of the picture**: by colour — *"deepen the blues,
+leave skin alone"* — or by place — *"darken the top of the frame"*, *"lift the
+edges"*. Everything else in the shot stays as it was.
+
+### Naming a thing in the picture
+
+*"make the sky moody"* · *"warm the foliage"* · *"cool down the water"* — ragvid
+can find the thing itself, but only with one extra piece installed:
+
+```bash
+uv tool install --force "ragvid[masks]"
+```
+
+It costs a **13 MB download** — about 70 MB once unpacked — plus a **15 MB**
+model that arrives the first time you actually name a thing, and only after
+ragvid has asked you. After that it runs on your own machine like everything
+else, with nothing sent anywhere.
+
+Without it, colours and places still work; naming a thing tells you what to
+install rather than quietly ignoring the word.
+
+Five things are recognised — **sky, foliage, person, water, buildings**. They
+are found once, at the start of the clip, not frame by frame: if your subject
+walks out of shot halfway through, their grade stays where they were.
 
 ## Which AI service?
 
@@ -118,10 +142,12 @@ times the length of the clip. Turn off the effects you don't actually want.
 **Matching a photo needs no account at all.** That path is pure maths, done on
 your own computer, with no AI service involved.
 
-**Shot in log?** If your camera records S-Log, V-Log, C-Log or similar, point
-ragvid at your camera's conversion LUT — the line under the prompt box — and it
-converts before measuring and before grading. Without it the picture is the flat
-grey one straight off the sensor, and the result is a guess at un-flattening it.
+**Shot in log?** Pick your camera from the **"Shot in log?"** list under the
+prompt box — S-Log3, V-Log, Canon Log 3, ARRI LogC, N-Log — and ragvid builds
+the conversion itself and applies it before measuring and before grading. No
+hunting for the vendor's LUT file; if you do have it, the same list takes it.
+Without this the picture is the flat grey one straight off the sensor, and the
+result is a guess at un-flattening it.
 
 **One clip, one look.** If different parts of your video need different looks,
 split it into separate clips first. ragvid doesn't do cuts, pacing, or audio —
@@ -162,6 +188,26 @@ colour and none of the effects.
   debugging time
 - [`docs/WEB_API.md`](docs/WEB_API.md) — the local HTTP API behind `serve`
 - `python examples/api_tour.py` — every call in order, no API key needed
+- [`CHANGELOG.md`](CHANGELOG.md) — what changed, in each release
+
+### Working on ragvid
+
+The install above is for *using* ragvid. To change it, take a checkout and the
+dev extra instead — one line at a time, because Windows PowerShell has no `&&`:
+
+```bash
+git clone https://github.com/MrKuros/ragvid
+cd ragvid
+uv sync --extra dev
+uv run ragvid serve
+```
+
+`uv run pytest -q` runs the suite (~2 min, no API key — a test that reaches a
+live LLM is a bug). `./scripts/check.sh` is the gate: tests plus the invariants
+a passing test run does not cover, and it exits non-zero with the count.
+
+Read [`CLAUDE.md`](CLAUDE.md) before the first change. It is short, and it is
+the list of things that silently corrupt output if you break them.
 
 ## License
 

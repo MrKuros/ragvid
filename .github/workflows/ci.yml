@@ -6,18 +6,48 @@ on:
   pull_request:
 
 # No API key secret is referenced anywhere on purpose: the suite must never
-# reach a live LLM. If a test starts needing one, mock it instead.
+# reach a live LLM. If a test starts needing one, mock it instead. That is a
+# property of every runner below, not just the Linux one.
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      # Windows and macOS have never run this suite. When one of them goes red,
+      # the others still have to report -- that is the whole point of adding
+      # them, and fail-fast would hide it.
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.13"]
+        # The Python floor and ceiling are exercised on Linux; the other two
+        # platforms are here to catch platform bugs, not interpreter bugs, so
+        # one version each is enough.
+        include:
+          - os: windows-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.13"
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ffmpeg
+      # ffmpeg is on no runner image, and half this suite renders real pixels.
+      # Each line is the same command the README gives that platform's users,
+      # except on Windows: winget is not usable non-interactively on a runner,
+      # and chocolatey is preinstalled.
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --yes --no-progress
+
+      - name: ffmpeg is really there
+        run: ffmpeg -version
 
       - uses: astral-sh/setup-uv@v5
         with:

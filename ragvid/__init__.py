@@ -36,10 +36,15 @@ from .errors import (
     SessionCorrupt,
     SessionNotFound,
 )
+import importlib.metadata
+
 from .project import Project, available_providers
 from .spec import RGB, EffectSpec, GradeSpec, HueBand
 
-__version__ = "0.1.0"
+try:  # single source of truth is pyproject.toml; a bare checkout has no metadata
+    __version__ = importlib.metadata.version("ragvid")
+except importlib.metadata.PackageNotFoundError:
+    __version__ = "0.0.0+source"
 
 __all__ = [
     "Project",

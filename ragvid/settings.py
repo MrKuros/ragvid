@@ -73,7 +73,13 @@ def save(data: dict) -> None:
     tmp = target.with_name(f".{FILENAME}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
-        os.fchmod(fd, 0o600)  # the file is still empty here
+        # Unix only -- os.fchmod does not exist on Windows, and save() is on the
+        # path of every set_key, so an unguarded call means an API key cannot be
+        # saved at all there. Keys are GUI-only by construction, so that failure
+        # has no workaround. Windows leaves the file at %APPDATA%'s per-user ACL,
+        # which is the platform's own answer to the same question.
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)  # the file is still empty here
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp, target)
@@ -161,8 +167,9 @@ def _selfcheck() -> None:
         os.environ["HOME"] = tmp  # macOS/Windows branches of data_dir()
         os.environ["APPDATA"] = tmp
         set_key("groq", "gsk_secret")
-        mode = stat.S_IMODE(path().stat().st_mode)
-        assert mode == 0o600, oct(mode)
+        if hasattr(os, "fchmod"):  # Windows cannot report a POSIX mode
+            mode = stat.S_IMODE(path().stat().st_mode)
+            assert mode == 0o600, oct(mode)
         assert key("groq", "GROQ_API_KEY") == "gsk_secret"
         assert hint("groq", "GROQ_API_KEY") == "…cret"
         os.environ["GROQ_API_KEY"] = "from_env"

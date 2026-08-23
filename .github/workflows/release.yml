@@ -1,0 +1,64 @@
+name: release
+
+# Publishing happens when a human pushes a tag, never on a merge.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # PyPI trusted publishing: GitHub mints a short-lived OIDC token that
+      # proves "this workflow, in this repository", and PyPI exchanges it for a
+      # one-off upload token. Nothing long-lived is stored, so there is no
+      # secret here to leak, rotate or accidentally print.
+      #
+      # One-time setup, by hand, at pypi.org -> your project -> Publishing:
+      #   owner MrKuros / repository ragvid / workflow release.yml
+      #   Environment name: LEAVE BLANK -- this job declares no environment, and
+      #   a name set on one side but not the other is the usual reason a first
+      #   publish fails with "invalid publisher".
+      # The very first upload has no project to attach to, so use PyPI's
+      # "pending publisher" form with the same four fields.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv build
+
+      - name: the tag and the version in pyproject must agree
+        # A tag that disagrees with the metadata publishes a version nobody can
+        # find again. Cheaper to fail here than to yank.
+        run: |
+          uv run --no-project --python 3.13 python - <<'PY'
+          import os, sys, tomllib
+          tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          version = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          print(f"tag {tag!r}, pyproject {version!r}")
+          sys.exit(0 if tag == version else "tag and pyproject.toml disagree")
+          PY
+
+      - name: the wheel must carry the UI
+        # ragvid/web/index.html IS the interface. A wheel without it installs
+        # cleanly, starts cleanly, and serves a stub page -- the failure mode
+        # most worth spending three lines to make impossible.
+        run: |
+          uv run --no-project --python 3.13 python - <<'PY'
+          import glob, sys, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          missing = [n for n in ("ragvid/web/index.html",) if n not in names]
+          corpus = [n for n in names if n.startswith("ragvid/look_corpus/")]
+          print(wheel, len(names), "entries,", len(corpus), "looks")
+          sys.exit(f"missing from the wheel: {missing}" if missing else 0 if corpus else "no look corpus in the wheel")
+          PY
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
