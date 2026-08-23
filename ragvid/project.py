@@ -360,13 +360,18 @@ class Project:
 
         `spec.effects` rides along as an ffmpeg filter chain -- it is spatial, so
         it is not in the cube and would otherwise be silently dropped from the
-        one render that matters.
+        one render that matters. That covers the exported *file*; it does not
+        cover the cube once it leaves ragvid, which is why two sidecars land
+        beside the video: `<stem>.look.json` (the whole spec, lossless, the only
+        round-trip format) and `<stem>.cdl` (ASC CDL, lossy but universal, with
+        everything it cannot carry named in its Description).
 
         Note this makes the *file* safe, not the spec: `self.spec` is read when
         the render starts, so a caller that wants the grade frozen at the moment
         the user pressed Export must snapshot the project itself.
         """
         from .render import render_video
+        from .sidecar import write_cdl, write_look
 
         out = Path(out_path).expanduser()
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -374,6 +379,9 @@ class Project:
             cube = self.bake(Path(tmp) / "export.cube")
             render_video(self.source, str(cube), str(out), self.spec.render_effects(),
                          gpu=gpu, progress=progress, input_lut=self.input_lut)
+        # with_name, not with_suffix: a multi-dot suffix is not accepted there.
+        write_look(self.spec, out.with_name(out.stem + ".look.json"))
+        write_cdl(self.spec, out.with_name(out.stem + ".cdl"))
         return out
 
     # ---- interop ----------------------------------------------------------
