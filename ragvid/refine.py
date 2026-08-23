@@ -1,4 +1,13 @@
-"""Conversational refinement: adjust an existing GradeSpec by a plain-English request."""
+"""Conversational refinement: adjust an existing GradeSpec by a plain-English request.
+
+DELIBERATELY STILL ON THE DIRECT PATH, even though vibe.plan_vibe now defaults
+to intent -> compiler. An Intent describes departures from the SOURCE and
+compile_intent always starts from identity, so routing a refinement through it
+would silently discard the grade the user already accepted -- the exact failure
+THE COPY RULE below exists to prevent. Refining against an existing spec needs a
+verb vocabulary for "relative to what is already there" (roadmap B7), not a
+different transport.
+"""
 
 from __future__ import annotations
 

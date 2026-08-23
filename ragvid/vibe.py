@@ -1,4 +1,20 @@
-"""Turn a mood word into a GradeSpec, calibrated to the measured footage."""
+"""Turn a mood word into a GradeSpec, calibrated to the measured footage.
+
+TWO PATHS LIVE HERE AND plan_vibe PICKS BETWEEN THEM. The default is intent ->
+compiler (roadmap A1): the model emits typed verbs from a closed vocabulary and
+compiler.py turns them into numbers by reading the clip. The older path, where
+the model authors all 43 numbers itself, stays as the fallback for endpoints
+that cannot constrain decoding to the Intent schema.
+
+WHY THAT WAY ROUND, measured rather than argued (scripts/bakeoff_intent.py,
+gpt-oss-120b, ten sentences on test_files/test.mp4, each resulting spec applied
+to real frames and the moments re-measured): intent 23/23 checks, 10/10 prompts
+clean, 2010 tokens per prompt. Direct 21/23, 8/10, 5131 tokens. The direct
+path's two misses are the two it cannot fix by trying harder -- it darkened a
+clip by 0.13 luma that nobody asked to darken, and it answered "warm it up, but
+at half strength" with the byte-identical grade it gave "warmer", because a
+model with no memory of the full-strength look has nothing to be half of.
+"""
 
 from __future__ import annotations
 
@@ -192,7 +208,29 @@ def _stat_notes(st: "ClipStats") -> list[tuple[bool, str]]:
 
 
 def plan_vibe(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
-    """Plan a grade for `vibe`, calibrated to this clip's measured statistics."""
+    """Plan a grade for `vibe`. A GradeSpec, from whichever path this endpoint
+    can run — see the module docstring for which is default and what decided it.
+
+    The routing test is a CAPABILITY, not a preference: the intent path needs
+    constrained decoding against Intent's schema (ask_intent's ponytail note),
+    which is exactly the endpoints sitting at the "json_schema" rung. Everything
+    below that rung, and the Anthropic provider (a different SDK, no
+    `structured` attribute), gets the direct path, which works there today.
+    Nothing else in ragvid changes: both paths return a sanitized GradeSpec, and
+    the spec is still the only currency session, history and the LUT ever see.
+    """
+    if provider is None:
+        from ragvid.providers import get_provider
+
+        provider = get_provider()
+    if getattr(provider, "structured", None) == "json_schema":
+        return plan_intent(vibe, stats, provider)
+    return plan_direct(vibe, stats, provider)
+
+
+def plan_direct(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
+    """The model authors all 43 numbers itself. Was the only path; now the
+    fallback, and still what refine.py builds on."""
     if provider is None:
         from ragvid.providers import get_provider
 
@@ -245,16 +283,14 @@ def plan_vibe(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
 # GradeSpec — ~350 tokens of exactly the numbers this path exists to stop the
 # model reading. It would be paying tokens to re-tempt it.
 #
-# MEASURED, against this exact prompt (scripts/bakeoff_intent.py, gpt-oss-120b,
-# ten sentences on test_files/test.mp4, judged on graded pixels): intent 21/23
-# checks and 8/10 prompts clean at 1858 tokens per prompt, direct 20/23 and 7/10
-# at 5158. Both misses were the same defect and it is in the prose below: the
-# "moody" example names deeper shadows, cooler and less colour, and the model
-# obediently answered "moody but keep it natural" and "make it feel like a rainy
-# night" with no `exposure` op at all, so mean luma moved -0.006 and -0.009
-# where the sentence asked for dark. Adding exposure to that example is the
-# obvious fix and is deliberately NOT applied here: it would make the numbers
-# above describe a prompt nobody measured. Change it and re-run the bake-off.
+# The brightness sentence under HOW TO CHOOSE is there because of a measured
+# failure, not a hunch. The first version of that line offered "moody" as deeper
+# shadows, cooler and less colour — no exposure — and the model followed it
+# exactly: "moody but keep it natural" and "make it feel like a rainy night"
+# both came back without an `exposure` op, moving mean luma -0.006 and -0.009
+# where the sentence asked for dark. An example in this prompt is not
+# illustration, it is instruction, and anything it leaves out the model leaves
+# out too.
 INTENT_SYSTEM = """\
 You are a colorist. You output exactly one JSON object listing the moves a grade needs.
 You choose WORDS, and never numbers. Every number in the finished grade is computed from
@@ -320,8 +356,12 @@ HOW TO CHOOSE:
 - The fewest ops that read as the look. A real grade is three to eight moves, and a
   sentence naming one thing is one op. Reaching for a verb you were not asked for is the
   worst mistake available to you here; leaving one out is never wrong.
-- A mood word does imply moves, and naming them is the job: "moody" is deeper shadows,
-  cooler, a little less colour. Name the moves, never the mood.
+- A mood word does imply moves, and naming them is the job. Start with brightness: a
+  mood is usually a BRIGHTNESS word before it is a colour one, so "moody", "night",
+  "dusk", "overcast", "gloomy" and "sombre" all need an exposure op pointing down, and
+  then the rest — deeper shadows, cooler, a little less colour. Name the moves, never
+  the mood, and never leave the picture at its original brightness when the sentence
+  asked for a darker one.
 - One op per verb. Two warmth ops in one list compose into a bigger push than either of
   them asked for; say it once, with the right amount.
 - Texture verbs and colour targets stay out of a grade that did not ask for them.

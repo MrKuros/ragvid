@@ -19,7 +19,15 @@ from ragvid.providers.base import CATALOG, DEFAULTS, describe, get_provider, loa
 from ragvid.providers.groq import FALLBACK_MODEL, GroqProvider, parse_reset
 from ragvid.refine import refine_spec
 from ragvid.spec import RGB, GradeSpec
-from ragvid.vibe import INTENT_SYSTEM, SYSTEM, ask_intent, format_stats, plan_intent, plan_vibe
+from ragvid.vibe import (
+    INTENT_SYSTEM,
+    SYSTEM,
+    ask_intent,
+    format_stats,
+    plan_direct,
+    plan_intent,
+    plan_vibe,
+)
 
 STATS = ClipStats(
     mean=RGB(r=0.2137, g=0.1904, b=0.2510),
@@ -304,6 +312,39 @@ def test_a_reply_that_is_not_an_intent_fails_like_the_direct_path(body, match):
     with pytest.raises(ProviderError, match=match) as info:
         ask_intent("warmer", provider=p)
     assert info.value.provider == "fake"
+
+
+def test_plan_vibe_routes_a_schema_endpoint_to_the_intent_path():
+    """The A1 swap, and the measurement behind it is in vibe.py's docstring:
+    23/23 checks and 10/10 prompts for intent against 21/23 and 8/10 direct, at
+    two-fifths of the tokens."""
+    p = FakeIntentProvider([_intent_reply(Intent(ops=[Op(op="warmth", dir="up")]))])
+    p.structured = "json_schema"
+
+    spec = plan_vibe("warmer", STATS, provider=p)
+
+    assert p.calls[0]["messages"][0]["content"] == INTENT_SYSTEM
+    assert spec.temperature > 0.0
+    assert spec.rationale.startswith("Warmed it up")   # describe(), not the model
+
+
+def test_plan_vibe_falls_back_to_the_direct_path_below_that_rung():
+    """A capability, not a preference: an endpoint that cannot constrain
+    decoding to the Intent schema still has to produce a grade, and the 43-field
+    path is what works there. Same GradeSpec out either way."""
+    direct = FakeProvider()
+    direct.structured = "json_object"
+
+    assert plan_vibe("gloomy", STATS, provider=direct) == CANNED
+    assert direct.system == SYSTEM
+    # ... and an Anthropic-style provider, which has no `structured` at all.
+    assert plan_vibe("gloomy", STATS, provider=FakeProvider()) == CANNED
+
+
+def test_the_direct_path_is_still_reachable_by_name():
+    """It is refine.py's foundation and the fallback; a swap that quietly
+    orphaned it would be a deletion wearing a routing change as a disguise."""
+    assert plan_direct("gloomy", STATS, provider=FakeProvider()) == CANNED
 
 
 # ---- sanitizing insane model output ---------------------------------------
