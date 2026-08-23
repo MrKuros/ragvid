@@ -15,11 +15,33 @@ public for callers that do want light.
 Across frames we take the MEDIAN, not the mean: that is the entire reason for
 sampling more than one frame. A single flash, cut, or fade-to-black frame moves
 a mean and does not move a median.
+
+Frames are sampled at 16 BITS PER CHANNEL (`rgb48le` over the pipe), not 8, and
+DEPTH IS THE ONLY THING THAT CHANGED -- the analysis downscale to 256px stays,
+for the reason given at _ANALYSIS_WIDTH.
+
+The depth is invisible on ordinary 8-bit Rec.709 footage: measured against the
+old PNG path, every moment agrees to 0.47 of an 8-bit code value and mean/std
+to 0.01, i.e. quantisation and nothing else. It stops being invisible the moment
+a non-linear transform runs before the statistics, which is exactly what
+`input_lut` is. Measured on an underexposed synthetic S-Log3 clip (scene linear
+0.0006-0.32, 10-bit) through logspace.bake_conversion's own .cube:
+
+    crushed_low   0.0566 at 8 bits vs 0.0277 at 16 -- 2.0x over-reported
+    p1            0.00392 on all three channels at 8 bits (that is 1/255: the
+                  measurement has snapped to the grid) vs 0.0057/0.0054/0.0041
+    saturation    5.7% high;  mean 2.0% high
+    distinct luma levels surviving the LUT: 723 vs 36842
+
+crushed_low and p1 are the two fields compiler.py consults to decide how far a
+shadow verb may push, so at 8 bits the compiler was being told the blacks were
+twice as dead as they are. On a 10-bit log source with no LUT at all the gap is
+smaller but still real -- p1 out by 0.87 of a code value, 3.4% -- because 8-bit
+sampling throws two bits away at the decode.
 """
 
 from __future__ import annotations
 
-import io
 import json
 import subprocess
 
@@ -41,6 +63,20 @@ _ANALYSIS_WIDTH = 256
 
 _EPS = 1e-8
 
+# itemsize -> the value that means 1.0. uint8 frames come from PIL (probe_image)
+# and from callers holding arrays already; uint16 frames come from _grab, i.e.
+# from ffmpeg, and 65535 is NOT their full scale.
+#
+# swscale expands an N-bit source to 16 bits by LEFT SHIFT, not by replication:
+# an 8-bit 255 arrives as 255 << 8 = 65280. Measured over a lossless 0-255 ramp,
+# /65280 reproduces the source code values to 4.6e-5 (0.012 of an 8-bit code
+# value); /65535 is 0.0038 low at white, which is a 0.4% GAIN error on every
+# statistic -- not quantisation, just wrong, and it silently reports pure white
+# as unclipped. A 10-bit source overshoots the other way by 0.001 (0.25 of a
+# code value), hence the clip. tests/test_probe.py pins both ends so a change in
+# swscale's convention fails loudly instead of shifting every grade 0.4%.
+_FULL_SCALE = {1: 255.0, 2: 65280.0}
+
 
 def srgb_to_linear(x: np.ndarray | float) -> np.ndarray:
     """sRGB display values in [0,1] -> linear light. Piecewise, not a 2.2 power."""
@@ -56,7 +92,36 @@ def linear_to_srgb(x: np.ndarray | float) -> np.ndarray:
 
 # Values within this of the ends of the range count as clipped / crushed. One
 # 8-bit code value, so it means "already at the rail", not "nearly there".
+# Deliberately still 8-bit-sized now that sampling is 16-bit: a 16-bit rail
+# would be 1/65535, which no real footage sits inside, and clipped_high /
+# crushed_low are read by compiler.py and vibe.py with their present meaning.
 _RAIL = 1.5 / 255.0
+
+# Cut detection. Luma histograms of adjacent samples, compared by total
+# variation distance (half the L1 difference: 0 = identical, 1 = disjoint, and
+# bounded either way whatever the frame size, which is what lets the threshold
+# be a constant rather than something tuned per clip).
+#
+# A HISTOGRAM, not a frame difference, because a frame difference is what the
+# naive detector gets wrong. Measured on synthetic 6s clips at n_frames=10:
+#
+#   two sources spliced      0.63  <- the thing being detected
+#   dissolve over 12 frames  0.49
+#   3-stop lighting change   0.74
+#   whip pan, content fully replaced between samples   0.22   <- 1.00 by frame
+#   slow pan                                           0.25      difference
+#   continuous shot                                    0.03
+#   assets/sample.mp4                                  0.08
+#
+# 0.35 sits 1.4x above the worst pan and 1.8x below a real splice. The two
+# KNOWN false positives are in that table and are not fixable at this sample
+# rate: a hard flash reads 1.00 (and, being one sample wide, is counted TWICE,
+# once entering and once leaving), and a large exposure change reads as a cut
+# because at 1s between samples there is nothing to distinguish a light coming
+# on from a splice to a brighter shot. Both are cases where one look across the
+# span is questionable anyway, so over-reporting is the safe direction.
+_HIST_BINS = 32
+_CUT_TV = 0.35
 
 
 class ClipStats(BaseModel):
@@ -84,9 +149,28 @@ class ClipStats(BaseModel):
     dominant_hue: float = 0.0  # chroma-weighted circular mean hue, degrees 0-360
     frame_variance: float = 0.0  # spatial variance of luma within a frame
 
+    # How much to BELIEVE dominant_hue: the length of the chroma-weighted mean
+    # hue vector whose angle dominant_hue already is (circular statistics' R).
+    # compiler._measure needs this and does not have it, so it substitutes
+    # `saturation` -- but `saturation` is HSV chroma/max, which is large on a
+    # dark colourful pixel that carries almost no chroma, and it cannot fall at
+    # all when the frame holds equal amounts of two opposite hues. Both cases
+    # make dominant_hue meaningless and only this number says so. 0 = no usable
+    # hue; equals mean absolute chroma when every pixel agrees on the hue.
+    hue_strength: float = 0.0
 
-def _frame_stats(rgb8: np.ndarray) -> dict:
-    """Statistics for one uint8 RGB frame, in display space.
+    # Number of adjacent SAMPLE PAIRS that do not look like the same shot. A
+    # lower bound on the cuts in the clip, never a shot list: at n_frames=10
+    # the samples are whole seconds apart, so this answers "is this one
+    # continuous shot" and nothing finer. Nonzero means one look is about to be
+    # applied across a cut. Nothing acts on it yet (roadmap A7 is measurement
+    # only); compiler.py currently infers the same thing from frame_variance,
+    # which conflates "spans a cut" with "is contrasty".
+    cuts: int = 0
+
+
+def _frame_stats(rgb: np.ndarray) -> dict:
+    """Statistics for one uint8 or uint16 RGB frame, in display space.
 
     NOTE: the caller has already downscaled the frame to _ANALYSIS_WIDTH px, so
     anything sensitive to spatial frequency -- frame_variance especially, and
@@ -96,7 +180,7 @@ def _frame_stats(rgb8: np.ndarray) -> dict:
     variance. Good enough to rank clips and to tell a model "this is flat";
     not good enough to certify legal levels for delivery.
     """
-    v = np.asarray(rgb8, dtype=np.float64).reshape(-1, 3) / 255.0
+    v = _unit(rgb)
     hi = v.max(axis=1)
     lo = v.min(axis=1)
     chroma = hi - lo
@@ -120,6 +204,27 @@ def _frame_stats(rgb8: np.ndarray) -> dict:
         "hue_vec": hue_vec,
         "frame_variance": float(luma.var()),
     }
+
+
+def _unit(rgb: np.ndarray) -> np.ndarray:
+    """Integer RGB frame of any shape -> (N, 3) float64 display values in [0, 1]."""
+    v = np.asarray(rgb, dtype=np.float64).reshape(-1, 3) / _FULL_SCALE[rgb.dtype.itemsize]
+    return np.clip(v, 0.0, 1.0, out=v)
+
+
+def _cut_distances(frames: list[np.ndarray]) -> list[float]:
+    """Total variation distance between each adjacent pair's luma histogram.
+
+    Bounded in [0, 1] whatever the frame size, which is what lets _CUT_TV be a
+    constant rather than something tuned per clip.
+    """
+    h = [_luma_hist(f) for f in frames]
+    return [float(np.abs(a - b).sum()) / 2.0 for a, b in zip(h, h[1:])]
+
+
+def _luma_hist(frame: np.ndarray) -> np.ndarray:
+    v = _unit(frame)
+    return np.histogram(v @ LUMA, bins=_HIST_BINS, range=(0.0, 1.0))[0] / len(v)
 
 
 def _hue_deg(v: np.ndarray, hi: np.ndarray, chroma: np.ndarray) -> np.ndarray:
@@ -155,6 +260,8 @@ def _stats_from_frames(
         crushed_low=float(med["crushed_low"]),
         dominant_hue=float(np.degrees(np.arctan2(hy, hx)) % 360.0),
         frame_variance=float(med["frame_variance"]),
+        hue_strength=float(np.hypot(hx, hy)),
+        cuts=int(sum(d > _CUT_TV for d in _cut_distances(frames))),
     )
 
 
@@ -184,24 +291,27 @@ def _ffprobe(path: str) -> tuple[int, int, float]:
 
 
 def _grab(path: str, t: float, input_lut: str | None = None) -> np.ndarray | None:
-    """Decode one frame at time `t` as a scaled-down uint8 RGB array.
+    """Decode one frame at time `t` as a scaled-down uint16 RGB array.
 
     `input_lut` is applied BEFORE the downscale, not after. A LUT is non-linear,
     so LUT-then-average and average-then-LUT are different numbers, and the
     whole point of measuring here is to report what the grade will actually see.
     Ten full-size LUT applications is a price worth paying for that.
+
+    rgb48le rather than PNG, because PIL silently drops a 16-bit RGB PNG back to
+    8 bits on load, and 8 bits is what the lut3d above runs in. The frame size
+    PNG used to carry comes back for free: the scale filter pins the width, so
+    the height is the only unknown and the buffer length names it.
     """
-    # ponytail: PNG over the pipe instead of rawvideo so PIL reports the frame
-    # size — scale=256:-2 gives a height we would otherwise have to predict.
-    png = _run([
+    raw = _run([
         # -nostdin: without it ffmpeg reads the terminal and eats the user's keystrokes.
         ffmpeg(), "-v", "error", "-nostdin", "-ss", f"{t:.3f}", "-i", path,
         "-frames:v", "1", "-vf", _analysis_vf(input_lut),
-        "-f", "image2pipe", "-c:v", "png", "-",
+        "-pix_fmt", "rgb48le", "-f", "rawvideo", "-",
     ])
-    if not png:
+    if len(raw) < _ANALYSIS_WIDTH * 6:  # not even one row
         return None
-    return np.asarray(Image.open(io.BytesIO(png)).convert("RGB"))
+    return np.frombuffer(raw, dtype="<u2").reshape(-1, _ANALYSIS_WIDTH, 3)
 
 
 def _analysis_vf(input_lut: str | None) -> str:
