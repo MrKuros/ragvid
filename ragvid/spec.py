@@ -1,7 +1,8 @@
 """The grade spec — the contract every other module codes against.
 
 A GradeSpec is 43 numbers describing a color grade. It is the *only* thing an
-LLM ever produces in this project; pixels are never sent to a model. The .cube
+LLM ever produces in this project; no pixels leave the machine (see
+docs/ARCHITECTURE.md rule 2). The .cube
 LUT is a derived artifact baked from a spec, which is why refinement ("make it
 less blue") is possible at all — you can adjust numbers, not a baked LUT.
 

@@ -565,6 +565,13 @@ def compile_stack(intent: Intent, stats: "ClipStats", balance: bool = False) -> 
     one correction, and the base is bit-for-bit what it would have been if the
     regional ops had not been asked for. The balance is deliberately not
     repeated per layer: it is a property of the clip, not of a corner of it.
+
+    B2 (semantic masks) added no code here, deliberately. "the sky" groups and
+    resolves through exactly the path "the top" does — intent.REGIONS grew, and
+    region.for_target answers both — so this function never learns that one kind
+    of region needs a model and the other does not. That is the test of whether
+    B2 was a mask source or an architecture: if it had needed a branch in this
+    file, it was the wrong shape.
     """
     m = _measure(stats)
     d = GradeSpec.identity().model_dump()

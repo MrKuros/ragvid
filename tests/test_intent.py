@@ -242,3 +242,92 @@ def test_a_colour_name_is_not_a_region():
     from ragvid.region import for_target
 
     assert for_target("green") is None and for_target("") is None
+
+
+# ---- semantic targets (roadmap B2) ----------------------------------------
+#
+# The second mask source costs the model FIVE more words and nothing else. That
+# is the whole claim of B2 being a mask source rather than an architecture: the
+# schema grows by five enum entries, `Op` is unchanged, and describe() renders
+# them through the machinery the geometric regions already installed.
+
+
+@pytest.mark.parametrize("word", ["sky", "foliage", "person", "water", "buildings"])
+def test_every_semantic_word_is_in_the_schema_and_has_a_region(word):
+    """Same guard as the geometric words: a word the model can emit that the
+    compiler cannot resolve is a silent no-op with a sentence attached."""
+    from ragvid.region import for_target
+
+    assert word in TARGETS
+    assert word in json.dumps(Intent.llm_json_schema())
+    r = for_target(word)
+    assert r is not None and r.shape == "semantic"
+
+
+def test_the_word_list_and_the_class_map_cannot_drift():
+    """`Target` has to spell the words (a Literal cannot be built from a runtime
+    tuple) while segment.CLASSES holds the model side. This is the seam where
+    adding a class and forgetting the vocabulary — or the reverse — would show
+    up as a KeyError at grade time."""
+    from ragvid.intent import GEOMETRIC, REGIONS, SEMANTIC
+    from ragvid.region import _FOR_TARGET
+    from ragvid.segment import CLASSES
+
+    assert SEMANTIC == tuple(CLASSES)
+    assert set(SEMANTIC) <= set(TARGETS)
+    assert set(SEMANTIC).isdisjoint(GEOMETRIC), "a word cannot be both a place and a thing"
+    assert REGIONS == GEOMETRIC + SEMANTIC
+    assert set(REGIONS) <= set(_FOR_TARGET), "every region word needs a Region"
+
+
+def test_a_semantic_target_reads_as_the_thing_it_names():
+    """"made the sky moodier" is the sentence the roadmap promised. It comes out
+    of the SAME pronoun substitution the geometric regions use -- "darkened it"
+    has exactly one slot and the subject fills it."""
+    assert describe(Intent(ops=[
+        Op(op="exposure", dir="down", target="sky"),
+        Op(op="saturation", dir="down", target="sky", amount="subtle"),
+        Op(op="contrast", target="foliage"),
+        Op(op="warmth", target="person"),
+        Op(op="exposure", dir="down", target="buildings"),
+        Op(op="saturation", target="water", amount="strong"),
+    ])) == [
+        "darkened the sky",
+        "drained the colour in the sky a little",
+        "added contrast in the foliage",
+        "warmed the person up",
+        "darkened the buildings",
+        "richened the colour in the water a lot",
+    ]
+
+
+def test_a_tint_verb_on_a_subject_still_names_a_colour():
+    """`target` answers "which colour to add" for the two tint verbs. A semantic
+    target takes the "which pixels" job and leaves the colour, exactly as a
+    geometric one does -- it used to print a literal "{c}"."""
+    from ragvid.intent import DEFAULT_TINT
+
+    assert describe(Intent(ops=[Op(op="shadow_tint", target="water")])) == \
+        [f"pushed {DEFAULT_TINT['shadow_tint']} into the shadows in the water"]
+
+
+def test_a_subject_on_a_texture_verb_never_reaches_the_sentence():
+    """grain lives in the ffmpeg chain and cannot be masked. The Op validator
+    already dropped geometric regions there; semantic ones join them for free by
+    being in REGIONS, and this is the test that they did."""
+    op = Op(op="grain", target="sky")
+    assert op.target == ""
+    assert describe(Intent(ops=[op])) == ["added grain"]
+
+
+def test_skin_is_still_a_colour_and_not_a_mask():
+    """The one word the segmentation model does NOT take over. ADE20K has no
+    skin class, and a hue qualifier follows a face through movement and a cut
+    where a per-frame matte does not."""
+    from ragvid.intent import SEMANTIC
+    from ragvid.region import for_target
+
+    assert "skin" not in SEMANTIC
+    assert for_target("skin") is None
+    assert describe(Intent(ops=[Op(op="saturation", dir="down", target="skin")])) == \
+        ["drained the colour in the skin tones"]

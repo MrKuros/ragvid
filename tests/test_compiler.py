@@ -856,3 +856,82 @@ def test_the_balance_runs_once_for_the_clip_and_not_once_per_region():
     assert not stack.base.is_identity(), "the balance has to be in the base"
     assert stack.layers[0].spec.slope == RGB.of(1.0)
     assert stack.layers[0].spec.offset == RGB.of(0.0)
+
+
+# ---- semantic regions (roadmap B2) ----------------------------------------
+#
+# B2 added NO code to compiler.py, deliberately, and these are the tests that
+# say so. "the sky" has to group, order and compile through exactly the path
+# "the top" does; if any of this needed a branch in the compiler, the feature
+# was the wrong shape and it would be a second implementation of layering to
+# keep in step with the first.
+
+
+def test_a_semantic_op_compiles_into_a_layer_like_a_geometric_one():
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(one("exposure", dir="down", target="sky"), STATS)
+    layer, = stack.layers
+    assert stack.base.is_identity(), "the darkening belongs in the layer and nowhere else"
+    assert layer.spec.exposure < -0.1
+    assert layer.region.shape == "semantic" and layer.region.subject == "sky"
+    assert layer.region.needs_frame
+
+
+def test_the_two_kinds_of_region_compile_to_the_same_numbers():
+    """The only difference between "darken the top" and "darken the sky" is
+    which pixels the mask covers. If the compiled GradeSpecs ever differ, the
+    compiler learned about mask sources and it should not have."""
+    from ragvid.compiler import compile_stack
+
+    top = compile_stack(one("exposure", dir="down", target="top"), STATS)
+    sky = compile_stack(one("exposure", dir="down", target="sky"), STATS)
+    assert top.layers[0].spec.model_dump(exclude={"rationale"}) == \
+        sky.layers[0].spec.model_dump(exclude={"rationale"})   # only the sentence differs
+    assert top.layers[0].region != sky.layers[0].region
+
+
+def test_a_geometric_and_a_semantic_region_are_two_layers_in_the_order_asked_for():
+    """Layer order is evaluation order, so it has to be the order the person
+    said things in -- across both mask sources, from one dict.fromkeys pass."""
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(Intent(ops=[
+        Op(op="exposure", dir="down", target="sky"),
+        Op(op="warmth", target="bottom"),
+        Op(op="saturation", dir="down", target="sky"),
+    ]), STATS)
+    assert [l.region.subject or l.region.edge for l in stack.layers] == ["sky", "bottom"]
+    assert stack.layers[0].spec.exposure < 0 and stack.layers[0].spec.saturation < 1.0
+
+
+def test_a_semantic_verb_never_looks_its_subject_up_as_a_hue():
+    """Inside a layer the target has already answered "which pixels", so the
+    verb acts on all of them. Without that reset `_saturation` would look "sky"
+    up in the hue-band table and raise."""
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(one("saturation", dir="down", target="foliage"), STATS)
+    layer, = stack.layers
+    assert layer.spec.saturation < 0.95
+    assert layer.spec.hue_green.model_dump() == GradeSpec.identity().hue_green.model_dump()
+
+
+def test_the_base_is_bit_for_bit_untouched_by_a_semantic_op():
+    from ragvid.compiler import compile_stack
+
+    plain = compile_stack(Intent(ops=[Op(op="warmth")]), STATS)
+    withsky = compile_stack(
+        Intent(ops=[Op(op="warmth"), Op(op="exposure", dir="down", target="sky")]), STATS)
+    assert np.array_equal(withsky.base.apply(IMG), plain.base.apply(IMG))
+
+
+def test_the_rationale_names_the_semantic_move_too():
+    """A move that landed in a layer going unmentioned is the same silent-drop
+    bug one level up -- the list is what the UI shows."""
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(Intent(ops=[
+        Op(op="warmth"), Op(op="exposure", dir="down", target="sky")]), STATS)
+    assert "sky" in stack.base.rationale
+    assert "darkened the sky" in stack.layers[0].spec.rationale

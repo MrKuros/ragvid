@@ -42,6 +42,8 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, Field, model_validator
 
+from .segment import CLASSES
+
 # The verb vocabulary. Sixteen words, each a thing a person says out loud about
 # a picture. `dir` means up/down on that axis and is documented per verb below.
 OpName = Literal[
@@ -77,26 +79,39 @@ Amount = Literal["subtle", "moderate", "strong"]
 AMOUNTS = get_args(Amount)
 
 # What the op acts on. "" is the whole frame and is the overwhelming default.
-# Colour names route saturation/exposure onto the hue qualifiers and name the
-# colour for the two tint verbs. This is also the field regions and semantic
-# masks land in (roadmap B1/B2) — which is why it is a target rather than six
-# separate optional fields. `skin` is a hue family, not a mask; a real skin
-# matte needs a segmentation model and is roadmap B2, not this.
+# One field, three kinds of answer to "which pixels", and the reason they share
+# a field is that a sentence does not distinguish them — "darken the blues",
+# "darken the top" and "darken the sky" are the same shape of request:
 #
-# The last six are GEOMETRIC REGIONS and are a different kind of answer to
-# "which pixels": a colour name selects by what the pixel IS, a region selects
-# by where it SITS. region.py holds the geometry each word means, so the word
-# and the shape cannot drift apart.
+#   * a COLOUR name routes saturation/exposure onto the hue qualifiers, and
+#     names the colour to add for the two tint verbs. `skin` is one of these: it
+#     is a hue family, and it stays one even now that a segmentation model is
+#     available. ADE20K has no skin class, and a hue qualifier tracks a face
+#     through movement and a cut for free where a per-frame matte does not.
+#   * a GEOMETRIC REGION selects by where a pixel SITS.
+#   * a SEMANTIC REGION (roadmap B2) selects by what a pixel IS PART OF —
+#     the five things segment.py's model can name well enough to grade.
+#
+# region.py holds the Region each of the last two means, so the word and the
+# mask cannot drift apart, and compile_stack resolves both through one lookup.
 Target = Literal[
     "", "red", "orange", "yellow", "green", "cyan", "teal", "blue",
     "magenta", "purple", "skin",
     "top", "bottom", "left", "right", "center", "edges",
+    "sky", "foliage", "person", "water", "buildings",
 ]
 TARGETS = get_args(Target)
 
-# The region words, in one tuple so compiler.py and describe() agree on which
-# targets are spatial without either of them holding a second list.
-REGIONS = ("top", "bottom", "left", "right", "center", "edges")
+# Targets that answer "which pixels" spatially, in one tuple so compiler.py and
+# describe() agree without either holding a second list. GEOMETRIC and SEMANTIC
+# differ only in where the mask comes from; every consumer here treats them the
+# same, which is the point of B2 being a mask source rather than an
+# architecture. SEMANTIC is derived from segment.CLASSES rather than retyped so
+# the two cannot disagree (the Literal above still has to spell them: a Literal
+# cannot be built from a runtime tuple, and a test asserts they match).
+GEOMETRIC = ("top", "bottom", "left", "right", "center", "edges")
+SEMANTIC = tuple(CLASSES)
+REGIONS = GEOMETRIC + SEMANTIC
 
 # The six EffectSpec verbs. They are ALREADY spatial -- they live in render.py's
 # filter chain, not in the LUT -- so masking one means masking a filter rather
@@ -214,6 +229,11 @@ REGION_NAMES = {
     "top": "the top", "bottom": "the bottom",
     "left": "the left side", "right": "the right side",
     "center": "the middle", "edges": "the edges",
+    # The semantic words already ARE how a person says them, so these are the
+    # article and nothing else. "buildings" stays plural because that is what
+    # the class covers -- a skyline, not one building.
+    "sky": "the sky", "foliage": "the foliage", "person": "the person",
+    "water": "the water", "buildings": "the buildings",
 }
 
 _ADVERB = {"subtle": " a little", "moderate": "", "strong": " a lot"}

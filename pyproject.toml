@@ -33,6 +33,13 @@ Issues = "https://github.com/MrKuros/ragvid/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Semantic masks ("make the sky moody"). Optional because it is 13 MB of wheel
+# and ~64 MB installed against a ~5 MB base, and because a grade that names no
+# subject never touches it. The 15 MB of weights are NOT bundled either: they
+# are downloaded once, on an explicit call, by a front end that asked first --
+# see ragvid/segment.py. Without this extra a semantic region raises
+# SegmentUnavailable naming the exact install command, never an ImportError.
+masks = ["onnxruntime>=1.17"]
 
 [project.scripts]
 ragvid = "ragvid.cli:main"

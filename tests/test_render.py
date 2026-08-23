@@ -735,3 +735,88 @@ def test_two_regions_composite_in_order_through_ffmpeg(tmp_path):
     assert br == 128.0, "neither region reaches the bottom right"
     assert tr == bl == 64.0, "one region each: half of 128"
     assert tl == 32.0, f"both regions, composed: expected 32, got {tl}"
+
+
+# ---- semantic regions (roadmap B2) ----------------------------------------
+#
+# render.py knows NOTHING about B2 and these tests exist to keep it that way. A
+# semantic mask arrives as the same 8-bit greyscale PNG a geometric one does,
+# so the filter chain is unchanged and the only new risk is that the mask's own
+# shape -- a soft blob rather than a full-width ramp -- trips something in it.
+#
+# No model is loaded: segment.class_prob is stubbed with a probability field.
+# See tests/test_segment.py's docstring for why no test may download it.
+
+
+def semantic_layer(tmp_path: Path, monkeypatch, stops: float = -1.0):
+    """[(cube, mask png)] for one semantic region, as bake_layers will build it.
+
+    The frame is passed to write_png -- that is the one wiring difference B2
+    introduces, and it is the reason Project.bake_layers has to decode a frame.
+    """
+    from ragvid import segment
+    from ragvid.region import for_target
+
+    p = np.full((128, 128), 0.02)
+    p[: int(128 * 0.55)] = 0.98
+    monkeypatch.setattr(segment, "class_prob", lambda rgb, name: p)
+    cube = darken_cube(tmp_path / "sky.cube", stops)
+    mask = for_target("sky").write_png(tmp_path / "sky.png", W, H, frame=np.zeros((H, W, 3)))
+    return [(cube, mask)]
+
+
+def test_a_semantic_mask_darkens_its_subject_and_leaves_the_rest_alone(tmp_path, monkeypatch):
+    """Measured on real pixels through the real chain, not on a filter string."""
+    grey = tmp_path / "grey.mp4"
+    render._run(["-f", "lavfi", "-i", f"color=c=0x808080:s={W}x{H}:d=1:r=10",
+                 "-c:v", "ffv1", str(grey)], timeout=60)
+    out = tmp_path / "f.png"
+    render.render_frame(str(grey), None, str(out), at=0.5,
+                        layers=semantic_layer(tmp_path, monkeypatch))
+    got = np.asarray(Image.open(out).convert("RGB")).astype(float)
+    assert got[:40].mean() < 70.0, "the subject was not darkened"
+    assert abs(got[-40:].mean() - 128.0) <= 1.0, "everything else moved"
+
+
+def test_the_semantic_edge_is_soft_all_the_way_through_ffmpeg(tmp_path, monkeypatch):
+    """Same claim B1's mask makes, on a mask that came from a model instead of
+    from geometry. The feather is measured in region.py at 13.2 code values per
+    row on the float mask and 14 on the 8-bit PNG; here it is measured on the
+    graded frame, where the layer's own -1 stop halves the step."""
+    grey = tmp_path / "grey.mp4"
+    render._run(["-f", "lavfi", "-i", f"color=c=0x808080:s={W}x{H}:d=1:r=10",
+                 "-c:v", "ffv1", str(grey)], timeout=60)
+    out = tmp_path / "f.png"
+    render.render_frame(str(grey), None, str(out), at=0.5,
+                        layers=semantic_layer(tmp_path, monkeypatch))
+    col = np.asarray(Image.open(out).convert("RGB")).astype(float)[:, W // 2, 0]
+    d = np.diff(col)
+    assert (d >= -1.0).all(), "the ramp must not reverse"
+    assert d.max() <= 8.0, f"a single row jumps {d.max():.0f} code values"
+    assert np.count_nonzero((col > 70) & (col < 125)) > 6, "the ramp is too short to be soft"
+
+
+def test_the_still_path_and_the_video_path_composite_a_semantic_mask_identically(tmp_path, monkeypatch):
+    """The rule this project keeps breaking: the preview must match the export.
+
+    Measured on the real model at 1280x720 with a real sky: max 0.0 code values,
+    mean 0.000 -- a semantic mask is a PNG like any other, so it inherits B1's
+    composite exactly. Compared at full chroma for B1's reason: 4:2:0 costs 23
+    code values on testsrc2's colour edges with no region present at all.
+    """
+    layers = semantic_layer(tmp_path, monkeypatch)
+    still_png = tmp_path / "still.png"
+    render.render_frame(SAMPLE, None, str(still_png), at=1.5, layers=layers)
+    still = np.asarray(Image.open(still_png).convert("RGB")).astype(float)
+
+    vf = render._vf(None, None, "crop=trunc(iw/2)*2:trunc(ih/2)*2", layers=layers)
+    mkv = tmp_path / "v.mkv"
+    render._run(["-ss", "1.5", "-i", SAMPLE, "-vf", vf, "-frames:v", "1",
+                 "-c:v", "ffv1", "-pix_fmt", "gbrp", str(mkv)], timeout=120)
+    vid_png = tmp_path / "v.png"
+    render._run(["-i", str(mkv), "-frames:v", "1", "-update", "1", str(vid_png)], timeout=60)
+    vid = np.asarray(Image.open(vid_png).convert("RGB")).astype(float)
+
+    err = np.abs(still - vid)
+    assert err.max() <= 4.0, f"still vs video path: {err.max():.0f} code values"
+    assert err.mean() < 0.6

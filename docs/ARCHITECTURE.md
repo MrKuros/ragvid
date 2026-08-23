@@ -36,6 +36,14 @@ Read this before building a front end.
   33³ .cube (65³ if a      denoise · glow ·         + one .cube per layer,
   hue band is in use)      softness · grain ·       composited around the
                            vignette · fringe        base lut3d
+                                                            │
+                                                 ┌──────────┴──────────┐
+                                                 ▼                     ▼
+                                            geometry            segment.py
+                                        linear · radial      sky · foliage ·
+                                        (width, height)      person · water ·
+                                                             buildings
+                                                          (local SegFormer-B0)
 ```
 
 Three rules hold the whole thing together:
@@ -59,8 +67,45 @@ Three rules hold the whole thing together:
    exactly what it was and a container went around it. The roadmap called this
    consequence in advance and asked for the rule to be revised in the same
    commit as the code rather than quietly contradicted.
-2. **No pixels reach a model, ever.** Planners see statistics and words. The
-   LUT and ffmpeg see pixels. They never meet.
+2. **No pixels leave the machine.** Planners — the things that cost money and
+   travel over a network — see statistics and words, never an image. A model
+   that runs *locally* may see pixels, and exactly one does: the segmentation
+   model in `ragvid/segment.py` that resolves "the sky" and "the person" into a
+   mask.
+
+   *This rule used to read "no pixels reach a model, ever", and it stopped
+   fitting the day a sentence could name a thing in the picture (roadmap B2).*
+   The old wording was a proxy. What it was actually protecting is two things,
+   and neither of them is the word "model": **privacy** — a person's footage is
+   frequently the most sensitive file on their disk, and an unreleased edit is
+   under embargo — and **cost**, because a hosted vision call is priced per
+   image and a grading session is hundreds of frames. A hosted vision API
+   violates both. A 15 MB ONNX file running on the CPU violates neither: the
+   frame never touches a socket, and the marginal cost of a mask is 244 ms of
+   local compute, measured. Restating the rule in terms of what it defends
+   rather than in terms of one way of breaking it is what makes it survivable —
+   and it is now *stricter* in the direction that matters, because "no pixels
+   reach a model" never said anything about a crash reporter, a telemetry
+   payload or a bug-report attachment, and this wording does.
+
+   The consequences are load-bearing and deliberate:
+
+   - The model is **not bundled and not fetched silently.** `pip install
+     ragvid[masks]` is an opt-in for the runtime; the weights are a second
+     opt-in, downloaded by an explicit `segment.download_model()` call that a
+     front end makes only after asking. Without either, a semantic region
+     raises `SegmentUnavailable` — typed, with `needs_install` and a `hint`
+     naming the exact next action — rather than an `ImportError`.
+   - Nothing here is a fallback to a hosted model. There is no hosted path to
+     fall back to, by construction: if the local model is absent the feature is
+     absent.
+   - `ragvid/spec.py`'s docstring carries the old wording in its first
+     paragraph and needs the same one-line correction.
+
+   The roadmap called this consequence in advance ("The decision to make before
+   B2") and asked for the rule to be revised in the same commit as the code
+   rather than quietly contradicted — the same treatment rule 1 got when
+   `GradeStack` landed.
 3. **Core modules have no I/O policy.** They don't print, don't read argv, don't
    call `sys.exit`, don't assume a working directory. Those are front-end
    concerns and live in the front end.
@@ -97,6 +142,7 @@ p.export("out.mp4", progress=lambda f: bar.set(f))     # the slow one
 | Undo stack | `project.history` (oldest first) · `project.can_undo` · `project.undo()` |
 | Sliders and numeric fields | `project.set_spec(spec)` — pushes to history, so undo covers slider drags too. A spec arriving this way is a FLAT grade: 43 numbers describe the whole frame, so any regional layers are dropped. `project.set_intent(intent)` is the path that keeps them |
 | Regions on the current grade | `project.stack` (base + layers) · `project.layers` · `to_dict()["layers"]`. A preview that ignores them shows a look the export will not produce |
+| Semantic masks ("the sky") | `segment.is_ready()` before offering them · `segment.download_model(progress=fn)` once the user consents · `region.needs_frame` / `stack.needs_frame` to know whether a frame is required |
 | Live preview | `project.preview()` — one ffmpeg call, independent of clip length |
 | Export with a bar | `project.export(path, progress=fn)` — `fn` receives 0.0–1.0 |
 | Provider dropdown | `available_providers()` |
@@ -126,6 +172,7 @@ swallowing a bug. Then branch:
 | `ProviderError` | show the message | `provider` |
 | `FFmpegError` | show the log, offer a bug report | `returncode`, `stderr` |
 | `FFmpegNotFound` | tell the user to install it, or point `RAGVID_FFMPEG` at it | `binary`, `env_var`, `hint` |
+| `SegmentUnavailable` | offer the install (`needs_install`) or the 15 MB download, then retry | `reason`, `needs_install`, `hint` |
 
 Every field is populated at raise time so nothing has to be recovered by parsing
 a message string.
@@ -137,6 +184,11 @@ history, and the regional layers parallel to it), `current.cube`, `preview.png`,
 plus `layer<i>.cube` and `layer<i>.png` for each region on the current grade.
 One folder per project; delete it to reset. `root` is explicit everywhere and defaults to the working directory,
 which is what the CLI wants and what a GUI must override.
+
+The segmentation weights are the one artifact that is NOT per project: they
+live at `data_dir()/models/segformer-b0-ade-512.onnx` (15 MB, downloaded once,
+shared by every project) because they are neither derived from a clip nor worth
+fetching twice. Deleting them costs one download, not a grade.
 
 `ragvid serve` has no cwd to fall back on, so its default root is the per-user
 data directory: `~/.local/share/ragvid/work` on Linux (XDG), `~/Library/
@@ -253,6 +305,15 @@ LUTs will notice.
   field, add its guard — and add it to `is_identity()`, or
   `GradeSpec(exposure=3).is_identity()` returns True and the tests assert
   nothing. `python -m ragvid.spec` runs that gate plus the order's invariants.
+- **A semantic mask needs the frame; a geometric one does not.** That is the
+  whole signature cost of B2: `Region.mask(width, height, frame=None)`, with a
+  semantic region *raising* when the frame is missing rather than resolving to
+  all-ones. `Region.needs_frame` and `GradeStack.needs_frame` let a caller ask
+  in advance instead of catching. The mask is baked **once**, from one sampled
+  frame, not per frame: inference measures 244 ms per frame on a CPU here, so a
+  10-minute clip at 24 fps would add ~59 minutes to a render that measures
+  1.46× realtime — roughly 4× the whole export. The honest limitation is that a
+  subject leaving frame keeps its grade.
 - **A region's mask is generated ONCE, in numpy.** `region.Region.mask()` is
   the only place the geometry exists; `render.py` is handed the PNG it wrote
   and blends with it, and `GradeStack.apply()` lerps with the same array. That
