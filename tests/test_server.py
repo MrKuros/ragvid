@@ -80,6 +80,15 @@ class Api:
     def get(self, path: str) -> Resp:
         return self.call("GET", path, data=None)
 
+    def range(self, path: str, spec: str) -> Resp:
+        req = urllib.request.Request(self.url + path, method="GET")
+        req.add_header("Range", spec)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as f:
+                return Resp(f.status, f.headers.get("Content-Type", ""), f.read())
+        except urllib.error.HTTPError as exc:
+            return Resp(exc.code, exc.headers.get("Content-Type", ""), exc.read())
+
     def post(self, path: str, obj: dict | None = None) -> Resp:
         body = json.dumps(obj).encode() if obj is not None else b""
         return self.call("POST", path, body, "application/json")
@@ -315,6 +324,71 @@ def test_cube_downloads(api):
     assert r.status == 200
     assert r.ctype.startswith("text/plain")
     assert b"LUT_3D_SIZE" in r.body
+
+
+# ---- the source clip, for the in-browser preview ---------------------------
+# The narrowest route in the file: no parameter at all, so the only path it can
+# ever open is the Project's own.
+
+
+def test_source_serves_the_open_clip(api):
+    api.open_clip()
+    r = api.get("/media/source")
+    assert r.status == 200
+    assert r.ctype.startswith("video/")
+    assert r.body == SAMPLE.read_bytes()
+
+
+def test_source_answers_byte_ranges(api):
+    """A <video> cannot seek without them, and it asks for open-ended ones."""
+    api.open_clip()
+    size = SAMPLE.stat().st_size
+    whole = SAMPLE.read_bytes()
+
+    r = api.range("/media/source", "bytes=10-19")
+    assert r.status == 206
+    assert r.body == whole[10:20]
+
+    r = api.range("/media/source", "bytes=-8")            # the last 8 bytes
+    assert r.status == 206 and r.body == whole[-8:]
+
+    r = api.range("/media/source", "bytes=0-")            # open ended
+    assert r.status == 206
+    assert len(r.body) == min(size, server.RANGE_CHUNK)
+
+    r = api.range("/media/source", f"bytes={size + 5}-")  # past the end
+    assert r.status == 416
+
+
+def test_source_is_not_a_way_to_read_other_files(api):
+    """There is no parameter to point it anywhere, and that is the whole
+    defence -- the same reason `_incoming_file` can afford to be laxer: opening
+    a clip is a path the user chose, handing one back is not."""
+    api.open_clip()
+    for probe in ("/media/source?path=/etc/passwd", "/media/source?path=../../etc/passwd",
+                  "/media/source?../../etc/passwd"):
+        r = api.get(probe)
+        assert r.status in (200, 404)
+        assert b"root:" not in r.body[:4096]
+    assert api.get("/media/source").body == SAMPLE.read_bytes()
+
+
+def test_the_input_lut_is_downloadable_beside_the_grade(api, tmp_path):
+    """The browser reproduces `_vf`'s two lut3d nodes, so it needs both cubes.
+    One without the other is not a smaller error, it is a different picture."""
+    clip = _log_clip(tmp_path / "slog3.mp4")
+    api.post("/api/project", {"path": str(clip)})
+
+    assert api.get("/media/cube?input=1").status == 404   # nothing set yet
+    api.post("/api/input_lut", {"format": "slog3"})
+
+    r = api.get("/media/cube?input=1")
+    assert r.status == 200 and r.ctype.startswith("text/plain")
+    assert b"LUT_3D_SIZE" in r.body
+    assert r.body == Path(api.state()["input_lut"]).read_bytes()
+    # ...and the plain route still answers with the CREATIVE grade, not this one
+    api.plan()
+    assert api.get("/media/cube").body != r.body
 
 
 # ---- frames ----------------------------------------------------------------
@@ -559,7 +633,8 @@ def test_unknown_export_job_is_404(api):
     assert r.status == 404 and r.error["type"] == "NotFound"
 
 
-@pytest.mark.parametrize("path", ["/media/frame?t=0&graded=0", "/media/cube", "/api/undo"])
+@pytest.mark.parametrize("path", ["/media/frame?t=0&graded=0", "/media/cube",
+                                  "/media/source", "/api/undo"])
 def test_no_project_is_404_session_not_found(api, path):
     method = "GET" if path.startswith("/media") else "POST"
     r = api.call(method, path, data=None if method == "GET" else b"")

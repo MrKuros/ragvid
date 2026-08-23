@@ -40,7 +40,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
                       "text":"warmed it up"}]},
   "auto_balance": true,
   "balance": "neutralised a green cast, set the black point",
-  "api_version": 8,
+  "api_version": 9,
   "version": 8,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,
@@ -215,6 +215,37 @@ This exists so a full export is never how someone finds out a grade is wrong.
 Colour only — see above — and 33³ or 65³ depending on whether the grade uses a
 hue qualifier, so the response is ~1 MB or ~7.4 MB. Do not assume a fixed size.
 
+`GET /media/cube?input=1` → the camera log conversion in force instead, same
+media type. `404 NotFound` when there is none. Both exist because the ffmpeg
+chain is two `lut3d` nodes — the technical conversion, then the grade on top —
+and anything reproducing that picture needs both.
+
+## The source clip — the in-browser preview path
+
+`GET /media/source` → the open clip's own bytes, `Accept-Ranges: bytes`.
+
+**No parameter.** The path served is the `Project`'s, the same one `/media/frame`
+already renders from, so there is nothing caller-supplied to sanitise and this
+cannot be aimed at another file on the machine — a deliberately narrower rule
+than `POST /api/project`, where a path *is* something the user chose.
+
+Byte ranges are answered (`206` with `Content-Range`, `416` when unsatisfiable)
+because a `<video>` cannot seek without them. An open-ended range (`bytes=0-`,
+which is what a video element sends) is capped at 4 MB: serving fewer bytes than
+were asked for is what the mechanism is for, and the element simply asks again.
+
+This exists so the display path can skip ffmpeg entirely: `index.html` decodes
+the clip in a `<video>`, uploads `/media/cube` (and `?input=1`) as 3D textures
+and samples them in a fragment shader, tetrahedrally, the way `lut3d` does.
+Scrubbing then costs nothing and playback is possible at all.
+
+It is used **only** when the browser can produce the same picture the export
+will: WebGL2 present, the codec decodable, and `spec.effects` all zero. The six
+`effects` are an ffmpeg filter chain and are not in the cube, so a grade
+carrying any of them falls back to `/media/frame` rather than showing a
+different picture from the one that will be written. A client that skips that
+check is lying to its user.
+
 ## Export
 
 `POST /api/export` `{"out": "/abs/out.mp4", "gpu": false}` → `202 {"job": "j3"}`
@@ -315,7 +346,8 @@ is told the clip is flat and grey and answers with an invented contrast push.
 `/api/browse` lists `.cube` files with `"kind": "lut"` so a picker can offer them.
 
 The grade LUT at `/media/cube` remains display-referred and does **not** include
-the conversion. A `.cube` taken into Resolve still expects converted input.
+the conversion. A `.cube` taken into Resolve still expects converted input, and
+`/media/cube?input=1` is how a client gets the conversion itself.
 
 ## Errors
 

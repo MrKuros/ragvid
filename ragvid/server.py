@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import errno
 import json
+import mimetypes
 import re
+import shutil
 import threading
 import traceback
 import webbrowser
@@ -39,7 +41,7 @@ MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # the server is still running the Python it was started with -- which otherwise
 # shows up as fields silently missing and routes 404ing, with nothing on screen
 # to explain it.
-API_VERSION = 8
+API_VERSION = 9
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -488,9 +490,63 @@ def r_frame(req, q):
 
 
 def r_cube(req, q):
+    """The grade as a .cube -- or, with ?input=1, the camera log conversion in
+    force instead.
+
+    Both, because the WebGL preview has to reproduce the ffmpeg chain and that
+    chain is two lut3d nodes: the technical conversion first, the creative grade
+    on top. One with the other missing is not a smaller error, it is a different
+    picture. The path served is the Project's own, never a caller's.
+    """
+    project = _project()
+    if _param(q, "input", "") not in ("", "0", "false", "no"):
+        lut = project.input_lut
+        if not lut:
+            raise NotFound("no input LUT is in force")
+        return 200, "text/plain; charset=utf-8", Path(lut).read_bytes()
     with LOCK:
-        data = _project().bake().read_bytes()
+        data = project.bake().read_bytes()
     return 200, "text/plain; charset=utf-8", data
+
+
+# A <video> cannot seek without byte ranges, and it asks for open-ended ones
+# (`bytes=0-`). Answering a 4 GB clip in full would be 4 GB of RSS per request,
+# so an open-ended range is capped -- serving fewer bytes than were asked for is
+# exactly what the range mechanism is for, and the element simply asks again.
+_RANGE = re.compile(r"bytes=(\d*)-(\d*)")
+RANGE_CHUNK = 4 * 1024 * 1024
+
+
+def r_source(req, q):
+    """The open clip's own bytes, so the browser can decode it itself.
+
+    Takes NO parameter. The path is the Project's -- the same one /media/frame
+    already renders from -- so there is nothing caller-supplied to sanitise and
+    this cannot be aimed at another file on the machine. That is deliberately a
+    narrower rule than _incoming_file's: opening a clip is a path the user
+    chose, serving one back is not.
+    """
+    path = Path(_project().source)
+    size = path.stat().st_size
+    ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    head = {"Accept-Ranges": "bytes"}
+    match = _RANGE.fullmatch((req.headers.get("Range") or "").strip())
+    if not match:
+        # Streamed, not read: this is the one response big enough to care.
+        return 200, ctype, (path.open("rb"), size), head
+    first, last = match.group(1), match.group(2)
+    if first:
+        start = int(first)
+        end = min(int(last), size - 1) if last else min(start + RANGE_CHUNK, size) - 1
+    else:
+        start, end = max(size - int(last or 0), 0), size - 1   # "bytes=-N"
+    if start >= size or end < start:
+        return 416, "text/plain; charset=utf-8", b"", {**head, "Content-Range": f"bytes */{size}"}
+    with path.open("rb") as f:
+        f.seek(start)
+        data = f.read(end - start + 1)
+    head["Content-Range"] = f"bytes {start}-{end}/{size}"
+    return 206, ctype, data, head
 
 
 def _export_snapshot(project: Project) -> Project:
@@ -611,6 +667,7 @@ ROUTES = {
     ("GET", "/api/state"): r_state,
     ("GET", "/media/frame"): r_frame,
     ("GET", "/media/cube"): r_cube,
+    ("GET", "/media/source"): r_source,
     ("POST", "/api/project"): r_open,
     ("POST", "/api/vibe"): r_vibe,
     ("POST", "/api/reference"): r_reference,
@@ -666,13 +723,26 @@ class Handler(BaseHTTPRequestHandler):
             result = _error_response(exc)
         self._send(*result)
 
-    def _send(self, status: int, ctype: str, body: bytes) -> None:
+    def _send(self, status: int, ctype: str, body, extra: dict | None = None) -> None:
+        # `body` is bytes, or (open file, length) for the one response nobody
+        # wants a whole copy of in memory: the source clip.
+        stream, length = body if isinstance(body, tuple) else (None, len(body))
         self.send_response(status)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(length))
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
         self.send_header("Cache-Control", "no-store")  # belt and braces with ?v=
         self.end_headers()
-        self.wfile.write(body)
+        if stream is None:
+            self.wfile.write(body)
+            return
+        with stream:
+            try:
+                shutil.copyfileobj(stream, self.wfile, 1 << 20)
+            except (BrokenPipeError, ConnectionResetError):
+                # A <video> abandons ranges routinely -- every seek does it.
+                self.close_connection = True
 
     def log_message(self, fmt, *args):  # one short line, not apache's
         print(f"  {self.command} {self.path} -> {args[1] if len(args) > 1 else ''}")

@@ -67,9 +67,14 @@
   .frame { position:relative; width:100%; height:100%;
            border-radius:var(--r); overflow:hidden; background:#000;
            border:1px solid var(--line); }
-  .frame img { position:absolute; inset:0; width:100%; height:100%;
+  .frame img, .frame canvas { position:absolute; inset:0; width:100%; height:100%;
                object-fit:contain; }
   .frame img.under { opacity:0; }
+  /* The <video> is a texture source, never something anyone looks at -- the
+     canvas above it is the picture. One pixel rather than display:none, which
+     on some browsers stops the decoder and hands the shader a black frame. */
+  .frame video { position:absolute; width:1px; height:1px; opacity:0;
+                 pointer-events:none; }
   .frame.compare img.under { opacity:1; }
   .hint { position:absolute; left:10px; bottom:10px; background:#000a;
           padding:4px 9px; border-radius:5px; font-size:11.5px; color:var(--ink);
@@ -94,6 +99,7 @@
   .iconbtn { padding:8px 11px; display:flex; align-items:center; gap:7px;
              font-size:13px; color:var(--dim); }
   .iconbtn:hover:not(:disabled) { color:var(--ink); }
+  .iconbtn.on { color:var(--accent); border-color:var(--accent); }
   .iconbtn svg { width:16px; height:16px; }
 
   .said { color:var(--dim); font-size:14px; line-height:1.5; min-height:1.2em;
@@ -258,15 +264,34 @@
          aria-label="Preview frame. Press and hold to see the original.">
       <img id="imgGraded" alt="graded frame">
       <img id="imgSource" class="under" alt="original frame">
+      <!-- The live path (C1). Last, so it covers both stills while it is
+           running, and hidden the instant it could disagree with the export. -->
+      <canvas id="gl" hidden></canvas>
+      <video id="vid" playsinline muted preload="auto"></video>
       <span class="hint" id="hint">hold to see original</span>
     </div>
   </div>
 
   <div class="controls">
+    <!-- Both new controls sit on the row the scrubber already occupies, so the
+         page is exactly as tall as it was. Play (C2) needs no transport bar --
+         the scrubber IS the transport -- and clipping (C5) is a threshold test
+         in a shader that already runs, so it costs one uniform. Both appear
+         only while the live preview is on, because both are things only it can
+         do; on the server-rendered path the screen is unchanged. -->
     <div class="bar">
+      <button type="button" class="iconbtn" id="playBtn" hidden title="Play" aria-label="Play">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path id="playIcon" d="M8 5l11 7-11 7z"/></svg>
+      </button>
       <input type="range" id="scrub" min="0" max="100" value="0" step="0.1"
              aria-label="Position in the clip">
       <span class="time" id="time">0:00</span>
+      <button type="button" class="iconbtn" id="clipBtn" hidden aria-pressed="false"
+              title="Mark blown highlights and crushed shadows">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M12 3.5 21.5 20h-19z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg>
+        Clipping
+      </button>
     </div>
 
     <form class="ask" id="askForm">
@@ -386,7 +411,7 @@ const $ = (id) => document.getElementById(id);
 // Must match server.py's API_VERSION. The HTML is re-read on every request but
 // the Python is not, so an old `ragvid serve` will happily serve this file and
 // then answer with a contract it does not implement.
-const EXPECTED_API = 8;
+const EXPECTED_API = 9;
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
@@ -528,7 +553,7 @@ function render(state) {
   buildHistory();
   buildDid(intent);
   syncEnabled();
-  loadFrames();
+  if (!syncLive()) loadFrames();          // live preview, or the server's still
 }
 
 // Past prompts, in the user's own words. Clicking one goes back to it --
@@ -593,26 +618,406 @@ function loadFrames() {
   $("imgSource").src = frameUrl(false);       // preloaded so compare is instant
 }
 
+// ---- the live preview (roadmap C1, C2, C5) ---------------------------------
+// The grade IS a 3D LUT and /media/cube already serves it, so the DISPLAY path
+// does not need ffmpeg at all: the clip decodes into a <video>, the cube into a
+// 3D texture, and a fragment shader does what lut3d does. Scrubbing stops being
+// a round trip, and motion becomes possible for the first time.
+//
+// It runs only when it can produce the same picture the export will. Three
+// gates, and failing any of them lands on the server-rendered still that this
+// file has always shown -- never on a black rectangle, and never on a canvas
+// quietly showing a different grade:
+//
+//   1. WebGL2, and a shader that compiles.
+//   2. A codec this browser can decode. A .mkv or a ProRes .mov fires the
+//      <video>'s error event and hands the frame straight back.
+//   3. A spec with no spatial effect in it. EffectSpec is an ffmpeg filter
+//      chain -- hqdn3d, gblur, cas, ffmpeg's own noise PRNG -- and nothing
+//      short of reimplementing those matches it. render_preview's comment
+//      explains what a preview that disagrees with the export costs; the
+//      cheapest way not to pay it again is to decline the job.
+//      ponytail: vignette and fringe are pointwise and could be reproduced
+//      exactly; grain and the three convolutions cannot. Split the gate per
+//      effect only if looks with a vignette turn out to be the common case.
+//
+// Interpolation is TETRAHEDRAL and written out rather than left to the
+// hardware, because that is what ffmpeg does: lut3d defaults to tetrahedral and
+// render.py passes no interp=. Measured over all 16.7M 8-bit colours with a
+// strong grade at 65^3, trilinear and tetrahedral differ by at most 2 code
+// values (mean 0.017), so hardware filtering would have been defensible on
+// accuracy alone -- but a float LUT texture is only linearly filterable with
+// OES_texture_float_linear, so "free" filtering means quantising the cube to 8
+// bits first and that error is not in the 2. Six weighted lines cost nothing
+// and land within 1 code value of ffmpeg's own output on every one of those
+// 16.7M colours.
+
+const RAIL = 1.5 / 255;      // probe.py's _RAIL: "at the rail", not "near it"
+
+const GL_VS = `#version 300 es
+in vec2 p;
+out vec2 uv;
+void main() { uv = vec2(p.x, -p.y) * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
+
+const GL_FS = `#version 300 es
+precision highp float;
+precision highp sampler3D;
+uniform sampler2D src;
+uniform sampler3D tech, grade;
+uniform int techN, gradeN;
+uniform bool useTech, useGrade, marks;
+in vec2 uv;
+out vec4 frag;
+
+vec3 lut3d(sampler3D t, int n, vec3 c) {
+  vec3 x = clamp(c, 0.0, 1.0) * float(n - 1);
+  ivec3 p = ivec3(floor(x));
+  ivec3 q = min(p + 1, ivec3(n - 1));
+  vec3 d = x - vec3(p);
+  vec3 c000 = texelFetch(t, p, 0).rgb;
+  vec3 c111 = texelFetch(t, q, 0).rgb;
+  vec3 c100 = texelFetch(t, ivec3(q.x, p.y, p.z), 0).rgb;
+  vec3 c010 = texelFetch(t, ivec3(p.x, q.y, p.z), 0).rgb;
+  vec3 c001 = texelFetch(t, ivec3(p.x, p.y, q.z), 0).rgb;
+  vec3 c110 = texelFetch(t, ivec3(q.x, q.y, p.z), 0).rgb;
+  vec3 c101 = texelFetch(t, ivec3(q.x, p.y, q.z), 0).rgb;
+  vec3 c011 = texelFetch(t, ivec3(p.x, q.y, q.z), 0).rgb;
+  // The six tetrahedra of ffmpeg's vf_lut3d.c interp_tetrahedral, weight for
+  // weight. Every branch is a partition of unity over four corners.
+  if (d.r > d.g) {
+    if (d.g > d.b)      return (1.0-d.r)*c000 + (d.r-d.g)*c100 + (d.g-d.b)*c110 + d.b*c111;
+    else if (d.r > d.b) return (1.0-d.r)*c000 + (d.r-d.b)*c100 + (d.b-d.g)*c101 + d.g*c111;
+    else                return (1.0-d.b)*c000 + (d.b-d.r)*c001 + (d.r-d.g)*c101 + d.g*c111;
+  }
+  if (d.b > d.g)        return (1.0-d.b)*c000 + (d.b-d.g)*c001 + (d.g-d.r)*c011 + d.r*c111;
+  else if (d.b > d.r)   return (1.0-d.g)*c000 + (d.g-d.b)*c010 + (d.b-d.r)*c011 + d.r*c111;
+  return                       (1.0-d.g)*c000 + (d.g-d.r)*c010 + (d.r-d.b)*c110 + d.b*c111;
+}
+
+void main() {
+  vec3 c = texture(src, uv).rgb;
+  // Two nodes in this order and no other: the camera's log conversion is
+  // technical and the grade sits on top of it, exactly as _vf() composes them.
+  if (useTech) c = lut3d(tech, techN, c);
+  if (useGrade) c = lut3d(grade, gradeN, c);
+  c = clamp(c, 0.0, 1.0);
+  if (marks) {
+    // probe.py's own test, pixel for pixel: the MAX channel at the top rail is
+    // what clipped_high counts, the MIN channel at the bottom rail is
+    // crushed_low. Red for blown, blue for crushed.
+    if (max(c.r, max(c.g, c.b)) >= 1.0 - ${RAIL}) c = vec3(1.0, 0.15, 0.1);
+    else if (min(c.r, min(c.g, c.b)) <= ${RAIL}) c = vec3(0.15, 0.4, 1.0);
+  }
+  frag = vec4(c, 1.0);
+}`;
+
+let gl = null;                 // the context, once
+let glOk = null;               // null untried, true usable, false fall back forever
+let glProg = null;
+const glU = {}, glTex = {};
+let liveOn = false;            // the canvas is what you are looking at
+let vidFor = null;             // which S.source the <video> element holds
+let cubeFor = null, techFor = null;   // which cube URL each 3D texture holds
+let lutToken = 0;              // newest cube load wins; see glSyncLuts
+let lutsStale = false;         // a cube is on its way; hold the last good frame
+let videoBroken = false;       // this clip's codec did not decode here
+let marksOn = false, playing = false, holding = false;
+
+// A .cube is text: header keywords, then size^3 rows of "r g b" with RED
+// varying fastest -- which is both what lut.py writes and the order texImage3D
+// reads, so the numbers go in untouched. A cube whose domain is not 0..1 is
+// refused rather than misread: bake_cube never writes one, but a vendor's
+// conversion LUT might, and ffmpeg would honour it where this does not.
+//
+// Measured at 65^3 (7.4 MB, 274625 rows, the hue-qualifier size): 200 ms. That
+// is once per grade, against ~190 ms of ffmpeg per SCRUB before this existed --
+// which is the whole trade.
+function parseCube(text) {
+  let size = 0, i = 0, out = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.split("#")[0].trim();
+    if (!line) continue;
+    if (/^[A-Za-z]/.test(line)) {
+      const [key, ...rest] = line.split(/\s+/);
+      const k = key.toUpperCase();
+      if (k === "LUT_3D_SIZE") {
+        size = parseInt(rest[0], 10);
+        if (!(size >= 2)) return null;
+        out = new Float32Array(size * size * size * 3);
+      } else if (k === "DOMAIN_MIN" && rest.some((v) => +v !== 0)) return null;
+      else if (k === "DOMAIN_MAX" && rest.some((v) => +v !== 1)) return null;
+      continue;
+    }
+    const v = line.split(/\s+/);
+    if (!out || i + 3 > out.length) return null;
+    out[i++] = +v[0]; out[i++] = +v[1]; out[i++] = +v[2];
+  }
+  return out && i === out.length ? { size, data: out } : null;
+}
+
+// NEAREST on both LUT textures, deliberately: the shader interpolates itself,
+// and a float texture is not linearly filterable in core WebGL2 anyway.
+function glLutTexture(unit, uniform) {
+  const tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_3D, tex);
+  for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER])
+    gl.texParameteri(gl.TEXTURE_3D, k, gl.NEAREST);
+  for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R])
+    gl.texParameteri(gl.TEXTURE_3D, k, gl.CLAMP_TO_EDGE);
+  // A 2^3 identity, so a sampler3D is never bound to an incomplete texture --
+  // undefined behaviour even when its `use` flag is false.
+  glUpload3D(2, new Float32Array([0,0,0, 1,0,0, 0,1,0, 1,1,0,
+                                  0,0,1, 1,0,1, 0,1,1, 1,1,1]));
+  gl.uniform1i(uniform, unit);
+  return tex;
+}
+
+function glUpload3D(n, data) {
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB32F, n, n, n, 0, gl.RGB, gl.FLOAT, data);
+}
+
+function glSetup() {
+  try { gl = $("gl").getContext("webgl2", { alpha: false, antialias: false }); }
+  catch (e) { gl = null; }
+  if (!gl) return false;
+  const build = (type, source) => {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, source);
+    gl.compileShader(sh);
+    if (gl.getShaderParameter(sh, gl.COMPILE_STATUS)) return sh;
+    console.warn(gl.getShaderInfoLog(sh));
+    return null;
+  };
+  const vs = build(gl.VERTEX_SHADER, GL_VS), fs = build(gl.FRAGMENT_SHADER, GL_FS);
+  if (!vs || !fs) return false;
+  glProg = gl.createProgram();
+  gl.attachShader(glProg, vs);
+  gl.attachShader(glProg, fs);
+  gl.linkProgram(glProg);
+  if (!gl.getProgramParameter(glProg, gl.LINK_STATUS)) return false;
+  gl.useProgram(glProg);        // the only program there is; never swapped
+  for (const n of ["src", "tech", "grade", "techN", "gradeN", "useTech", "useGrade", "marks"])
+    glU[n] = gl.getUniformLocation(glProg, n);
+
+  // One triangle covering the viewport. No matrices, no mesh, no resize logic.
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const attr = gl.getAttribLocation(glProg, "p");
+  gl.enableVertexAttribArray(attr);
+  gl.vertexAttribPointer(attr, 2, gl.FLOAT, false, 0, 0);
+
+  glTex.src = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, glTex.src);
+  for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER])
+    gl.texParameteri(gl.TEXTURE_2D, k, gl.LINEAR);
+  for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T])
+    gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+  gl.uniform1i(glU.src, 0);
+  glTex.tech = glLutTexture(1, glU.tech);
+  glTex.grade = glLutTexture(2, glU.grade);
+  // Both LUTs start as that 2^3 identity with their switch off, so no uniform
+  // is ever read at whatever GLSL happens to default it to.
+  for (const n of ["useTech", "useGrade", "marks"]) gl.uniform1i(glU[n], 0);
+  for (const n of ["techN", "gradeN"]) gl.uniform1i(glU[n], 2);
+  return true;
+}
+
+// Everything a 3D LUT cannot carry. `some` over the object rather than a list
+// of six names, so a seventh field in EffectSpec closes this gate by itself; and
+// `S.layers` defensively, because a regional grade is a second LUT behind a mask
+// and is the same category -- the day /api/state carries one, this must already
+// be shut rather than newly wrong.
+function cubeIsTheWholeGrade() {
+  const e = (S.spec && S.spec.effects) || {};
+  return !Object.values(e).some((v) => v) && !(S.layers && S.layers.length);
+}
+
+// -> true when the canvas is now the picture, so render() knows whether it
+// still owes the user a server-rendered still.
+function syncLive() {
+  const want = S.open && !videoBroken && cubeIsTheWholeGrade();
+  if (want && glOk === null) glOk = glSetup();
+  if (!want || !glOk) { stopLive(); return false; }
+  const v = $("vid");
+  if (vidFor !== S.source) {
+    vidFor = S.source;
+    v.src = "/media/source";     // no parameter: the server serves ITS clip
+  }
+  liveOn = true;
+  $("gl").hidden = false;
+  $("playBtn").hidden = false;
+  $("clipBtn").hidden = false;
+  glSyncLuts();
+  seekLive();
+  return true;
+}
+
+function stopLive() {
+  liveOn = false;
+  $("gl").hidden = true;
+  $("playBtn").hidden = true;
+  $("clipBtn").hidden = true;
+  if (!$("vid").paused) $("vid").pause();
+}
+
+// Anything that cannot be reproduced exactly gives up for good and lets the
+// server render. Not "for this frame": a canvas that is right half the time is
+// worse than one that is never used.
+function liveFallback() {
+  glOk = false;
+  lutsStale = false;
+  cubeFor = techFor = null;
+  stopLive();
+  loadFrames();
+}
+
+async function glSyncLuts() {
+  const mine = ++lutToken;                 // a later state's cubes always win
+  const grade = S.planned ? `/media/cube?v=${S.version}` : null;
+  const tech = S.input_lut ? `/media/cube?input=1&v=${S.version}` : null;
+  if (grade === cubeFor && tech === techFor) return;
+  // Hold the last good frame rather than redraw with the cube that is being
+  // replaced: a flash of the PREVIOUS grade is the same lie the ?v= cache
+  // buster exists to prevent on the still path.
+  lutsStale = true;
+  if (grade !== cubeFor) {
+    cubeFor = grade;
+    if (!(await glLoadCube(grade, 2, "gradeN", "useGrade"))) return liveFallback();
+    if (mine !== lutToken) return;
+  }
+  if (tech !== techFor) {
+    techFor = tech;
+    if (!(await glLoadCube(tech, 1, "techN", "useTech"))) return liveFallback();
+    if (mine !== lutToken) return;
+  }
+  lutsStale = false;
+  drawLive();
+}
+
+async function glLoadCube(url, unit, sizeU, useU) {
+  if (!url) { gl.uniform1i(glU[useU], 0); return true; }
+  try {
+    const cube = parseCube(await (await fetch(url)).text());
+    if (!cube) return false;
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_3D, unit === 1 ? glTex.tech : glTex.grade);
+    glUpload3D(cube.size, cube.data);
+    gl.uniform1i(glU[sizeU], cube.size);
+    gl.uniform1i(glU[useU], 1);
+    return true;
+  } catch (e) { return false; }
+}
+
+function drawLive() {
+  const v = $("vid"), c = $("gl");
+  if (!liveOn || !gl || lutsStale || !v.videoWidth || v.readyState < 2) return;
+  if (c.width !== v.videoWidth || c.height !== v.videoHeight) {
+    c.width = v.videoWidth;
+    c.height = v.videoHeight;
+  }
+  gl.viewport(0, 0, c.width, c.height);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, glTex.src);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, v);
+  gl.uniform1i(glU.useGrade, holding || !S.planned || cubeFor === null ? 0 : 1);
+  gl.uniform1i(glU.marks, marksOn ? 1 : 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+function seekLive() {
+  const v = $("vid");
+  if (!liveOn || !v.readyState) return;
+  if (!playing && Math.abs(v.currentTime - t) > 0.01) v.currentTime = t;
+  else drawLive();
+}
+
+// ---- playback (C2) ---------------------------------------------------------
+// One button. The scrubber underneath is already the transport, and a frame
+// counter, in/out points and a loop switch are four more controls that answer
+// questions nobody grading a shot is asking.
+
+const PLAY_D = "M8 5l11 7-11 7z", PAUSE_D = "M7 5h3v14H7zM14 5h3v14h-3z";
+
+$("playBtn").onclick = () => {
+  const v = $("vid");
+  if (v.paused) v.play().catch(() => {}); else v.pause();
+};
+
+function playIcon(on) {
+  $("playIcon").setAttribute("d", on ? PAUSE_D : PLAY_D);
+  $("playBtn").title = on ? "Pause" : "Play";
+  $("playBtn").setAttribute("aria-label", on ? "Pause" : "Play");
+}
+
+// One draw per animation frame while it runs; the scrubber and the clock follow
+// the decoder rather than the other way round.
+function tick() {
+  if (!playing) return;
+  const v = $("vid");
+  t = v.currentTime;
+  $("scrub").value = t;
+  $("time").textContent = `${fmt(t)} / ${fmt(S.duration || 0)}`;
+  drawLive();
+  requestAnimationFrame(tick);
+}
+
+$("vid").addEventListener("play", () => { playing = true; playIcon(true); tick(); });
+["pause", "ended"].forEach((ev) =>
+  $("vid").addEventListener(ev, () => { playing = false; playIcon(false); }));
+$("vid").addEventListener("seeked", drawLive);
+$("vid").addEventListener("loadeddata", seekLive);
+// A codec the browser cannot decode, or a request that failed: the still path
+// has never stopped working, so use it.
+$("vid").addEventListener("error", () => {
+  videoBroken = true;
+  stopLive();
+  loadFrames();
+});
+
+// ---- clipping warning (C5) -------------------------------------------------
+// A threshold test in a shader that is already running, so it costs one uniform
+// and no round trip. It sits on the scrubber's row because it is about the
+// frame, and because a control that adds a row is not a cheap control.
+$("clipBtn").onclick = () => {
+  marksOn = !marksOn;
+  $("clipBtn").classList.toggle("on", marksOn);
+  $("clipBtn").setAttribute("aria-pressed", String(marksOn));
+  drawLive();
+};
+
 // ---- scrubbing ------------------------------------------------------------
 
 let scrubTimer = null;
 $("scrub").addEventListener("input", (e) => {
   t = parseFloat(e.target.value);
   $("time").textContent = `${fmt(t)} / ${fmt(S.duration || 0)}`;
+  // Live, a drag is a seek on a decoder that is already open, so there is
+  // nothing to debounce and nothing to queue.
+  if (liveOn) { $("vid").currentTime = t; return; }
   clearTimeout(scrubTimer);
   scrubTimer = setTimeout(loadFrames, 120);   // a fast drag must not queue 20 renders
 });
 
 // ---- hold to compare ------------------------------------------------------
 
-const hold = (on) => { if (S.planned) $("frame").classList.toggle("compare", on); };
+const hold = (on) => {
+  if (!S.planned) return;
+  $("frame").classList.toggle("compare", on);
+  // Live, the "before" is the same decoded frame with the grade LUT skipped --
+  // no round trip, and it stays truthful during playback, where a preloaded
+  // still would be frozen at wherever the scrubber happened to be.
+  holding = on;
+  drawLive();
+};
 ["mousedown", "touchstart"].forEach((ev) =>
   $("frame").addEventListener(ev, (e) => { e.preventDefault(); hold(true); }, { passive: false }));
 ["mouseup", "mouseleave", "touchend", "touchcancel"].forEach((ev) =>
   $("frame").addEventListener(ev, () => hold(false)));
 
 addEventListener("keydown", (e) => {
-  const typing = /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
+  const typing = /^(INPUT|TEXTAREA|BUTTON)$/.test(e.target.tagName);
   if (e.key === " " && !typing && S.open) { e.preventDefault(); hold(true); }
   if (e.key === "Escape") hideBanner();
   if ((e.ctrlKey || e.metaKey) && e.key === "z" && !typing && S.can_undo) {
