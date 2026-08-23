@@ -40,7 +40,7 @@ def main() -> int:
     print(f"provider={provider.name} model={provider.model}\n")
 
     print(f'--- plan_vibe("{vibe}") ---')
-    spec = plan_vibe(vibe, STATS, provider=provider)
+    spec, _ = plan_vibe(vibe, STATS, provider=provider)   # (spec, intent); the intent is C3's
     print(spec.model_dump_json(indent=2))
     print(f"\nidentity? {spec.is_identity()}   rationale: {spec.rationale}")
 

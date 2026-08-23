@@ -67,14 +67,14 @@ Marks are against the code as of 2026-08-23: **[have] / [partial] / [none]**.
 
 | # | Item | Status | UI cost | Note |
 |---|---|---|---|---|
-| A1 | Intent → compiler architecture | **[none]** | invisible (one optional "what it did" list) | Everything below is cheaper after it. |
-| A2 | Float pipeline end to end | **[partial]** | invisible | `spec.apply()` is float64, but `probe.py` samples 8-bit PNG at 256px and `render.py` exports 8-bit. Grade math on 8-bit input bands. |
-| A3 | 10-bit output | **[none]** | invisible | `render.py` pins `-pix_fmt yuv420p`. `yuv420p10le` + `-profile:v high10` is a small diff and is the whole point of grading log. |
-| A4 | Built-in log transforms (S-Log3, V-Log, C-Log, Log-C, N-Log) | **[partial]** | **removes** UI | Today `input_lut` is bring-your-own `.cube`. Generate the transforms instead and guess the camera from `ffprobe` metadata. |
-| A5 | Richer measurement feeding the compiler | **[partial]** | invisible | `ClipStats` already carries p1/p50/p99, `clipped_high`, `crushed_low`, `dominant_hue`, `frame_variance` — and almost nothing consumes them. |
-| A6 | Auto-balance before the creative grade | **[none]** | invisible | Neutralise from measured stats, then apply the look on top. Closed form, no LLM. Makes every prompt land more consistently. |
-| A7 | Scene-cut awareness | **[none]** | invisible | `frame_variance` already flags "this clip contains a cut"; one look is silently applied across it. |
-| A8 | ASC CDL export + `look.json` sidecar | **[none]** | one line in the save dialog | Closes a live data-loss bug: a `.cube` cannot carry `EffectSpec`, so grain/vignette/blur vanish silently when the LUT leaves ragvid. |
+| A1 | Intent → compiler architecture | **[have]** | invisible (plus the C3 list) | `intent.py` + `compiler.py`. Measured against the direct path: 23/23 checks vs 21/23, 10/10 prompts vs 8/10, 2.8× cheaper. Default wherever the endpoint can constrain decoding to a schema. |
+| A2 | Float pipeline end to end | **[have]** | invisible | `probe.py` samples raw `rgb48le`. Negligible on ordinary footage; on log through a conversion LUT `crushed_low` was over-reporting 2.0× and `p1` snapped to 1/255 — the two fields a shadow verb reads. |
+| A3 | 10-bit output | **[have]** | invisible | Output matches the source. On an S-Log3 ramp: 635 distinct levels from a 10-bit source against 160 from 8, and 128 against 67 in the bottom third. |
+| A4 | Built-in log transforms (S-Log3, V-Log, C-Log, Log-C, N-Log) | **[have]** | **removed** UI | `logspace.py` generates the conversion. All five land 18% grey on 0.408–0.412 against Rec.709's 0.409, from constant sets spanning 0.343–0.423. Two spans, three links and a file hunt became one `<select>`. |
+| A5 | Richer measurement feeding the compiler | **[have]** | invisible | The compiler reads them all. `hue_strength` added: HSV saturation cannot fall when a frame holds two opposite hues, so it could not carry hue confidence. |
+| A6 | Auto-balance before the creative grade | **[have]** | invisible (first row of the C3 list) | Green-cast and magenta-cast shots given the same "warmer" end up 1500× closer (0.0602 → 0.00004). A sodium street and a blue night are left bit-for-bit alone. |
+| A7 | Scene-cut awareness | **[partial]** | invisible | `cuts` counts luma-histogram jumps — a whip pan measures 1.00 by frame difference and 0.22 by histogram. Measured only; nothing acts on it yet. |
+| A8 | ASC CDL export + `look.json` sidecar | **[have]** | none — they just appear | Closed the data-loss bug: a `.cube` cannot carry `EffectSpec`. `exposure` folds exactly into CDL slope; what CDL cannot carry is named in its `<Description>`, diffed against identity so a new field joins the list automatically. |
 | A9 | LUT precision | **[have]** | — | `lut.py` escalates 33³→65³ when hue qualifiers are on, with measured banding error behind the choice. |
 
 ### Tier B — the expressive jump, which only A1 makes affordable
@@ -114,8 +114,8 @@ The only things allowed to touch the UI, one small element each.
 |---|---|---|---|
 | C1 | WebGL preview instead of ffmpeg-per-still | **[none]** | none visually; scrubbing becomes instant |
 | C2 | Real-time playback | **[none]** | a play button; follows from C1 |
-| C3 | "What it did", as sentences | **[none]** | one list — falls out of A1 |
-| C4 | Per-item strength sliders | **[none]** | replaces the 43-slider panel with ~4 — a net simplification |
+| C3 | "What it did", as sentences | **[have]** | one list — replaced `#said` |
+| C4 | Per-item strength sliders | **[have]** | 43-slider panel deleted; `index.html` net −47 lines |
 | C5 | Clipping / exposure warning on the frame | **[none]** | one toggle; `ClipStats` already measures it |
 | C6 | Before/after compare | **[have]** | hold-to-see-original |
 | C7 | Undo / start over / history | **[have]** | — |

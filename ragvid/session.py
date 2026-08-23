@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .errors import SessionCorrupt, SessionNotFound
+from .intent import Intent
 from .spec import GradeSpec
 
 if TYPE_CHECKING:  # ponytail: import at runtime only in load(), so session.py
@@ -46,14 +47,34 @@ class Session:
     # is the model explaining itself; this is the person's own words, which is
     # what they recognise when scanning back through what they tried.
     labels: list[str] = field(default_factory=list)
+    # The typed verbs a spec was compiled from, one per spec, parallel to
+    # `labels` and handled exactly the same way -- including the same
+    # backward-compatibility problem, since sessions on disk predate the key.
+    # None is a real value here, not a gap: a photo match, a refine, a moved
+    # slider and a direct-path provider all produce a spec that no Intent
+    # describes, and pretending otherwise would put sentences on screen that
+    # nothing compiled.
+    intents: list[Intent | None] = field(default_factory=list)
+    # Neutralise the clip's measured cast and black point before the creative
+    # look (roadmap A6). A property of the PROJECT, not of one grade: it is the
+    # base every look in this session sits on, so it lives here rather than
+    # once per spec. On by default -- compiler.compile_intent defaults it off so
+    # that an empty Intent stays the identity grade bit-for-bit, which makes the
+    # choice a caller's, and this is the caller.
+    auto_balance: bool = True
 
     @property
     def spec(self) -> GradeSpec:
         return self.specs[-1]
 
-    def push(self, spec: GradeSpec, label: str = "") -> None:
+    @property
+    def intent(self) -> Intent | None:
+        return self.intents[-1] if self.intents else None
+
+    def push(self, spec: GradeSpec, label: str = "", intent: Intent | None = None) -> None:
         self.specs.append(spec)
         self.labels.append(label)
+        self.intents.append(intent)
 
     def pop(self) -> bool:
         """Step back one step. False only when there is nothing left.
@@ -68,6 +89,8 @@ class Session:
         self.specs.pop()
         if self.labels:
             self.labels.pop()
+        if self.intents:
+            self.intents.pop()
         return True
 
     # ---- persistence ------------------------------------------------------
@@ -92,6 +115,8 @@ class Session:
                     "stats": json.loads(self.stats.model_dump_json()),
                     "specs": [json.loads(s.model_dump_json()) for s in self.specs],
                     "labels": self.labels,
+                    "intents": [i.model_dump() if i else None for i in self.intents],
+                    "auto_balance": self.auto_balance,
                 },
                 indent=2,
             )
@@ -121,6 +146,12 @@ class Session:
             # an older session still loads.
             labels = list(raw.get("labels") or [])
             labels += [""] * (len(specs) - len(labels))
+            # Same backfill for the same reason: every session written before
+            # the intent path has no `intents` key, and None per spec is the
+            # honest answer for grades nobody compiled from verbs.
+            intents = list(raw.get("intents") or [])
+            intents += [None] * (len(specs) - len(intents))
+            intents = [Intent(**i) if i else None for i in intents[:len(specs)]]
             # .get, not ["input_lut"]: sessions written before log support have
             # no such key and must still open. Same for input_format, which
             # arrived later still -- an older session with a vendor .cube set
@@ -128,7 +159,11 @@ class Session:
             return cls(source=raw["source"], stats=ClipStats(**raw["stats"]),
                        input_lut=raw.get("input_lut") or None,
                        input_format=raw.get("input_format") or None,
-                       specs=specs, labels=labels[:len(specs)])
+                       specs=specs, labels=labels[:len(specs)], intents=intents,
+                       # Missing key -> the default, same as every field added
+                       # after the first sessions were written. An older session
+                       # opens balanced, which is what a new one would do.
+                       auto_balance=bool(raw.get("auto_balance", True)))
         # ValueError covers JSONDecodeError and pydantic's ValidationError; TypeError
         # covers a session.json whose shape is wrong rather than merely incomplete.
         # Distinguished from "missing" above because the advice differs: a corrupt

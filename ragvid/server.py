@@ -23,8 +23,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .errors import InputError, ProviderError, RagvidError, SessionNotFound
+from .intent import Intent
 from .platform import data_dir, is_windows
-from .project import Project
+from .project import Project, balance_text, intent_view
 from .session import Session
 from .spec import GradeSpec
 
@@ -38,7 +39,7 @@ MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # the server is still running the Python it was started with -- which otherwise
 # shows up as fields silently missing and routes 404ing, with nothing on screen
 # to explain it.
-API_VERSION = 7
+API_VERSION = 8
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -175,6 +176,15 @@ def _state_json() -> dict:
         "history_depth": len(p.history),
         "steps": p.steps,
         "spec": p.spec.model_dump() if p.is_planned else None,
+        # null whenever the grade did not come from typed verbs (photo match,
+        # refine, or a provider on the direct path). The page must degrade to
+        # `spec.rationale`, not render an empty list.
+        "intent": intent_view(p.intent),
+        # Auto-balance: whether it is on, and what it does to THIS clip in its
+        # own words ("" when there is nothing to correct). Both, because the UI
+        # shows one row that is the report and the off switch at once.
+        "auto_balance": p.auto_balance,
+        "balance": balance_text(stats),
         "stats": stats.model_dump(),
         "input_lut": p.input_lut,
         "input_format": p.input_format,
@@ -326,6 +336,42 @@ def r_spec(req, q):
         raise InputError("<spec>", str(exc)) from exc
     with LOCK:
         _project().set_spec(spec)
+        return _mutated()
+
+
+def r_intent(req, q):
+    """Re-compile the grade from an edited Intent — the per-item strength path.
+
+    The whole point of roadmap C4: the browser sends back the same `intent`
+    object /api/state handed it, with one op's `amount` changed or the op gone
+    entirely, and the numbers are re-derived from the clip's measurements by
+    compile_intent. Nothing here nudges a spec field.
+    """
+    raw = _json_body(req).get("intent")
+    if not isinstance(raw, dict):
+        raise InputError("<body>", "missing 'intent' object")
+    try:
+        # Extra keys are ignored by pydantic, so the page can post the same
+        # object it received -- `text` and all -- rather than stripping it.
+        intent = Intent(**raw)
+    except Exception as exc:  # a verb outside the vocabulary -> 400, not a 500
+        raise InputError("<intent>", str(exc)) from exc
+    with LOCK:
+        _project().set_intent(intent)
+        return _mutated()
+
+
+def r_balance(req, q):
+    """Turn auto-balance on or off (roadmap A6).
+
+    Re-compiles the current grade when there is an Intent behind it, so the
+    switch is something you see rather than a preference that lands next time.
+    """
+    on = _json_body(req).get("on")
+    if not isinstance(on, bool):
+        raise InputError("<body>", "expected {\"on\": true|false}")
+    with LOCK:
+        _project().set_auto_balance(on)
         return _mutated()
 
 
@@ -570,6 +616,8 @@ ROUTES = {
     ("POST", "/api/reference"): r_reference,
     ("POST", "/api/refine"): r_refine,
     ("POST", "/api/spec"): r_spec,
+    ("POST", "/api/intent"): r_intent,
+    ("POST", "/api/balance"): r_balance,
     ("POST", "/api/undo"): r_undo,
     ("POST", "/api/close"): r_close,
     ("POST", "/api/reset"): r_reset,

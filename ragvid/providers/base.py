@@ -55,9 +55,31 @@ def load_env(path: Path = ENV_PATH) -> None:
 
 @runtime_checkable
 class Provider(Protocol):
+    """What ragvid needs from an endpoint. Two calls, one capability flag.
+
+    `plan` is the original path: 43 numbers in, a GradeSpec out.
+
+    `plan_json` is the intent path (roadmap A1) and returns a plain dict against
+    a caller-supplied schema, because Intent is not a GradeSpec and the protocol
+    should not have to know about either. It exists so vibe.ask_intent can stay
+    one call instead of a dialect branch: the Anthropic SDK constrains output
+    with `output_config`, the OpenAI-compatible ones with `response_format`, and
+    only the provider knows which it speaks.
+
+    `schema_enforced` is the routing question, asked once: CAN this endpoint
+    constrain decoding to a schema? Only then may plan_json be called. Below
+    that rung a reply is prompt-coaxed JSON that parses and lies, and a
+    silently-wrong Intent compiles to a plausible grade nobody asked for -- so
+    those endpoints keep the direct path instead. It is a live property, not a
+    label: openai_compat lowers it if an endpoint rejects the format outright.
+    """
+
     name: str
+    schema_enforced: bool
 
     def plan(self, system: str, user: str) -> GradeSpec: ...
+
+    def plan_json(self, system: str, user: str, schema: dict) -> dict: ...
 
 
 # ---- the catalog ----------------------------------------------------------
@@ -78,6 +100,11 @@ class ProviderInfo:
 
     It is the STARTING rung, not a promise: OpenAICompatProvider steps down a
     rung whenever an endpoint rejects the format outright.
+
+    `structured == "json_schema"` is this catalog row's claim to the top rung,
+    which is what a built provider reports as Provider.schema_enforced. The
+    Anthropic row sits there too and reaches it through a different SDK, so ask
+    a provider for `schema_enforced` and a catalog row for `structured`.
     """
 
     name: str

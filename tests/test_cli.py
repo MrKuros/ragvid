@@ -59,7 +59,10 @@ def calls(tmp_path, monkeypatch):
     monkeypatch.setattr("ragvid.probe.probe_video", rec("probe_video", STATS))
     monkeypatch.setattr("ragvid.probe.probe_image", rec("probe_image", STATS))
     monkeypatch.setattr("ragvid.match.match_reference", rec("match_reference", GradeSpec(temperature=800, rationale="matched")))
-    monkeypatch.setattr("ragvid.vibe.plan_vibe", rec("plan_vibe", GradeSpec(contrast=0.4, rationale="gloomy")))
+    # plan_vibe returns (spec, intent); None is the direct path, which is what a
+    # fake with no schema-enforcing endpoint behind it stands in for.
+    monkeypatch.setattr("ragvid.vibe.plan_vibe",
+                        rec("plan_vibe", (GradeSpec(contrast=0.4, rationale="gloomy"), None)))
     monkeypatch.setattr("ragvid.refine.refine_spec", rec("refine_spec", GradeSpec(contrast=0.1, rationale="less")))
     monkeypatch.setattr("ragvid.lut.bake_cube", rec("bake_cube", None))
     monkeypatch.setattr("ragvid.render.render_preview", rec("render_preview", None))

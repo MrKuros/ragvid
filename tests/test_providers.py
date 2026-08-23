@@ -17,6 +17,7 @@ from ragvid.intent import AMOUNTS, OPS, STRENGTHS, TARGETS, Intent, Op
 from ragvid.probe import ClipStats
 from ragvid.providers.base import CATALOG, DEFAULTS, describe, get_provider, load_env
 from ragvid.providers.groq import FALLBACK_MODEL, GroqProvider, parse_reset
+from ragvid.providers.openai_compat import parse_json_reply
 from ragvid.refine import refine_spec
 from ragvid.spec import RGB, GradeSpec
 from ragvid.vibe import (
@@ -49,9 +50,14 @@ CANNED = GradeSpec(
 
 
 class FakeProvider:
-    """Records the prompts it was handed and returns a canned spec."""
+    """Records the prompts it was handed and returns a canned spec.
+
+    schema_enforced False, so plan_vibe routes it to the direct path -- which is
+    what every test below that asserts on the 43-field prompt relies on.
+    """
 
     name = "fake"
+    schema_enforced = False
 
     def __init__(self, spec: GradeSpec = CANNED):
         self.spec = spec
@@ -61,6 +67,11 @@ class FakeProvider:
     def plan(self, system: str, user: str) -> GradeSpec:
         self.system, self.user = system, user
         return self.spec
+
+    def plan_json(self, system: str, user: str, schema: dict) -> dict:
+        # Satisfies the protocol and nothing else: an endpoint that cannot
+        # enforce a schema must raise here rather than answer with coaxed JSON.
+        raise ProviderError(self.name, "cannot constrain output to a schema")
 
 
 # ---- system prompt --------------------------------------------------------
@@ -179,7 +190,7 @@ def test_plan_vibe_prompt_carries_the_vibe_and_the_measured_stats():
 
 
 def test_plan_vibe_returns_the_provider_spec():
-    assert plan_vibe("gloomy", STATS, provider=FakeProvider()) == CANNED
+    assert plan_vibe("gloomy", STATS, provider=FakeProvider()) == (CANNED, None)
 
 
 # ---- refine_spec ----------------------------------------------------------
@@ -216,23 +227,31 @@ def _json_block(text: str) -> str:
 
 
 class FakeIntentProvider:
-    """A provider whose CLIENT is faked, because ask_intent talks to the
-    endpoint directly — Provider.plan() is typed to return a GradeSpec and
-    cannot carry an Intent (see ask_intent's ponytail note)."""
+    """Answers Provider.plan_json with the next scripted reply.
+
+    The replies are scripted as TEXT and judged by parse_json_reply — the same
+    function every real plan_json ends in — so a reply that is not an intent
+    fails here exactly the way it fails against a real endpoint.
+    """
 
     name = "fake"
     model = "fake-model"
+    schema_enforced = True
 
     def __init__(self, script):
-        self.client = _fake(script)
+        self.script = list(script)
+        self.calls: list[dict] = []
 
-    @property
-    def calls(self):
-        return self.client.calls
+    def plan(self, system: str, user: str) -> GradeSpec:
+        raise AssertionError("the intent path must never fall back to plan()")
+
+    def plan_json(self, system: str, user: str, schema: dict) -> dict:
+        self.calls.append({"system": system, "user": user, "schema": schema})
+        return parse_json_reply(self.name, self.script.pop(0), schema)
 
 
-def _intent_reply(intent: Intent):
-    return _text(intent.model_dump_json())
+def _intent_reply(intent: Intent) -> str:
+    return intent.model_dump_json()
 
 
 def test_the_intent_prompt_explains_every_word_the_model_can_emit():
@@ -259,16 +278,11 @@ def test_ask_intent_sends_the_strict_schema_and_only_the_sentence():
     assert ask_intent("warm it up", provider=p) == want
 
     sent = p.calls[0]
-    assert sent["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "grade_intent",
-            "strict": True,
-            "schema": Intent.llm_json_schema(),
-        },
-    }
-    assert sent["messages"][0]["content"] == INTENT_SYSTEM
-    assert "warm it up" in sent["messages"][1]["content"]
+    # The schema is an ARGUMENT now: the provider decides how to constrain
+    # decoding with it, because the two SDKs spell that differently.
+    assert sent["schema"] == Intent.llm_json_schema()
+    assert sent["system"] == INTENT_SYSTEM
+    assert "warm it up" in sent["user"]
 
 
 def test_the_intent_request_never_shows_the_model_a_measurement():
@@ -277,14 +291,16 @@ def test_the_intent_request_never_shows_the_model_a_measurement():
     about magnitude, which is the job this path took away from it."""
     p = FakeIntentProvider([_intent_reply(Intent())])
     plan_intent("rainy tokyo night", STATS, provider=p)
-    everything = "".join(m["content"] for m in p.calls[0]["messages"])
+    everything = p.calls[0]["system"] + p.calls[0]["user"]
     assert "0.2137" not in everything and "0.1735" not in everything
 
 
 def test_plan_intent_compiles_the_reply_against_the_measured_clip():
     reply = Intent(ops=[Op(op="warmth", dir="up", amount="moderate")], strength="moderate")
-    spec = plan_intent("warmer, half strength", STATS, provider=FakeIntentProvider(
+    spec, intent = plan_intent("warmer, half strength", STATS, provider=FakeIntentProvider(
         [_intent_reply(reply)]))
+
+    assert intent == reply                   # the verbs come back beside the spec
 
     assert spec.temperature > 0.0            # the verb became a number
     assert spec.look_mix == 0.65             # ... and so did the strength word
@@ -294,7 +310,8 @@ def test_plan_intent_compiles_the_reply_against_the_measured_clip():
 
 def test_an_empty_intent_is_the_identity_grade():
     """A model that answers "nothing to do" must not be able to invent a look."""
-    spec = plan_intent("do nothing", STATS, provider=FakeIntentProvider([_intent_reply(Intent())]))
+    spec, _ = plan_intent("do nothing", STATS,
+                          provider=FakeIntentProvider([_intent_reply(Intent())]))
     assert spec.is_identity()
 
 
@@ -308,7 +325,7 @@ def test_a_reply_that_is_not_an_intent_fails_like_the_direct_path(body, match):
     """Same three failures openai_compat._parse names, for the same reason: every
     field of Intent has a default, so a half-answer would quietly compile to a
     grade that does less than the user asked for instead of raising."""
-    p = FakeIntentProvider([_text(body)])
+    p = FakeIntentProvider([body])
     with pytest.raises(ProviderError, match=match) as info:
         ask_intent("warmer", provider=p)
     assert info.value.provider == "fake"
@@ -319,13 +336,15 @@ def test_plan_vibe_routes_a_schema_endpoint_to_the_intent_path():
     23/23 checks and 10/10 prompts for intent against 21/23 and 8/10 direct, at
     two-fifths of the tokens."""
     p = FakeIntentProvider([_intent_reply(Intent(ops=[Op(op="warmth", dir="up")]))])
-    p.structured = "json_schema"
+    assert p.schema_enforced is True                   # what plan_vibe routes on
 
-    spec = plan_vibe("warmer", STATS, provider=p)
+    spec, intent = plan_vibe("warmer", STATS, provider=p)
 
-    assert p.calls[0]["messages"][0]["content"] == INTENT_SYSTEM
+    assert p.calls[0]["system"] == INTENT_SYSTEM
     assert spec.temperature > 0.0
     assert spec.rationale.startswith("Warmed it up")   # describe(), not the model
+    # C3: the verbs survive the call, so a UI can list them and re-compile one.
+    assert [op.op for op in intent.ops] == ["warmth"]
 
 
 def test_plan_vibe_falls_back_to_the_direct_path_below_that_rung():
@@ -333,12 +352,11 @@ def test_plan_vibe_falls_back_to_the_direct_path_below_that_rung():
     decoding to the Intent schema still has to produce a grade, and the 43-field
     path is what works there. Same GradeSpec out either way."""
     direct = FakeProvider()
-    direct.structured = "json_object"
 
-    assert plan_vibe("gloomy", STATS, provider=direct) == CANNED
+    # No Intent comes back from the direct path, and None is the contract a UI
+    # degrades on -- it has to fall back to spec.rationale, not an empty list.
+    assert plan_vibe("gloomy", STATS, provider=direct) == (CANNED, None)
     assert direct.system == SYSTEM
-    # ... and an Anthropic-style provider, which has no `structured` at all.
-    assert plan_vibe("gloomy", STATS, provider=FakeProvider()) == CANNED
 
 
 def test_the_direct_path_is_still_reachable_by_name():
@@ -363,7 +381,7 @@ INSANE = GradeSpec.model_construct(
 
 
 @pytest.mark.parametrize("call", [
-    lambda p: plan_vibe("gloomy", STATS, provider=p),
+    lambda p: plan_vibe("gloomy", STATS, provider=p)[0],
     lambda p: refine_spec(CANNED, "less blue", STATS, provider=p),
 ])
 def test_insane_model_output_is_clamped(call):
@@ -380,7 +398,7 @@ def test_insane_model_output_is_clamped(call):
 
 
 def test_a_valid_spec_survives_sanitizing_unchanged():
-    assert plan_vibe("gloomy", STATS, provider=FakeProvider()) == CANNED
+    assert plan_vibe("gloomy", STATS, provider=FakeProvider()) == (CANNED, None)
 
 
 # ---- .env loading ---------------------------------------------------------

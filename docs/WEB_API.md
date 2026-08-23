@@ -35,8 +35,13 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
   "can_undo": true,
   "history_depth": 3,
   "steps": [{"index":0,"label":"warm and nostalgic","rationale":"...","current":false}],
-  "api_version": 7,
-  "version": 7,
+  "intent": {"strength": "full",
+             "ops": [{"op":"warmth","dir":"up","amount":"moderate","target":"",
+                      "text":"warmed it up"}]},
+  "auto_balance": true,
+  "balance": "neutralised a green cast, set the black point",
+  "api_version": 8,
+  "version": 8,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,
             "contrast": 0, "pivot": 0.435,
@@ -68,6 +73,52 @@ rather than left to `/api/providers`, so an opening screen can prompt for a key
 without a second round trip — a first-time user does not know one is needed, and
 finds out by typing a mood and getting an error.
 When open but not yet graded: `"planned": false`, `"spec": null`.
+
+### The intent object
+
+`intent` is the typed verbs the current grade was compiled from — the whole
+point of the intent path (`ragvid/intent.py`, roadmap A1). It is **`null`
+whenever there are none**, which is the common case, not an edge one: a photo
+match, a refine, a moved slider and any provider on the direct path all produce
+a spec no verb list describes. A client must fall back to `spec.rationale` and
+must never render an empty list.
+
+| Key | Meaning |
+|---|---|
+| `strength` | `"subtle"` / `"moderate"` / `"strong"` / `"full"` — how much of the whole look survives. It is what `spec.look_mix` was compiled from (0.4 / 0.65 / 0.85 / 1.0). |
+| `ops[]` | One requested move each: `op` (one of sixteen verbs), `dir` (`"up"`/`"down"`), `amount` (`"subtle"`/`"moderate"`/`"strong"`), `target` (`""` or a colour). |
+| `ops[].text` | The move as English, e.g. `"cooled it down"` — server-rendered, so a client never has to know the vocabulary. It carries **no** magnitude; the magnitude is `amount`, and printing both means they disagree for as long as a drag lasts. |
+
+`text` is the one key `POST /api/intent` does not read. It is ignored on the way
+back in, so a client posts the object it was given with one `amount` changed
+rather than reconstructing anything.
+
+**There are no floats anywhere in an intent, deliberately.** Every number in the
+grade is computed from the clip's measured statistics by `compiler.py`. A client
+that wants to change how far a move goes changes `amount`, not a spec field —
+that is what makes the change land correctly on *this* footage.
+
+### Auto-balance
+
+`auto_balance` is one boolean per project, on by default, persisted in the
+session. When on, the clip is neutralised from its own measurements — cast and
+black point — *before* the creative look, so the same sentence lands the same
+way on two differently-lit shots.
+
+`balance` is what that pass does to **this** clip, in its own words, or `""`
+when there is nothing to correct. It is computed from the measurements alone,
+so it is present whether the switch is on or off — a client shows it as the
+report when on, and as what would happen when off.
+
+Two things a client must not get wrong:
+
+- It applies to the **intent path only**. Auto-balance is a compiler pass and
+  the direct path has no compiler, so on a `json_object` endpoint the flag is
+  stored and does nothing. Do not offer it as a control that appears to work
+  there.
+- **It has to be visible.** A correction nobody asked for that silently fights
+  the user's own grade is worse than no correction. `balance` is the sentence
+  that prevents that; show it, and put the off switch on it.
 
 ### The spec object
 
@@ -119,7 +170,9 @@ All return the same state object as `GET /api/state`.
 | `POST` | `/api/vibe` | `{"vibe": "gloomy"}` | Needs a provider key. Slow (network). |
 | `POST` | `/api/reference` | multipart `file`, or `{"path": "..."}` | Offline, no key, fast. |
 | `POST` | `/api/refine` | `{"instruction": "less blue"}` | Requires `planned`. Slow (network). |
-| `POST` | `/api/spec` | `{"spec": {...}}` | The slider path. Fast, no network. Full spec object — omitted keys reset to identity, this is not a patch. |
+| `POST` | `/api/intent` | `{"intent": {"ops":[...], "strength":"full"}}` | The per-item strength path. Re-**compiles** the grade from the verbs against the cached stats — fast, no network. Send back the `intent` from `/api/state` with one `amount` changed, or with an op dropped to remove that move. A verb outside the vocabulary is a `400`. |
+| `POST` | `/api/spec` | `{"spec": {...}}` | The raw-spec path: the only way to reach a field no verb covers (`pivot`, per-band `lum`). Fast, no network. Full spec object — omitted keys reset to identity, this is not a patch. **Drops the intent**, since 43 numbers are not described by any verb list; `/api/state` then returns `"intent": null`. |
+| `POST` | `/api/balance` | `{"on": true}` | Turns auto-balance on or off. Re-compiles the current grade when there is an `intent` behind it, so the switch is something you see; a spec from anywhere else is left alone, because a balance already baked into 43 numbers cannot be decomposed back out. |
 | `POST` | `/api/undo` | — | Steps back one, *including* undoing the first grade back to the ungraded clip. `409` only when there is nothing left. |
 | `POST` | `/api/close` | — | Drops the project; back to the empty state. |
 | `POST` | `/api/revert` | `{"index": 0}` | Jump back to any step. `-1` is the ungraded clip. Undo is `revert` to the previous index. |

@@ -113,3 +113,46 @@ def test_input_format_round_trips_and_an_older_session_still_loads():
     older = Session.load()
     assert older.input_format is None
     assert older.input_lut == "/w/.ragvid/log_slog3.cube"
+
+
+def test_an_intent_round_trips_and_an_older_session_still_loads():
+    """The verbs behind a grade are stored per spec, exactly like `labels` --
+    and, exactly like labels, every session already on disk predates the key."""
+    from ragvid.intent import Intent, Op
+
+    intent = Intent(ops=[Op(op="warmth", dir="up", amount="subtle")], strength="moderate")
+    s = Session.create("clip.mp4", _stats())
+    s.push(GradeSpec(temperature=400.0), "warmer", intent)
+    s.push(GradeSpec(contrast=0.3), "punchier")      # no intent: a photo match
+    s.save()
+
+    got = Session.load()
+    assert got.intents == [intent, None]
+    assert got.intent is None                        # the CURRENT grade has none
+    assert got.pop() is True
+    assert got.intent == intent                      # ... and undo brings it back
+
+    # A session written before the intent path. It must open, and every grade in
+    # it must read as "no verbs", not as a missing key.
+    raw = json.loads(Session.path().read_text())
+    del raw["intents"]
+    Session.path().write_text(json.dumps(raw))
+    older = Session.load()
+    assert older.intents == [None, None]
+    assert older.intent is None
+    assert len(older.specs) == 2
+
+
+def test_auto_balance_round_trips_and_defaults_on_for_an_older_session():
+    s = Session.create("clip.mp4", _stats())
+    assert s.auto_balance is True
+    s.auto_balance = False
+    s.save()
+    assert Session.load().auto_balance is False
+
+    # A session written before auto-balance existed opens the way a new one
+    # would: on. A missing key is not "off".
+    raw = json.loads(Session.path().read_text())
+    del raw["auto_balance"]
+    Session.path().write_text(json.dumps(raw))
+    assert Session.load().auto_balance is True

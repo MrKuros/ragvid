@@ -120,25 +120,21 @@
   .histhead { font-size:11.5px; letter-spacing:.07em; text-transform:uppercase;
               color:var(--dim); padding:0 2px; }
 
-  /* ---- manual ---- */
-  details.manual { border-top:1px solid var(--line); padding-top:10px; }
-  details.manual summary { cursor:pointer; color:var(--dim); font-size:13.5px;
-                           list-style:none; user-select:none; }
-  details.manual summary::-webkit-details-marker { display:none; }
-  details.manual summary::before { content:"▸ "; }
-  details.manual[open] summary::before { content:"▾ "; }
-  .sliders { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
-             gap:8px 26px; padding:12px 2px 4px; }
-  .slider { display:grid; grid-template-columns:120px 1fr 46px; align-items:center;
-            gap:10px; font-size:13px; }
-  /* A range input's min-content width is ~130px and a 1fr track will not
-     shrink below it, so without this the rows overflow their grid cell and the
-     value collides with the next label. */
-  .slider input { min-width:0; width:100%; }
-  .slider input[type=color] { height:24px; padding:0; background:none;
-                              border:1px solid var(--line); border-radius:5px; }
-  .slider span:first-child { color:var(--dim); }
-  .slider output { font-variant-numeric:tabular-nums; text-align:right; color:var(--dim); }
+  /* ---- what it did ---- */
+  /* Same shape as .hist right below it -- a capped, scrolling list of rows --
+     because it is the same kind of thing: a short list you read, not a panel
+     you operate. This is the entire manual control surface now. */
+  .did { display:flex; flex-direction:column; gap:2px; max-height:132px;
+         overflow:auto; padding:2px 0; }
+  .did label { display:grid; grid-template-columns:1fr 130px 60px; gap:10px;
+               align-items:center; padding:3px 8px; border-radius:5px;
+               font-size:13.5px; color:var(--dim); }
+  .did label:hover { background:#26262c; color:var(--ink); }
+  .did label.off .what { text-decoration:line-through; opacity:.6; }
+  /* A range input's min-content width is ~130px and a 1fr track will not shrink
+     below it, so the track column is fixed and the sentence gets the fraction. */
+  .did input { min-width:0; width:100%; }
+  .did output { font-variant-numeric:tabular-nums; text-align:right; }
 
   /* ---- banner ---- */
   #banner { display:none; margin:0 18px; padding:11px 14px; border-radius:var(--r);
@@ -287,6 +283,15 @@
 
     <p class="said" id="said"></p>
 
+    <!-- What the grade actually does, one line per move, drawn straight from
+         the typed verbs it was compiled from. Hidden on the direct path, where
+         the model authored 43 numbers and there are no verbs to list -- #said
+         above carries the model's own sentence there instead. -->
+    <div id="didWrap" hidden>
+      <div class="histhead">What it did</div>
+      <div class="did" id="did"></div>
+    </div>
+
     <!-- Log footage. One control, and the answer is something a person knows
          from the shoot rather than a file they have to go and find: ragvid
          bakes the conversion for the five formats below. The names are here and
@@ -307,8 +312,11 @@
       </select>
     </p>
 
-    <!-- "Too much" is the most common note. Answering it used to mean
-         re-prompting; now it is one slider, outside the disclosure. -->
+    <!-- "Too much" is the most common note, and on the intent path it is the
+         last row of the list above ("the whole look"). This continuous slider
+         is the DIRECT path's version of it: no verbs there, so it writes
+         spec.look_mix straight through /api/spec. Only ever one of the two on
+         screen. -->
     <div class="bar" id="strengthRow" hidden>
       <span>Strength</span>
       <input type="range" id="strength" min="0" max="1" step="0.01" value="1"
@@ -333,11 +341,6 @@
         </span>
       </span>
     </div>
-
-    <details class="manual" id="manual">
-      <summary>Adjust manually</summary>
-      <div id="sliders"></div>
-    </details>
   </div>
 </section>
 
@@ -383,7 +386,7 @@ const $ = (id) => document.getElementById(id);
 // Must match server.py's API_VERSION. The HTML is re-read on every request but
 // the Python is not, so an old `ragvid serve` will happily serve this file and
 // then answer with a contract it does not implement.
-const EXPECTED_API = 7;
+const EXPECTED_API = 8;
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
@@ -508,17 +511,22 @@ function render(state) {
   $("ask").placeholder = S.planned
     ? "What should change? — e.g. warmer, less contrast"
     : "Describe the look you want — e.g. warm and nostalgic";
-  $("said").innerHTML = S.planned && S.spec && S.spec.rationale
+  // Null unless the grade was compiled from typed verbs. Everything below is
+  // the same fact twice over: with an intent the list says what it did and
+  // carries the controls; without one the model's own sentence is all there is.
+  const intent = S.planned ? S.intent : null;
+  $("said").hidden = !!intent;
+  $("said").innerHTML = !intent && S.planned && S.spec && S.spec.rationale
     ? `<b>Applied:</b> ${escapeHtml(S.spec.rationale)}` : "";
 
-  $("strengthRow").hidden = !S.planned;
+  $("strengthRow").hidden = !S.planned || !!intent;
   if (S.planned) {
     $("strength").value = S.spec.look_mix;
     $("strengthOut").textContent = pct(S.spec.look_mix);
   }
 
   buildHistory();
-  buildSliders();
+  buildDid(intent);
   syncEnabled();
   loadFrames();
 }
@@ -567,6 +575,7 @@ function syncEnabled() {
   // render() (which rebuilds them) while `busy` is still true, so a build-time
   // `disabled = busy` left every row dead until a page reload.
   for (const b of $("hist").children) b.disabled = busy || b.classList.contains("now");
+  for (const i of $("did").querySelectorAll("input")) i.disabled = !on;
   $("hint").textContent = S.planned ? "hold to see original" : "no look applied yet";
 }
 
@@ -831,153 +840,97 @@ $("pathInput").addEventListener("keydown", (e) => {
 });
 $("browseClose").onclick = () => $("browser").close();
 
-// ---- manual controls ------------------------------------------------------
-// Plain names. Nobody outside a grading suite says "saturation slope offset".
-// Grouped by what someone WANTS, not by what the maths is called: three knobs
-// in the open, everything else one disclosure deeper. "Strength" is not here at
-// all -- it has its own always-visible row above, because "too much" is the
-// note people give most often.
+// ---- what it did, and adjusting it ----------------------------------------
+// This is the whole manual control surface. It REPLACES a 43-slider panel, and
+// the difference is not the count: a row here is a MOVE the grade makes, in the
+// words the model chose ("cooled it down"), and dragging it re-compiles the
+// grade from the verbs against this clip's measurements. Nothing in the browser
+// nudges a spec field any more.
 //
-// A key is a dotted path into the spec. The old flat `{ ...S.spec, [key]: v }`
-// spread cannot reach effects.grain or hue_red.sat, so those controls would
-// silently no-op; setAt() walks the path instead.
-const GROUPS = [
-  [null, [
-    ["exposure",          "Brightness",  -4, 4, 0.05],
-    ["effects.grain",     "Grain",        0, 1, 0.01],
-    ["effects.softness",  "Softness",    -1, 1, 0.01],
-  ]],
-  ["Colour", [
-    ["saturation",        "Colour",       0, 4, 0.01],
-    // step "any": Warmth is the one knob whose values are not multiples of a tidy
-    // step (the matcher solves them), and a coarse step snapped the thumb away
-    // from the number in the label right next to it.
-    ["temperature",       "Warmth",   -6000, 6000, "any"],
-    ["tint",              "Tint",        -2, 2, 0.01],
-    ["contrast",          "Contrast",    -1, 1, 0.01],
-    ["highlight_rolloff", "Protect highlights", 0, 1, 0.01],
-  ]],
-  ["Shadows & highlights", [
-    ["shadow_tint",       "Shadow colour",    "rgb"],
-    ["shadow_lift",       "Shadows",     -0.5, 0.5, 0.01],
-    ["highlight_tint",    "Highlight colour", "rgb"],
-    ["highlight_lift",    "Highlights",  -0.5, 0.5, 0.01],
-  ]],
-  // sat only. `lum` per band exists in the spec and the LLM can set it -- the
-  // clone preserves it -- but twelve hue knobs is a cockpit.
-  ["Individual colours", [
-    ["hue_red.sat",       "Reds",         0, 4, 0.01],
-    ["hue_yellow.sat",    "Yellows",      0, 4, 0.01],
-    ["hue_green.sat",     "Greens",       0, 4, 0.01],
-    ["hue_cyan.sat",      "Cyans",        0, 4, 0.01],
-    ["hue_blue.sat",      "Blues",        0, 4, 0.01],
-    ["hue_magenta.sat",   "Magentas",     0, 4, 0.01],
-  ]],
-  ["Film & lens", [
-    ["effects.glow",      "Glow",         0, 1, 0.01],
-    ["effects.vignette",  "Vignette",    -1, 1, 0.01],
-    ["effects.denoise",   "Denoise",      0, 1, 0.01],
-    ["effects.fringe",    "Fringing",    -1, 1, 0.01],
-  ]],
-];
+// WHAT THAT GIVES UP, deliberately: a GradeSpec field no verb reaches -- `pivot`,
+// the per-band `lum`, an exact number typed into any field -- is no longer
+// reachable from the page. That is the point of the trade, and the escape hatch
+// is not a second panel but `POST /api/spec`, which still takes a whole spec and
+// is what the direct path's Strength slider uses. A cockpit nobody can see is
+// not simpler than no cockpit; carrying both was the complexity this tool exists
+// to avoid.
+//
+// 0 is "off" and is how a move is removed. A slider that already reads the
+// magnitude does not also need a delete button next to it.
+const AMOUNTS = ["off", "subtle", "moderate", "strong"];
+const AMOUNT_WORDS = ["off", "a little", "normal", "a lot"];
+// The whole-look mix, as one more row. The percentages are intent.py's
+// STRENGTH_MIX -- a label that disagrees with the grade is a bug.
+const STRENGTHS = ["subtle", "moderate", "strong", "full"];
+const STRENGTH_WORDS = ["40%", "65%", "85%", "100%"];
 
-const getAt = (o, path) => path.split(".").reduce((v, k) => v[k], o);
-function setAt(o, path, v) {
-  const k = path.split(".");
-  k.slice(0, -1).reduce((x, n) => x[n], o)[k.at(-1)] = v;
-}
+let didFor = null;
 
-// One commit path for every control, flat or nested. structuredClone keeps the
-// nested objects from being shared with S.spec.
-function commit(pairs) {
-  // Write into S.spec as well as the outgoing copy. S.spec only refreshes when
-  // the previous POST returns, so two controls committed inside that window
-  // both cloned the same stale spec and the later one silently reverted the
-  // earlier one's field.
-  pairs.forEach(([path, v]) => setAt(S.spec, path, v));
-  const spec = structuredClone(S.spec);
-  slidersFor = null;
-  post("/api/spec", { spec });
-}
-
-// A tint is a signed offset per channel; a colour picker is unsigned. Mid-grey
-// is the neutral: spec.py strips a tint's own luma, so r == g == b changes
-// nothing at all, which is exactly what a user expects "no colour" to mean.
-// 1.0, i.e. +/-0.5 per channel -- the full range sanitize() accepts. A narrower
-// range made the swatch lossy: re-picking the identical-looking colour shrank a
-// corpus tint from 0.5 to 0.3 and moved the frame by 1.7/255.
-const TINT_RANGE = 1.0;
-const hex2 = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
-const tintToHex = (t) => "#" + ["r", "g", "b"].map((c) => hex2((t[c] / TINT_RANGE + 0.5) * 255)).join("");
-function hexToTint(hex) {
-  const v = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
-  // Snap true grey to exact zero so nudging a swatch back to neutral really
-  // does return the spec to identity rather than leaving 0.001 behind.
-  if (v[0] === v[1] && v[1] === v[2]) return [0, 0, 0];
-  return v.map((n) => (n / 255 - 0.5) * TINT_RANGE);
-}
-
-let slidersFor = null;
-const openGroups = new Set();       // survives the rebuild after every commit
-
-function buildSliders() {
-  if (!S.planned) { $("sliders").innerHTML = "<p class='empty-dir'>Apply a look first.</p>"; return; }
-  if (slidersFor === S.version) return;         // don't rebuild mid-drag
-  slidersFor = S.version;
-  $("sliders").innerHTML = "";
-  GROUPS.forEach(([name, knobs]) => {
-    const grid = document.createElement("div");
-    grid.className = "sliders";
-    knobs.forEach((k) => grid.append(k[2] === "rgb" ? swatchRow(k) : sliderRow(k)));
-    if (!name) return $("sliders").append(grid);
-    const d = document.createElement("details");
-    d.className = "manual";
-    d.open = openGroups.has(name);
-    d.innerHTML = "<summary></summary>";
-    d.firstChild.textContent = name;
-    d.ontoggle = () => d.open ? openGroups.add(name) : openGroups.delete(name);
-    d.append(grid);
-    $("sliders").append(d);
+function buildDid(intent) {
+  $("didWrap").hidden = !intent;
+  if (!intent) return;
+  if (didFor === S.version) return;             // don't rebuild mid-drag
+  didFor = S.version;
+  const box = $("did");
+  box.innerHTML = "";
+  // Auto-balance, as a row rather than a checkbox anywhere else. It IS a thing
+  // the grade did — it runs before the verbs — so it belongs in the list that
+  // says what the grade did, and its off switch then costs no screen a reader
+  // was not already looking at. The text is the compiler's own report when it
+  // corrected something ("neutralised a green cast, set the black point"), and
+  // the setting's name when it is off or found nothing to do.
+  box.append(didRow(S.auto_balance && S.balance ? S.balance : "balanced the colour first",
+                    S.auto_balance ? 1 : 0, ["off", "on"],
+                    (n) => post("/api/balance", { on: n === 1 })));
+  intent.ops.forEach((op, i) => {
+    box.append(didRow(op.text, AMOUNTS.indexOf(op.amount), AMOUNT_WORDS, (n) => {
+      // n === 0 drops the op outright; the compiler starts from identity, so a
+      // dropped move leaves no trace of itself in the next spec.
+      const ops = intent.ops
+        .map((o, j) => (j === i ? { ...o, amount: AMOUNTS[n] } : o))
+        .filter((o, j) => j !== i || n > 0);
+      sendIntent({ ...intent, ops });
+    }));
   });
+  box.append(didRow("the whole look", STRENGTHS.indexOf(intent.strength), STRENGTH_WORDS,
+                    (n) => sendIntent({ ...intent, strength: STRENGTHS[n] })));
+  box.scrollTop = 0;
 }
 
-function sliderRow([key, label, min, max, step]) {
-  const value = getAt(S.spec, key);
-  const row = document.createElement("label");
-  row.className = "slider";
-  row.innerHTML = `<span></span>
-    <input type="range" min="${min}" max="${max}" step="${step}" value="${value}">
-    <output>${fmtNum(value)}</output>`;
-  const [name, input, out] = row.children;
-  name.textContent = label;
-  input.addEventListener("input", () => { out.textContent = fmtNum(input.value); });
-  // commit on release, not on every pixel of the drag
-  input.addEventListener("change", () => commit([[key, parseFloat(input.value)]]));
-  return row;
+// The page posts back the object it was given, `text` and all -- the server
+// ignores keys Intent does not declare, so there is nothing to strip.
+function sendIntent(intent) {
+  didFor = null;
+  post("/api/intent", { intent });
 }
 
-function swatchRow([key, label]) {
+function didRow(text, value, words, onchange) {
   const row = document.createElement("label");
-  row.className = "slider";
-  row.innerHTML = `<span></span>
-    <input type="color" value="${tintToHex(getAt(S.spec, key))}">
+  row.innerHTML = `<span class="what"></span>
+    <input type="range" min="0" max="${words.length - 1}" step="1" value="${value}">
     <output></output>`;
-  const [name, input] = row.children;
-  name.textContent = label;
-  input.addEventListener("change", () => {
-    const [r, g, b] = hexToTint(input.value);
-    commit([[`${key}.r`, r], [`${key}.g`, g], [`${key}.b`, b]]);
-  });
+  const [what, input, out] = row.children;
+  what.textContent = text;
+  input.setAttribute("aria-label", text);
+  const show = () => {
+    out.textContent = words[input.value];
+    row.classList.toggle("off", input.value === "0" && words[0] === "off");
+  };
+  show();
+  input.addEventListener("input", show);
+  // commit on release, not on every pixel of the drag
+  input.addEventListener("change", () => onchange(parseInt(input.value, 10)));
   return row;
 }
 
-const fmtNum = (v) => Math.abs(v) >= 100 ? Math.round(v) : (+v).toFixed(2);
 const pct = (v) => `${Math.round(v * 100)}%`;
 
-// The whole-look mix, hoisted out of the disclosure: the answer to "nice, but
-// too much" should never be another round trip to the model.
+// The direct path's only control: no verbs to adjust there, so the whole-look
+// mix is written into the spec directly. S.spec is plain JSON from the server,
+// so a shallow copy with one key replaced is the whole edit.
 $("strength").addEventListener("input", (e) => { $("strengthOut").textContent = pct(e.target.value); });
-$("strength").addEventListener("change", (e) => commit([["look_mix", parseFloat(e.target.value)]]));
+$("strength").addEventListener("change", (e) =>
+  post("/api/spec", { spec: { ...S.spec, look_mix: parseFloat(e.target.value) } }));
 
 // ---- settings -------------------------------------------------------------
 // One list of services, one key box. The key box is write-only by design: a

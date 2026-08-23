@@ -903,3 +903,204 @@ def test_the_page_offers_every_format_the_module_implements(api):
     page = server.INDEX.read_text()
     for name in logspace.NAMES:
         assert f'<option value="{name}">' in page, f"{name} is not offered in the UI"
+
+
+# ---- what it did, and per-item strength (roadmap C3/C4) --------------------
+
+# Two verbs on deliberately orthogonal axes, so each one's contribution is
+# measurable in PIXELS without the other touching it: spec.apply() scales by
+# `exposure` (step 1, a pure multiply, so relative chroma is untouched) and
+# blends toward luma for `saturation` (step 4, luma-preserving, so mean
+# brightness is untouched). Asserting on spec fields instead would prove only
+# that the compiler wrote a number somewhere.
+INTENT_REPLY = {
+    "ops": [{"op": "exposure", "dir": "down", "amount": "moderate", "target": ""},
+            {"op": "saturation", "dir": "down", "amount": "moderate", "target": ""}],
+    "strength": "full",
+}
+
+
+@pytest.fixture
+def fake_intent_llm(monkeypatch) -> list:
+    """A provider on the INTENT path: it enforces a schema, so plan_vibe routes
+    to typed verbs and never calls plan()."""
+    calls: list[tuple[str, str]] = []
+
+    class FakeIntentProvider:
+        name = "fake"
+        schema_enforced = True
+
+        def plan(self, system: str, user: str) -> GradeSpec:
+            raise AssertionError("a schema endpoint must take the intent path")
+
+        def plan_json(self, system: str, user: str, schema: dict) -> dict:
+            calls.append((system, user))
+            return json.loads(json.dumps(INTENT_REPLY))   # a fresh copy per call
+
+    monkeypatch.setattr("ragvid.providers.get_provider", lambda *a, **kw: FakeIntentProvider())
+    return calls
+
+
+def _pixels(png: bytes) -> tuple[float, float]:
+    """(mean luma, mean chroma relative to it) of a rendered frame."""
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    px = np.asarray(Image.open(io.BytesIO(png)).convert("RGB"), dtype=float) / 255.0
+    luma = float((px @ np.array([0.2126, 0.7152, 0.0722])).mean())
+    chroma = float((px.max(axis=2) - px.min(axis=2)).mean())
+    return luma, chroma / max(luma, 1e-6)
+
+
+def _cast(png: bytes) -> float:
+    """Mean red minus mean blue — the axis a colour cast lives on."""
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    px = np.asarray(Image.open(io.BytesIO(png)).convert("RGB"), dtype=float) / 255.0
+    means = px.reshape(-1, 3).mean(axis=0)
+    return float(means[0] - means[2])
+
+
+def _png(api: Api, state: dict) -> bytes:
+    return api.get(f"/media/frame?t=1&graded=1&v={state['version']}").body
+
+
+def _frame(api: Api, state: dict) -> tuple[float, float]:
+    return _pixels(_png(api, state))
+
+
+def test_the_intent_reaches_the_state_as_plain_sentences(api, fake_intent_llm):
+    body = api.open_clip() and api.post("/api/vibe", {"vibe": "moody"}).json
+    intent = body["intent"]
+
+    assert [o["text"] for o in intent["ops"]] == ["darkened it", "drained the colour"]
+    assert [o["amount"] for o in intent["ops"]] == ["moderate", "moderate"]
+    assert intent["strength"] == "full"
+    # No magnitude in the words: that is the control sitting next to them, and
+    # two copies of one fact disagree for as long as a drag lasts.
+    assert not any("little" in o["text"] or "a lot" in o["text"] for o in intent["ops"])
+
+
+def test_one_items_strength_moves_that_item_and_leaves_the_other_alone(api, fake_intent_llm):
+    api.open_clip()
+    state = api.post("/api/vibe", {"vibe": "moody"}).json
+    before_luma, before_chroma = _frame(api, state)
+
+    intent = state["intent"]
+    intent["ops"][0]["amount"] = "strong"          # "darkened it" -> a lot
+    state = api.post("/api/intent", {"intent": intent}).json
+    after_luma, after_chroma = _frame(api, state)
+
+    assert after_luma < before_luma - 0.02         # darker, which is what it says
+    assert abs(after_chroma - before_chroma) < 0.02  # the colour item did not move
+    assert state["intent"]["ops"][0]["amount"] == "strong"
+    assert state["history_depth"] == 2             # one undo step, like any edit
+
+
+def test_turning_an_item_off_removes_only_that_move(api, fake_intent_llm):
+    """0 on a row's slider drops the op. The compiler starts from identity, so
+    a dropped move leaves no trace of itself in the next grade."""
+    api.open_clip()
+    state = api.post("/api/vibe", {"vibe": "moody"}).json
+    before_luma, before_chroma = _frame(api, state)
+
+    intent = state["intent"]
+    del intent["ops"][1]                           # "drained the colour" -> off
+    state = api.post("/api/intent", {"intent": intent}).json
+    after_luma, after_chroma = _frame(api, state)
+
+    assert after_chroma > before_chroma + 0.02     # the colour came back
+    assert abs(after_luma - before_luma) < 0.02    # the brightness item did not move
+    assert [o["op"] for o in state["intent"]["ops"]] == ["exposure"]
+
+
+def test_the_intent_survives_undo(api, fake_intent_llm):
+    api.open_clip()
+    state = api.post("/api/vibe", {"vibe": "moody"}).json
+    intent = state["intent"]
+    intent["strength"] = "moderate"
+
+    state = api.post("/api/intent", {"intent": intent}).json
+    assert state["intent"]["strength"] == "moderate"
+    assert state["spec"]["look_mix"] == 0.65       # the word became the number
+
+    back = api.post("/api/undo").json
+    assert back["intent"]["strength"] == "full"
+    assert back["spec"]["look_mix"] == 1.0
+
+
+def test_a_direct_path_grade_has_no_intent_at_all(api, fake_llm):
+    """The honest fallback: a provider that cannot constrain decoding authored
+    numbers, so there are no verbs. `null`, never an empty list -- a page shows
+    spec.rationale instead."""
+    api.open_clip()
+    body = api.post("/api/vibe", {"vibe": "gloomy"}).json
+    assert body["intent"] is None
+    assert body["spec"]["rationale"] == "fake grade"
+
+    # Same for the offline reference match, and for a raw spec.
+    assert api.plan()["intent"] is None
+    assert api.post("/api/spec", {"spec": FAKE_SPEC.model_dump()}).json["intent"] is None
+
+
+def test_a_bad_intent_is_a_400_not_a_500(api, fake_intent_llm):
+    api.open_clip()
+    api.post("/api/vibe", {"vibe": "moody"})
+    r = api.post("/api/intent", {"intent": {"ops": [{"op": "bokeh"}], "strength": "full"}})
+    assert r.status == 400 and r.error["type"] == "InputError"
+    assert api.post("/api/intent", {"nope": 1}).status == 400
+
+
+def test_the_page_renders_the_intent_and_no_longer_ships_the_slider_panel():
+    """C4 replaced the 43-slider panel outright. Keeping both surfaces is the
+    complexity this tool exists to avoid, so the old one must be gone -- not
+    merely collapsed behind a disclosure."""
+    page = server.INDEX.read_text()
+    assert 'id="did"' in page and "/api/intent" in page
+    # The balance switch lives in that same list, not as a checkbox elsewhere.
+    assert "/api/balance" in page and 'type="checkbox"' not in page
+    for gone in ('id="sliders"', 'id="manual"', "buildSliders", "hue_magenta.sat"):
+        assert gone not in page, f"{gone} survived the C4 deletion"
+
+
+def test_auto_balance_is_on_by_default_and_reports_what_it_did(api, fake_intent_llm):
+    """A correction nobody asked for has to say so, or it silently fights the
+    grade the user is making. The sentence is the compiler's own."""
+    state = api.open_clip()
+    assert state["auto_balance"] is True
+    assert state["balance"].startswith("neutralised")   # sample.mp4 carries a cast
+
+    state = api.post("/api/vibe", {"vibe": "moody"}).json
+    assert state["auto_balance"] is True and state["balance"]
+
+
+def test_turning_auto_balance_off_changes_the_frame_and_keeps_the_verbs(api, fake_intent_llm):
+    api.open_clip()
+    state = api.post("/api/vibe", {"vibe": "moody"}).json
+    on_cast = _cast(_png(api, state))
+
+    state = api.post("/api/balance", {"on": False}).json
+    off_cast = _cast(_png(api, state))
+
+    assert state["auto_balance"] is False
+    # sample.mp4 reads cyan (red under blue). With the balance on, the frame
+    # sits on neutral; with it off, the cast is back in the picture. Measured in
+    # pixels, not in slope values: 0.0009 against -0.0100.
+    assert off_cast < -0.005      # cyan: red sits under blue
+    assert abs(on_cast) < 0.005   # neutral
+    assert [o["op"] for o in state["intent"]["ops"]] == ["exposure", "saturation"]
+    assert state["balance"]      # still reports what it WOULD do, switch or no
+
+    # ... and it is a normal history step, so it undoes like everything else.
+    assert api.post("/api/undo").json["auto_balance"] is False
+
+
+def test_a_balance_body_that_is_not_a_boolean_is_a_400(api):
+    api.open_clip()
+    assert api.post("/api/balance", {"on": "yes"}).error["type"] == "InputError"
+    assert api.post("/api/balance", {}).status == 400

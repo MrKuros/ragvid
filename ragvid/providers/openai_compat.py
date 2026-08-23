@@ -28,6 +28,10 @@ The ladder also steps down on its own: an endpoint that rejects a
 `response_format` (400) is retried one rung lower, so an unknown endpoint
 configured through RAGVID_BASE_URL finds its own level at the cost of one
 wasted request, and the working rung is remembered for the rest of the process.
+
+`plan_json` (Provider.plan_json) is the exception with no ladder under it: the
+top rung or an error. See its docstring for why a step-down would be worse than
+a failure there.
 """
 
 from __future__ import annotations
@@ -93,6 +97,16 @@ class OpenAICompatProvider:
         self.structured = structured if structured in MODES else "text"
         self._client = client
 
+    @property
+    def schema_enforced(self) -> bool:
+        """Provider.schema_enforced: the top rung, and only the top rung.
+
+        Derived rather than stored because `structured` moves at runtime -- an
+        endpoint that 400s on a json_schema response_format steps down, and the
+        router must see that on the very next grade.
+        """
+        return self.structured == "json_schema"
+
     def __repr__(self) -> str:
         # Explicit, so that adding a `self.key` attribute later cannot leak one
         # into a log line or a traceback.
@@ -118,6 +132,28 @@ class OpenAICompatProvider:
     # ---- the call ---------------------------------------------------------
 
     def plan(self, system: str, user: str) -> GradeSpec:
+        return self._retrying(lambda model: self._call(model, system, user))
+
+    def plan_json(self, system: str, user: str, schema: dict) -> dict:
+        """Provider.plan_json: one strict-schema request, no ladder.
+
+        The ladder below `json_schema` is deliberately absent. Its whole purpose
+        is to keep working on a weaker endpoint by putting the schema in the
+        prompt, and a prompt-requested Intent that comes back missing `ops`
+        compiles to the identity grade -- a model that looks like it did nothing
+        rather than an endpoint that answered wrong. Callers check
+        `schema_enforced` first; this raises rather than degrade.
+        """
+        if not self.schema_enforced:
+            raise ProviderError(
+                self.name,
+                f"cannot constrain output to a schema (mode={self.structured}); "
+                "this call needs a provider that enforces one",
+            )
+        return self._retrying(lambda model: self._call_json(model, system, user, schema))
+
+    def _retrying(self, call):
+        """Run `call(model)` against the model then the fallback, honouring 429s."""
         import openai
 
         models = [self.model]
@@ -128,7 +164,7 @@ class OpenAICompatProvider:
         for model in models:
             for attempt in range(ATTEMPTS_PER_MODEL):
                 try:
-                    return self._call(model, system, user)
+                    return call(model)
                 except openai.RateLimitError as exc:
                     last = exc
                     last_wait = _retry_after(exc)
@@ -165,6 +201,33 @@ class OpenAICompatProvider:
             return self._parse(text, mode)
         raise ProviderError(self.name, "no usable response format")  # unreachable
 
+    def _call_json(self, model: str, system: str, user: str, schema: dict) -> dict:
+        import openai
+
+        try:
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}],
+                # "response": the schema is the caller's, so there is no name to
+                # borrow. OpenAI only requires it match [a-zA-Z0-9_-]+.
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "response", "strict": True, "schema": schema},
+                },
+            )
+        except openai.BadRequestError as exc:
+            # The catalog said json_schema and the endpoint says otherwise --
+            # true for an optimistic RAGVID_BASE_URL row, or an OpenRouter model
+            # that does not support it. Record the demotion so the router sends
+            # the next grade down the direct path, where the ladder will find
+            # this endpoint's real level, and fail this one honestly.
+            self.structured = "json_object"
+            raise ProviderError(
+                self.name, f"refused a strict JSON schema ({exc}); falling back to the direct path"
+            ) from exc
+        return parse_json_reply(self.name, response.choices[0].message.content, schema)
+
     def _request(self, model: str, system: str, user: str, mode: str) -> str:
         kwargs = {}
         if mode == "json_schema":
@@ -192,19 +255,7 @@ class OpenAICompatProvider:
 
     def _parse(self, text: str | None, mode: str) -> GradeSpec:
         """Every rung ends here: real JSON, every required field, then sanitize."""
-        raw = extract_json(text)
-        if raw is None:
-            raise ProviderError(self.name, f"returned no JSON object ({_snippet(text)})")
-        missing = sorted(missing_fields(GradeSpec.llm_json_schema(), raw))
-        if missing:
-            # Pydantic would happily default these. That would hand back a spec
-            # that looks fine and grades wrong, which is worse than an error.
-            raise ProviderError(
-                self.name,
-                f"answered without {len(missing)} required field(s) "
-                f"({', '.join(missing[:6])}) — this endpoint does not enforce a "
-                f"schema (mode={mode}); try a provider that does",
-            )
+        raw = parse_json_reply(self.name, text, GradeSpec.llm_json_schema(), mode)
         try:
             return GradeSpec(**raw).sanitize()
         except ProviderError:
@@ -214,6 +265,35 @@ class OpenAICompatProvider:
 
 
 # ---- helpers --------------------------------------------------------------
+
+
+def parse_json_reply(provider: str, text: str | None, schema: dict,
+                     mode: str = "json_schema") -> dict:
+    """A model's reply as a dict, or ProviderError. The one place a reply is judged.
+
+    Shared with anthropic.py rather than duplicated there, so that the same bad
+    answer fails the same way and reads the same in the UI whichever SDK carried
+    it. Pydantic would happily default a missing field; that hands back
+    something that looks fine and grades wrong, which is much harder to diagnose
+    than an error.
+    """
+    raw = extract_json(text)
+    if raw is None:
+        raise ProviderError(provider, f"returned no JSON object ({_snippet(text)})")
+    missing = sorted(missing_fields(schema, raw))
+    if missing:
+        # At the json_schema rung this means the endpoint did not honour the
+        # schema it accepted, so naming the mode would only mislead.
+        blame = "" if mode == "json_schema" else (
+            f" — this endpoint does not enforce a schema (mode={mode}); "
+            "try a provider that does"
+        )
+        raise ProviderError(
+            provider,
+            f"answered without {len(missing)} required field(s) "
+            f"({', '.join(missing[:6])}){blame}",
+        )
+    return raw
 
 
 def extract_json(text: str | None) -> dict | None:

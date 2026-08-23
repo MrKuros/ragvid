@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .errors import InputError, NoGrade
+from .intent import Intent, describe
 from .session import Session
 from .spec import GradeSpec
 
@@ -60,6 +61,43 @@ def _resolve_lut(value: str | Path | None, root: Path) -> tuple[str | None, str 
     if name in logspace.NAMES:
         return logspace.bake_conversion(name, str(Session.dir(root) / f"log_{name}.cube")), name
     return _check_lut(value), None
+
+
+def balance_text(stats) -> str:
+    """What auto-balance actually does to THIS clip, in its own words.
+
+    Read straight out of the compiler rather than parsed out of a finished
+    rationale: an empty Intent compiles to nothing but the balance, so the
+    rationale of that compile IS the balance's report. Pure, cheap, and it
+    cannot drift from the numbers. "" when there is nothing to correct.
+    """
+    from .compiler import compile_intent
+
+    said = compile_intent(Intent(), stats, balance=True).rationale
+    return said[:1].lower() + said[1:-1] if said else ""
+
+
+def intent_view(intent: Intent | None) -> dict | None:
+    """An Intent as a UI renders it, or None when there is no Intent at all.
+
+    One entry per op carrying both halves a control needs: `text`, the English
+    phrase, and the op's own four fields so the UI can send an edited copy back
+    without knowing the vocabulary.
+
+    The phrases come from describe() with every amount forced to "moderate",
+    which is exactly the phrase with no adverb on the end ("cooled it down",
+    not "cooled it down a little"). The magnitude is the control sitting next
+    to the sentence; printing it in the sentence as well is the same fact
+    twice, and the two disagree for as long as a drag lasts.
+    """
+    if intent is None:
+        return None
+    bare = Intent(ops=[op.model_copy(update={"amount": "moderate"}) for op in intent.ops])
+    return {
+        "strength": intent.strength,
+        "ops": [{**op.model_dump(), "text": text}
+                for op, text in zip(intent.ops, describe(bare))],
+    }
 
 
 CUBE_NAME = "current.cube"
@@ -149,6 +187,16 @@ class Project:
         return self.session.spec
 
     @property
+    def intent(self) -> Intent | None:
+        """The typed verbs the current grade was compiled from, or None.
+
+        None is the honest and common answer — a photo match, a refine, a
+        direct-path provider — and every consumer has to degrade to
+        `spec.rationale` rather than render an empty list.
+        """
+        return self.session.intent if self.session.specs else None
+
+    @property
     def history(self) -> list[GradeSpec]:
         """Oldest first, current last. A UI can render this as an undo stack."""
         return list(self.session.specs)
@@ -184,6 +232,7 @@ class Project:
             return False
         del self.session.specs[index + 1:]
         del self.session.labels[index + 1:]
+        del self.session.intents[index + 1:]
         self.save()
         return True
 
@@ -264,10 +313,18 @@ class Project:
     # ---- planning ---------------------------------------------------------
 
     def plan_from_vibe(self, vibe: str, provider=None) -> GradeSpec:
-        """Ask the LLM for a grade matching `vibe`, calibrated to this clip."""
+        """Ask the LLM for a grade matching `vibe`, calibrated to this clip.
+
+        Returns the spec, as every planning method here does. The Intent that
+        produced it (None on the direct path) is kept beside it in the session
+        and read back through `self.intent` — it is what "what it did" is drawn
+        from, and what `set_intent` re-compiles when one item is adjusted.
+        """
         from .vibe import plan_vibe
 
-        return self._push(plan_vibe(vibe, self.stats, provider=provider), label=vibe)
+        spec, intent = plan_vibe(vibe, self.stats, provider=provider,
+                                 balance=self.session.auto_balance)
+        return self._push(spec, label=vibe, intent=intent)
 
     def plan_from_reference(self, image: str | Path) -> GradeSpec:
         """Match a reference image. Closed form — no model, no network."""
@@ -298,8 +355,52 @@ class Project:
         a hand-edited session), and effects.* in particular is unbounded on the
         way in -- glow=50 is a legal float and a gblur sigma that hangs ffmpeg.
         Sanitizing at the caller would leave every sibling caller unguarded.
+
+        No Intent goes with it, ever. A spec that arrived as 43 numbers is not
+        described by any list of verbs, and carrying the previous one forward
+        would leave sentences on screen claiming things the numbers no longer
+        do. Editing a grade that HAS an Intent goes through set_intent instead.
         """
         return self._push(spec.sanitize(), label=label)
+
+    def set_intent(self, intent: Intent, label: str = "adjusted") -> GradeSpec:
+        """Re-compile the grade from edited verbs — the per-item strength path.
+
+        Deliberately not set_spec(): the person adjusted "cooled it down", not
+        `temperature`. Re-compiling re-derives every number from this clip's
+        measurements, so an item that did not move lands on exactly the value it
+        had (compile_intent is pure) and the one that did moves along its own
+        axis rather than along whichever spec field happened to carry it.
+        """
+        from .compiler import compile_intent
+
+        spec = compile_intent(intent, self.stats, balance=self.session.auto_balance)
+        return self._push(spec, label=label, intent=intent)
+
+    @property
+    def auto_balance(self) -> bool:
+        """Whether the clip is neutralised from its measurements before the look."""
+        return self.session.auto_balance
+
+    def set_auto_balance(self, on: bool) -> bool:
+        """Turn auto-balance on or off. True if it changed.
+
+        Re-compiles the current grade when there is an Intent to re-compile it
+        from, so the toggle is something you SEE rather than a preference that
+        takes effect on the next prompt. There is nothing to re-compile for a
+        spec that came from anywhere else, and it is left alone -- turning the
+        setting off cannot undo a balance that is already baked into 43 numbers
+        nobody can decompose.
+        """
+        if on == self.session.auto_balance:
+            return False
+        self.session.auto_balance = on
+        intent = self.intent
+        if intent is not None:
+            self.set_intent(intent, label="balance on" if on else "balance off")
+        else:
+            self.save()
+        return True
 
     def reset(self) -> bool:
         """Discard every grade, back to the ungraded clip. False if there was
@@ -313,6 +414,7 @@ class Project:
             return False
         self.session.specs.clear()
         self.session.labels.clear()
+        self.session.intents.clear()
         self.save()
         return True
 
@@ -323,8 +425,9 @@ class Project:
         self.save()
         return True
 
-    def _push(self, spec: GradeSpec, label: str = "") -> GradeSpec:
-        self.session.push(spec, label)
+    def _push(self, spec: GradeSpec, label: str = "",
+              intent: Intent | None = None) -> GradeSpec:
+        self.session.push(spec, label, intent)
         self.save()
         return spec
 
@@ -439,6 +542,9 @@ class Project:
             "input_format": self.input_format,
             "duration": self.duration,
             "spec": self.spec.model_dump() if self.is_planned else None,
+            "intent": intent_view(self.intent),
+            "auto_balance": self.auto_balance,
+            "balance": balance_text(self.stats),
             "history_depth": len(self.session.specs),
             "steps": self.steps,
             "can_undo": self.can_undo,

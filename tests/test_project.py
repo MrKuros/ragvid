@@ -419,3 +419,103 @@ def test_opening_a_clip_applies_a_detected_format_and_nothing_otherwise(clip, tm
     # An explicit choice is never second-guessed by the metadata.
     monkeypatch.setattr("ragvid.logspace.detect", lambda path: "logc3")
     assert Project.create(clip, root=tmp_path / "c", input_lut="nlog").input_format == "nlog"
+
+
+# ---- intent (roadmap C3/C4) ------------------------------------------------
+
+
+def _intent(amount="moderate"):
+    from ragvid.intent import Intent, Op
+
+    return Intent(ops=[Op(op="warmth", dir="up", amount=amount)], strength="full")
+
+
+def test_plan_from_vibe_keeps_the_verbs_beside_the_spec(project):
+    """A schema-enforcing endpoint takes the intent path, and what it emitted
+    has to survive the call -- it cannot be recovered from 43 floats."""
+    class FakeIntentProvider:
+        name = "fake"
+        schema_enforced = True
+
+        def plan(self, system, user):
+            raise AssertionError("a schema endpoint must not take the direct path")
+
+        def plan_json(self, system, user, schema):
+            return {"ops": [{"op": "warmth", "dir": "up", "amount": "moderate",
+                             "target": ""}], "strength": "full"}
+
+    spec = project.plan_from_vibe("warmer", provider=FakeIntentProvider())
+    assert spec.temperature > 0.0
+    assert project.intent == _intent()
+    # ... and out the other side of a save/load, which is what a UI reads back.
+    assert Project.open(project.root).intent == _intent()
+
+
+def test_set_intent_recompiles_rather_than_nudging_a_field(project):
+    project.set_intent(_intent("subtle"))
+    subtle = project.spec.temperature
+
+    project.set_intent(_intent("strong"))
+    assert project.spec.temperature > subtle       # the verb moved, on its own axis
+    assert project.spec.saturation == 1.0          # and nothing else did
+    assert project.intent.ops[0].amount == "strong"
+    assert len(project.history) == 2               # every edit is one undo step
+
+
+def test_undo_restores_the_intent_with_the_spec(project):
+    project.set_intent(_intent("subtle"))
+    project.set_intent(_intent("strong"))
+    assert project.undo() is True
+    assert project.intent == _intent("subtle")
+    assert project.revert_to(-1) is True
+    assert project.intent is None and project.is_planned is False
+
+
+def test_a_raw_spec_has_no_verbs_behind_it(project):
+    """set_spec must NOT carry the previous intent forward: 43 numbers are not
+    described by any verb list, and a stale sentence claiming otherwise is
+    exactly the drift the intent path exists to remove."""
+    project.set_intent(_intent())
+    project.set_spec(GradeSpec(contrast=0.4))
+    assert project.intent is None
+    assert project.to_dict()["intent"] is None
+
+
+def test_the_intent_view_is_sentences_without_their_adverbs(project):
+    """The magnitude is the control next to the sentence; printing it in the
+    sentence as well means the two disagree for as long as a drag lasts."""
+    from ragvid.project import intent_view
+
+    project.set_intent(_intent("subtle"))
+    view = project.to_dict()["intent"]
+    assert view == {"strength": "full",
+                    "ops": [{"op": "warmth", "dir": "up", "amount": "subtle",
+                             "target": "", "text": "warmed it up"}]}
+    assert intent_view(None) is None
+
+
+def test_auto_balance_is_on_by_default_and_recompiles_when_switched(project):
+    """The library keeps balance off so an empty Intent is the identity grade;
+    the UI layer is where "on" belongs, and this is that layer."""
+    # STATS has no measured hue_strength, which the balance pass correctly reads
+    # as "unmeasured, correct nothing". Give it one, so there is a cast to remove.
+    project.session.stats = STATS.model_copy(update={"hue_strength": 0.05})
+    project.set_intent(_intent())
+    assert project.auto_balance is True
+    balanced = project.spec
+
+    assert project.set_auto_balance(False) is True
+    assert project.spec != balanced                # the switch is visible at once
+    assert project.intent == _intent()             # ... and the verbs are untouched
+    assert len(project.history) == 2
+
+    assert project.set_auto_balance(False) is False   # no-op, no history step
+    assert Project.open(project.root).auto_balance is False
+
+
+def test_turning_balance_off_leaves_a_spec_that_has_no_verbs_alone(project):
+    """There is nothing to re-compile from 43 numbers, and pretending otherwise
+    would silently replace a grade the user made by hand."""
+    project.set_spec(GradeSpec(contrast=0.4))
+    assert project.set_auto_balance(False) is True
+    assert project.spec.contrast == 0.4 and len(project.history) == 1

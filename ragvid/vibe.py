@@ -24,7 +24,6 @@ from ragvid import looks
 from ragvid.compiler import compile_intent
 from ragvid.errors import ProviderError
 from ragvid.intent import Intent
-from ragvid.providers.openai_compat import extract_json, missing_fields
 from ragvid.spec import GradeSpec
 
 if TYPE_CHECKING:  # probe imports nothing from us; this keeps the dependency one-way
@@ -207,9 +206,16 @@ def _stat_notes(st: "ClipStats") -> list[tuple[bool, str]]:
     ]
 
 
-def plan_vibe(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
-    """Plan a grade for `vibe`. A GradeSpec, from whichever path this endpoint
-    can run — see the module docstring for which is default and what decided it.
+def plan_vibe(vibe: str, stats: "ClipStats", provider=None,
+              balance: bool = False) -> tuple[GradeSpec, Intent | None]:
+    """Plan a grade for `vibe`, from whichever path this endpoint can run — see
+    the module docstring for which is default and what decided it.
+
+    Returns (spec, intent). The Intent is None on the direct path and that is
+    not a degenerate case to paper over: the model authored numbers there, so
+    there are no verbs to show, and a caller that wants to say what the grade
+    did falls back to `spec.rationale`. The spec is still the only currency
+    anything downstream renders, bakes or exports.
 
     The routing test is a CAPABILITY, not a preference: the intent path needs
     constrained decoding against Intent's schema (ask_intent's ponytail note),
@@ -223,9 +229,13 @@ def plan_vibe(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
         from ragvid.providers import get_provider
 
         provider = get_provider()
-    if getattr(provider, "structured", None) == "json_schema":
-        return plan_intent(vibe, stats, provider)
-    return plan_direct(vibe, stats, provider)
+    if getattr(provider, "schema_enforced", False):
+        return plan_intent(vibe, stats, provider, balance=balance)
+    # `balance` is silently dropped here, and there is nowhere honest to put it:
+    # auto-balance is a compiler pass and the direct path has no compiler. An
+    # endpoint that cannot constrain decoding gets an unbalanced grade, which is
+    # what it got before this flag existed.
+    return plan_direct(vibe, stats, provider), None
 
 
 def plan_direct(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
@@ -373,60 +383,46 @@ HOW TO CHOOSE:
 Return only the JSON object."""
 
 
-def plan_intent(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
+def plan_intent(vibe: str, stats: "ClipStats", provider=None,
+                balance: bool = False) -> tuple[GradeSpec, Intent]:
     """Plan a grade for `vibe` the roadmap-A1 way: model -> Intent -> compiler.
 
     Same signature and same return type as plan_vibe, so the two are swappable
     at the call site. The difference is where the numbers come from: plan_vibe's
     provider authors all 43, this one authors none of them — `stats` is read by
     compiler.compile_intent, never shown to the model.
+
+    BOTH come back, because the Intent is not an implementation detail of the
+    spec. It is the only human-readable record of what was asked for, and it
+    cannot be recovered afterwards: 43 floats do not say which four words made
+    them. Roadmap C3/C4 renders it as a list of sentences with a strength
+    control each, and re-compiles through this same compiler when one moves.
     """
-    return compile_intent(ask_intent(vibe, provider), stats)
+    intent = ask_intent(vibe, provider)
+    return compile_intent(intent, stats, balance=balance), intent
 
 
 def ask_intent(vibe: str, provider=None) -> Intent:
     """The model call, and the only part of the intent path that can fail.
 
-    ponytail: talks to the endpoint directly instead of through Provider.plan(),
-    which is typed to return a GradeSpec and cannot carry an Intent. That costs
-    the structured-output ladder in openai_compat.py, so this works on the
-    strict-schema rows of the catalog (Groq, OpenAI, xAI, Mistral) and not on a
-    json_object-only endpoint. If the intent path ever replaces the direct one,
-    the honest fix is a second method on the protocol, not a ladder copied here.
+    Provider.plan_json does the talking: Intent is not a GradeSpec, so plan()
+    cannot carry it, and the two SDKs constrain output differently (Anthropic's
+    `output_config`, everyone else's `response_format`). Only the provider knows
+    which it speaks, and it is also the one place a bad reply is judged — a
+    half-answer here would compile to the identity grade and look like a model
+    that did nothing rather than an endpoint that answered wrong.
+
+    Callers route on `schema_enforced` first (plan_vibe does); plan_json raises
+    rather than degrade to prompt-coaxed JSON.
     """
     if provider is None:
         from ragvid.providers import get_provider
 
         provider = get_provider()
 
-    response = provider.client.chat.completions.create(
-        model=provider.model,
-        messages=[
-            {"role": "system", "content": INTENT_SYSTEM},
-            {"role": "user", "content": f'The look the user asked for: "{vibe}"'},
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "grade_intent",
-                "strict": True,
-                "schema": Intent.llm_json_schema(),
-            },
-        },
+    raw = provider.plan_json(
+        INTENT_SYSTEM, f'The look the user asked for: "{vibe}"', Intent.llm_json_schema()
     )
-    text = response.choices[0].message.content
-    raw = extract_json(text)
-    if raw is None:
-        raise ProviderError(
-            provider.name, f"returned no JSON object ({(text or '').strip()[:120] or 'empty response'})"
-        )
-    # Every field of Intent has a default, so pydantic would turn a reply missing
-    # `ops` into an empty intent — which compiles to the identity grade and looks
-    # to the user like a model that did nothing rather than an endpoint that
-    # answered wrong. Same argument, same check, as openai_compat._parse.
-    missing = sorted(missing_fields(Intent.llm_json_schema(), raw))
-    if missing:
-        raise ProviderError(provider.name, f"answered without {', '.join(missing)}")
     try:
         return Intent(**raw)
     except Exception as exc:  # pydantic ValidationError: a verb outside the vocabulary

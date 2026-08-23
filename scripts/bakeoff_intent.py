@@ -269,7 +269,7 @@ def main() -> int:
             meter.spend(path)
             try:
                 if path == "direct":
-                    spec = plan_vibe(prompt, stats, provider=provider)
+                    spec, _ = plan_vibe(prompt, stats, provider=provider)
                     summary = spec.rationale
                 else:
                     intent = ask_intent(prompt, provider=provider)
