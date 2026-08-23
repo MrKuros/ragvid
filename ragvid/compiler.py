@@ -25,6 +25,10 @@ a comment next to the mapping:
   * "pull the highlights down" on already-blown footage -> `highlight_rolloff`
     (step 7) before `highlight_lift`, because a uniform negative lift moves
     welded-white pixels down together and they stay welded.
+  * auto-balance -> `slope`/`offset`, i.e. the CDL at step 2. A technical
+    correction goes where the industry standard already puts one, and it is the
+    only field pair an ASC CDL export can carry off the machine. `_balance` has
+    the full argument, including why not `exposure` and not temperature/tint.
 
 Every number below is one of: a step size (how much "moderate" means for that
 axis), or a measured scaling of it. The step sizes are the taste in this file
@@ -40,7 +44,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ragvid.intent import DEFAULT_TINT, OPS, STRENGTH_MIX, Intent, Op, describe
-from ragvid.spec import LUMA, GradeSpec
+from ragvid.match import match_reference
+from ragvid.spec import LUMA, RGB, GradeSpec
 
 if TYPE_CHECKING:  # probe imports nothing from us; keeps the dependency one-way
     from ragvid.probe import ClipStats
@@ -358,18 +363,202 @@ _COMPILERS = {
 assert set(_COMPILERS) == set(OPS), sorted(set(OPS) ^ set(_COMPILERS))
 
 
+# ---- auto-balance ----------------------------------------------------------
+#
+# WHY IT EXISTS. Every verb above starts from wherever the clip happens to sit.
+# Two shots of the same scene, one a little green and one a little magenta, get
+# the same look applied on top of two different starting points and come out
+# different. A colourist balances first and grades second for exactly that
+# reason, and the balance is closed form from ClipStats — no model, no taste.
+#
+# WHICH FIELDS: `slope`/`offset`, the CDL at step 2, for both halves of it.
+#   * NOT `exposure` (step 1). Exposure sits before the CDL precisely so that
+#     `offset` stays an ABSOLUTE lift for the shadow verb, and spending it here
+#     would rescale every offset written after it.
+#   * NOT `temperature`/`tint` (step 3). Those are the colour verbs' fields, and
+#     match.py already gives the argument: the per-channel slope carries the
+#     colour shift, so a temperature push on top would double it. Leaving them
+#     at identity is what keeps "warmer" meaning the same thing whether or not the
+#     balance ran — which is the composition property this pass has to have.
+#   * NOT the tonal split (step 6). Those masks are luma-gated and are the
+#     creative shadow/highlight tools. A black point is not a shadow tint.
+# Two things fall out for free: `_protect_highlights` already reads slope/offset
+# and so grows a shoulder over the composed grade, and an ASC CDL export
+# (roadmap A8) is the one interchange format that carries the balance with it.
+#
+# The solve itself is match.py's, unmodified. Auto-balance is a reference match
+# where the reference is this clip with the colour taken out of it.
+
+# WHERE A CAST STOPS BEING A CAST AND STARTS BEING THE LOOK. This is the whole
+# risk of the pass: a sodium-lit night exterior is SUPPOSED to be orange, and
+# neutralising it grades the look back out of footage that was lit or graded
+# deliberately. `hue_strength` is the only field that can tell the two apart —
+# it is the resultant length of the chroma-weighted hue vector, so it is large
+# only when the frame is BOTH colourful AND agrees with itself about which
+# colour. `saturation` cannot do this job: it is HSV chroma/max, and probe.py
+# says why. Measured with probe.py over this repo's own files and over synthetic
+# casts (scratch script, 40k-pixel frames):
+#
+#   neutral ramp, no cast                        0.0004
+#   teal-and-orange grade, two opposite hues     0.0015   <- saturation 0.42
+#   assets/sample.mp4 (testsrc2 colour bars)     0.021    <- saturation 0.97
+#   green fluorescent cast, G gain 1.06          0.030
+#   test_files/ref_tvd.png                       0.030
+#   green fluorescent cast, G gain 1.10          0.049
+#   tungsten cast, R/B +/-6%                     0.052
+#   test_files/ironman.gif                       0.061
+#   tungsten cast, R/B +/-10%                    0.087
+#   ---------------------------------------------------- casts above, looks below
+#   sodium-lit street                            0.153
+#   blue night exterior                          0.154
+#   test_files/giphy.gif (teal look)             0.169
+#   test_files/test.mp4 (warm look)              0.189
+#   test_files/higher_def.gif (blue look)        0.257
+#   assets/ref_warm.png (solid brown)            0.446
+#
+# The two rows either side of the line are 0.087 and 0.153, so the gate is a
+# ramp across that gap rather than a threshold in it: full correction at or
+# below 0.04, none at or above 0.12, linear between. That leaves the nearest
+# real look (sodium, 0.153) 1.28x clear of any correction at all, and still
+# gives every synthetic cast up to a 10% channel error 40-100% of its fix. A
+# gently graded clip landing mid-ramp is half-corrected, never reversed.
+#
+# Note this also bounds the SIZE of the correction, without a second constant:
+# hue_strength equals mean absolute chroma when the hue is consistent, so a
+# clip the gate lets through by definition has only a small cast to remove.
+_CAST_FULL = 0.04
+_CAST_NONE = 0.12
+
+# Below one 8-bit code value the balance did something nobody can see, and
+# saying so in the rationale would be a lie of emphasis rather than a report.
+_SAY = 1.0 / 255.0
+
+# probe.py's dominant_hue in degrees -> a word for the rationale. The angles are
+# _TINT_VECTORS' own vocabulary, so the sentence a balance writes and the colour
+# a verb takes as a `target` mean the same thing. Nearest-angle on the circle:
+# a warm cast at 33 degrees has to read as "orange", which snapping to spec.py's
+# six 60-degree band centres cannot say.
+_CAST_NAMES = {"red": 0.0, "orange": 30.0, "yellow": 60.0, "green": 120.0,
+               "cyan": 180.0, "blue": 240.0, "purple": 270.0, "magenta": 300.0}
+
+
+def _hue_name(deg: float) -> str:
+    return min(_CAST_NAMES, key=lambda n: abs((deg - _CAST_NAMES[n] + 180.0) % 360.0 - 180.0))
+
+
+def _balance(d: dict, stats: "ClipStats", m: _Measured) -> list[str]:
+    """Neutralise the clip from its measurements. Writes slope/offset only.
+
+    Takes `stats` and not just `_Measured` because the solve is match.py's and
+    match.py's input is a ClipStats — the point is to reuse that solver rather
+    than re-derive it here.
+
+    Runs BEFORE the verbs and ASSIGNS rather than composes: the balance is the
+    base the creative grade sits on, and every verb above either adds into
+    `offset` (the shadow verb, correctly, on top of the corrected black point)
+    or lives in a later step entirely.
+
+    Returns the sentences describing what it actually did, in describe()'s voice
+    and lower case, so that a balance can never happen silently.
+    """
+    said: list[str] = []
+    slope, offset = np.ones(3), np.zeros(3)
+
+    # -- the cast --
+    # hue_strength defaults to 0.0 on a session written before probe.py measured
+    # it (ClipStats keeps a default for every field added after `duration`), and
+    # 0.0 reads as "correct this cast in full" — on footage that could be a
+    # sodium street. Measured footage never reads exactly 0: the flattest clip
+    # in the table above is 0.0004. So an exact 0 next to any chroma at all is
+    # UNMEASURED, and the safe direction for a correction nobody asked for is to
+    # not make it. _HUE_CONF_FLOOR is reused because it already means "below
+    # this there is not enough chroma for a hue to exist".
+    unmeasured = stats.hue_strength == 0.0 and stats.saturation > _HUE_CONF_FLOOR
+    conf = 0.0 if unmeasured else float(
+        np.clip((_CAST_NONE - stats.hue_strength) / (_CAST_NONE - _CAST_FULL), 0.0, 1.0))
+    if conf > 0.0:
+        # Grey world, solved by match_reference against a reference that is this
+        # clip with the colour taken out: every channel mean on the clip's own
+        # LUMA mean, every channel spread on its LUMA spread. Anchoring the grey
+        # on luma rather than on the mean of the three means is spec.py's rule
+        # for a tint (luma-stripped, so colour and brightness stay independent
+        # axes) applied to the balance — at the mean this correction is exactly
+        # luma-preserving, so it changes the colour and not the exposure.
+        neutral = stats.model_copy(update={
+            "mean": RGB.of(float(m.mean @ LUMA)),
+            "std": RGB.of(float(stats.std.as_array() @ LUMA)),
+        })
+        fit = match_reference(stats, neutral)
+        # Lerp the whole transform toward identity by the confidence, not the
+        # slope alone: conf = 0 has to be a bit-for-bit no-op, and a half-trusted
+        # cast has to be half-corrected rather than corrected then partly undone.
+        slope = 1.0 + (fit.slope.as_array() - 1.0) * conf
+        offset = fit.offset.as_array() * conf
+        if float(np.max(np.abs(m.mean * slope + offset - m.mean))) > _SAY:
+            name = _hue_name(stats.dominant_hue)
+            said.append(f"neutralised {'an' if name[0] in 'aeiou' else 'a'} {name} cast")
+
+    # -- the black point --
+    # p1/p99 carried through the cast correction: where the real range sits once
+    # the colour is off it. min/max ACROSS channels, because this move is
+    # achromatic by construction — a per-channel percentile stretch is a second
+    # cast correction, and it would run without the evidence the gate above
+    # demands of the first one.
+    b0 = float((m.p1 * slope + offset).min())
+    w0 = float((m.p99 * slope + offset).max())
+    # `crushed_low` for the same reason `_shadows` consults it: pixels already on
+    # the rail are welded, and pulling the black point down only welds more.
+    # Floored at 0 rather than _shadows' 0.3 — a verb the user asked for has to
+    # produce something, an unrequested correction may correctly do nothing.
+    # In practice the two measurements are not independent: p1 is a per-channel
+    # 1st percentile, so crushed_low much above 0.03 already forces some
+    # channel's p1 onto the rail and b0 with it. This is the belt to that braces.
+    pull = float(np.clip(1.0 - 2.0 * m.crushed, 0.0, 1.0))
+    # No measured range: a near-solid frame, or the all-zero p1/p50/p99 of a
+    # session written before probe.py grew percentiles (_measure documents the
+    # same fallback for headroom). Either way there is no black point to find.
+    if w0 - b0 > 0.05:
+        target = b0 * (1.0 - pull)
+        # Move the black point to `target` and PIN the white point. w0 is an
+        # anchor, not a second target: blacks sitting at 0.08 are fog and always
+        # a defect, whereas a clip whose p99 is 0.45 is a night scene, and
+        # stretching that to full range is the creative call `exposure` and
+        # `contrast` are the verbs for. Auto-levels that invents range is the
+        # same harm as neutralising a sodium street, one axis over.
+        g = (w0 - target) / (w0 - b0)
+        slope, offset = slope * g, offset * g + (target - g * b0)
+        if abs(target - b0) > _SAY:
+            said.append("set the black point")
+
+    for c, s, o in zip("rgb", slope, offset):
+        d["slope"][c], d["offset"][c] = float(s), float(o)
+    return said
+
+
 # ---- the compiler ----------------------------------------------------------
 
 
-def compile_intent(intent: Intent, stats: "ClipStats") -> GradeSpec:
+def compile_intent(intent: Intent, stats: "ClipStats", balance: bool = False) -> GradeSpec:
     """Typed verbs + measured statistics -> a full GradeSpec. No model, no I/O.
 
     An empty Intent compiles to the identity grade bit-for-bit; that is the
     property the whole design rests on, since it means an Intent only ever
     describes DEPARTURES from the source.
+
+    `balance` runs the auto-balance pass first (roadmap A6): neutralise the clip
+    from its own measurements, then apply the creative look on top of a known
+    starting point. It is OFF by default and the identity property above is the
+    reason — a balance is a departure the user did not ask for, so it has to be
+    a caller's decision and not this function's. When it is on it announces
+    itself in `rationale` ahead of the intent's own sentences, because a silent
+    correction fighting the user's grade is worse than no correction at all.
     """
     d = GradeSpec.identity().model_dump()
     m = _measure(stats)
+
+    # Before the verbs: they add into the same CDL and later steps, so the look
+    # lands on top of the corrected base rather than beside it.
+    said = _balance(d, stats, m) if balance else []
 
     for item in intent.ops:
         k = UNIT[item.amount] * (1.0 if item.dir == "up" else -1.0)
@@ -383,7 +572,7 @@ def compile_intent(intent: Intent, stats: "ClipStats") -> GradeSpec:
 
     # The model no longer writes the rationale — the sentences ARE the intent,
     # so they cannot drift from what the numbers do.
-    text = ", ".join(describe(intent))
+    text = ", ".join(said + describe(intent))
     d["rationale"] = (text[0].upper() + text[1:] + ".") if text else ""
 
     return GradeSpec(**d).sanitize()

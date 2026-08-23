@@ -410,3 +410,305 @@ def test_every_verb_at_full_strength_still_produces_a_legal_grade():
         table = compile_intent(intent, STATS).apply(grid)
         assert np.all(np.isfinite(table))
         assert table.min() >= 0.0 and table.max() <= 1.0
+
+
+# ---- auto-balance (roadmap A6) --------------------------------------------
+#
+# Everything below re-probes the BALANCED PIXELS with probe.py and compares the
+# measurement to the measurement of the source. A spec field is not evidence
+# here for the same reason it is not evidence above, and doubly so for a
+# correction: "slope 1.16 on red" says nothing about whether the cast is gone.
+#
+# The clips are built rather than shot because the feature's failure mode is
+# specific -- neutralising footage that is deliberately monochromatic -- and the
+# repo has no sodium-lit street in it.
+
+_g = np.random.default_rng(11)
+
+
+def _noise(shape, s=0.04):
+    return _g.normal(0.0, s, shape)
+
+
+# Blacks already on the rail and no cast: balancing this must be a near-no-op.
+NEUTRAL = np.clip(_g.uniform(-0.06, 0.82, (20000, 1)) + _noise((20000, 3)), 0.0, 1.0)
+
+# A sodium-lit street and a blue night exterior. Both are SUPPOSED to be that
+# colour; a balance that neutralises them has graded the look back out of
+# footage that was lit or graded on purpose, which is the one way this feature
+# does harm rather than nothing.
+SODIUM = np.clip(_g.beta(1.4, 6.0, (20000, 1)) * [1.0, 0.62, 0.18] + _noise((20000, 3), 0.015), 0.0, 1.0)
+NIGHT = np.clip(_g.beta(2.0, 5.0, (20000, 1)) * [0.45, 0.62, 1.0] + _noise((20000, 3), 0.02), 0.0, 1.0)
+
+# Six saturated hues in equal measure: the highest `saturation` in the file and
+# no dominant hue at all. It exists to prove which field the gate reads.
+_HUES = np.array([[1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 1, 1], [0, 0, 1], [1, 0, 1]], dtype=np.float64)
+BARS = np.clip(_HUES[_g.integers(0, 6, 20000)] * _g.uniform(0.25, 0.75, (20000, 1)) + _noise((20000, 3), 0.01), 0.0, 1.0)
+
+
+def cast(img, gain):
+    """`img` through a per-channel gain — a lighting cast, before any grade."""
+    return np.clip(img * np.array(gain, dtype=np.float64), 0.0, 1.0)
+
+
+def balanced(img, intent: Intent | None = None) -> np.ndarray:
+    return compile_intent(intent or Intent(), stats_of(img), balance=True).apply(img)
+
+
+def m_spread(o):
+    """How far apart the three channel means sit — the size of the cast."""
+    mu = o.mean(axis=0)
+    return float(mu.max() - mu.min())
+
+
+def m_hue_strength(o):
+    return stats_of(o).hue_strength
+
+
+def m_crushed(o):
+    return stats_of(o).crushed_low
+
+
+def m_p1(o):
+    return float(min(stats_of(o).p1.as_array()))
+
+
+def m_p99(o):
+    return float(max(stats_of(o).p99.as_array()))
+
+
+# ---- it is optional and it is visible -------------------------------------
+
+
+def test_balance_is_off_unless_the_caller_asks_for_it():
+    """The identity contract above is the reason for the default: a balance is
+    a departure the user did not request, so it cannot be this function's
+    decision. Two live callers pass no flag today and must be unaffected."""
+    green = cast(IMG, (1.0, 1.06, 1.0))
+    assert compile_intent(Intent(), stats_of(green)).is_identity()
+    assert not compile_intent(Intent(), stats_of(green), balance=True).is_identity()
+
+
+def test_a_balance_says_so_in_the_rationale_before_the_look():
+    """A silent correction fighting the user's own grade is worse than none.
+    describe() writes the intent's sentences; the balance prepends its own, so
+    the order in the sentence is the order in the pipeline."""
+    fogged_and_green = cast(np.clip(IMG * 0.85 + 0.08, 0.0, 1.0), (1.0, 1.06, 1.0))
+    spec = compile_intent(one("warmth"), stats_of(fogged_and_green), balance=True)
+    assert spec.rationale == "Neutralised a green cast, set the black point, warmed it up."
+
+
+def test_a_balance_that_did_nothing_measurable_claims_nothing():
+    """SODIUM is left alone entirely, so the sentence list is empty and the
+    rationale is exactly the intent's."""
+    assert compile_intent(Intent(), stats_of(SODIUM), balance=True).rationale == ""
+    assert compile_intent(one("warmth"), stats_of(SODIUM), balance=True).rationale == "Warmed it up."
+
+
+@pytest.mark.parametrize("gain,name", [
+    ((1.0, 1.06, 1.0), "green"),
+    ((1.05, 1.0, 1.05), "magenta"),
+    ((1.06, 1.0, 0.94), "orange"),
+    ((1.0, 1.0, 1.12), "blue"),
+])
+def test_the_balance_names_the_cast_it_found(gain, name):
+    spec = compile_intent(Intent(), stats_of(cast(IMG, gain)), balance=True)
+    assert spec.rationale.startswith(f"Neutralised a{'n' if name[0] in 'aeiou' else ''} {name} cast")
+
+
+# ---- it converges ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("gain,label,before,after", [
+    # gain, name, measured hue_strength before -> after balancing the pixels
+    ((1.0, 1.06, 1.0), "green fluorescent", 0.0266, 0.0000),
+    ((1.05, 1.0, 1.05), "magenta", 0.0221, 0.0000),
+    ((1.06, 1.0, 0.94), "tungsten", 0.0460, 0.0038),
+])
+def test_balance_measurably_neutralises_a_cast(gain, label, before, after):
+    """The whole feature, measured on pixels. A balance that does not shrink
+    the cast is the feature failing silently, which no spec-field assertion
+    would catch."""
+    img = cast(IMG, gain)
+    out_ = balanced(img)
+
+    assert abs(m_hue_strength(img) - before) < 0.002, "the fixture drifted"
+    assert m_hue_strength(out_) < 0.15 * m_hue_strength(img), (
+        f"{label}: hue_strength {m_hue_strength(img):.4f} -> {m_hue_strength(out_):.4f}")
+    # ... and in the first moment too, which is what the solver actually fits.
+    assert m_spread(out_) < 0.15 * m_spread(img), (
+        f"{label}: channel-mean spread {m_spread(img):.4f} -> {m_spread(out_):.4f}")
+
+
+def test_the_cast_correction_alone_does_not_change_the_exposure():
+    """match.py's solve is aimed at the clip's own LUMA mean, so the correction
+    is luma-preserving at the mean by construction -- it changes the colour and
+    not the light. Measured on NEUTRAL (blacks already at 0, so the black-point
+    half is a no-op and this isolates the cast half): mean luma moves 9.1e-5
+    while the channel-mean spread falls from 0.0235 to 0.0000.
+
+    The black-point half is NOT luma-preserving and is not meant to be: pulling
+    a fogged black down while pinning the white point is a contrast move, and it
+    darkens the clip by design (measured mean luma 0.4212 -> 0.3492 on a fogged
+    IMG). That is why the two halves are tested apart.
+    """
+    img = cast(NEUTRAL, (1.0, 1.06, 1.0))
+    out_ = balanced(img)
+    assert m_spread(out_) < 0.15 * m_spread(img)
+    assert abs(m_luma(out_) - m_luma(img)) < 2e-3, m_luma(out_) - m_luma(img)
+
+
+# ---- it is idempotent-ish -------------------------------------------------
+
+
+def test_balancing_an_already_neutral_clip_is_nearly_a_no_op():
+    """Measured max deviation 8.0e-4, i.e. 0.20 of an 8-bit code value, over a
+    clip whose blacks are already at 0 and whose channel means agree to 6.5e-4.
+    Not exactly zero: the solve fits the measured moments, and probe.py measures
+    them off a uint8 round trip."""
+    out_ = balanced(NEUTRAL)
+    assert np.abs(out_ - NEUTRAL).max() < 2e-3, np.abs(out_ - NEUTRAL).max()
+    assert np.abs(out_ - NEUTRAL).mean() < 5e-4
+    # Re-balancing the balanced clip converges rather than drifting.
+    assert np.abs(balanced(out_) - out_).max() < np.abs(out_ - NEUTRAL).max() + 1e-9
+
+
+# ---- it does not eat intentional colour -----------------------------------
+
+
+@pytest.mark.parametrize("img,label", [(SODIUM, "sodium-lit street"), (NIGHT, "blue night exterior")])
+def test_balance_leaves_deliberately_monochromatic_footage_completely_alone(img, label):
+    """THE test that stops this feature being harmful. Both clips measure
+    hue_strength ~0.153, above the 0.12 where the gate has already closed, so
+    the grade is the identity bit-for-bit — not "close to" it."""
+    st = stats_of(img)
+    assert st.hue_strength > 0.12, (label, st.hue_strength)
+    spec = compile_intent(Intent(), st, balance=True)
+    assert spec.is_identity(), (label, spec.slope, spec.offset)
+    assert np.array_equal(spec.apply(img), GradeSpec.identity().apply(img))
+
+
+def test_the_gate_is_hue_strength_and_not_saturation():
+    """`saturation` is HSV chroma/max and cannot fall when a frame holds two
+    opposite hues, which is why probe.py added hue_strength and why the gate
+    reads it. BARS is the most saturated clip in this file and has no dominant
+    hue; SODIUM is less saturated and is a look. Saturation gets this backwards."""
+    bars, sodium = stats_of(cast(BARS, (1.0, 1.08, 1.0))), stats_of(SODIUM)
+    assert bars.saturation > sodium.saturation           # ... and yet:
+    assert bars.hue_strength < 0.04 < 0.12 < sodium.hue_strength
+    assert "cast" in compile_intent(Intent(), bars, balance=True).rationale
+    assert "cast" not in compile_intent(Intent(), sodium, balance=True).rationale
+
+
+def test_a_black_point_may_be_set_on_a_look_without_touching_its_colour():
+    """The two halves are independently gated. Fogged sodium footage gets its
+    blacks back and keeps every degree of its orange."""
+    fogged = np.clip(SODIUM * 0.8 + 0.09, 0.0, 1.0)
+    out_ = balanced(fogged)
+    assert m_p1(fogged) > 0.08 and m_p1(out_) < 0.005
+    a, b = stats_of(fogged), stats_of(out_)
+    assert abs(a.dominant_hue - b.dominant_hue) < 0.5, (a.dominant_hue, b.dominant_hue)
+    assert m_rb(out_) > m_rb(fogged)      # de-fogging raises contrast, never neutralises
+
+
+# ---- black and white point ------------------------------------------------
+
+
+def test_balance_pulls_a_fogged_black_point_down_and_pins_the_white_point():
+    """p1 0.145 -> 0.000 with p99 unmoved to 1e-12. The white point is an
+    ANCHOR, not a second target: lifted blacks are fog and always a defect,
+    while a clip whose p99 sits at 0.69 may simply be a night scene, and
+    stretching that to full range is what the `exposure` verb is for."""
+    fog = np.clip(IMG * 0.85 + 0.08, 0.0, 1.0)
+    out_ = balanced(fog)
+    assert m_p1(fog) > 0.14 and m_p1(out_) < 0.002
+    assert abs(m_p99(out_) - m_p99(fog)) < 1e-12, (m_p99(fog), m_p99(out_))
+
+
+def test_a_black_point_already_at_zero_is_left_where_it_is():
+    """Lifting a black point that is already at 0 does nothing, so the pass
+    must not spend a slope on it."""
+    spec = compile_intent(Intent(), stats_of(NEUTRAL), balance=True)
+    assert abs(spec.offset.r) < 1e-3 and abs(spec.slope.r - 1.0) < 1e-3
+
+
+def test_unmeasured_percentiles_do_not_invent_a_black_point():
+    """Sessions written before probe.py grew percentiles load with p1/p50/p99
+    all zero; _measure documents the same fallback for headroom."""
+    spec = compile_intent(Intent(), clip_stats(p1=RGB.of(0.0), p50=RGB.of(0.0),
+                                               p99=RGB.of(0.0), hue_strength=0.0), balance=True)
+    assert abs(spec.slope.r - 1.0) < 1e-9 and abs(spec.offset.r) < 1e-9
+
+
+# ---- rails ----------------------------------------------------------------
+
+
+def test_balance_does_not_push_crushed_blacks_further_into_the_rail():
+    """`_shadows` damps a shadow move by `crushed_low` because welded pixels
+    move together and stay welded; the balance uses the same measurement,
+    floored at 0 rather than 0.3 -- a verb the user asked for has to do
+    something, an unrequested correction may correctly do nothing.
+
+    Measured: 37.25% crushed before, 37.23% after -- it went DOWN -- with the
+    green cast still removed (hue_strength 0.0185 -> 0.0001)."""
+    crushed = cast(np.clip(_g.uniform(-0.35, 0.7, (20000, 1)) + _noise((20000, 3)), 0.0, 1.0),
+                   (1.0, 1.07, 1.0))
+    assert m_crushed(crushed) > 0.3
+    out_ = balanced(crushed)
+    assert m_crushed(out_) <= m_crushed(crushed) + 1e-9, (m_crushed(crushed), m_crushed(out_))
+    assert m_hue_strength(out_) < 0.2 * m_hue_strength(crushed)  # and it still worked
+
+
+def test_a_balanced_grade_still_grows_its_own_highlight_shoulder():
+    """_protect_highlights reads slope/offset, so writing the balance into the
+    CDL means the shoulder covers the composed grade for free."""
+    dim = cast(np.clip(IMG * 0.55, 0.0, 1.0), (1.0, 1.08, 1.0))
+    spec = compile_intent(one("exposure", "strong"), stats_of(dim), balance=True)
+    o = spec.apply(dim)
+    assert np.all(np.isfinite(o)) and o.max() <= 1.0
+
+
+# ---- it composes ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("gain,label", [((1.0, 1.06, 1.0), "green"), ((1.05, 1.0, 1.05), "magenta")])
+def test_the_creative_move_survives_the_balance(gain, label):
+    """Balance writes slope/offset (step 2); "warmer" writes temperature (step
+    3). Different fields on purpose, so the look lands on top of the correction
+    instead of being cancelled by it. Measured: r-b moves +0.0243 with the
+    balance on and +0.0257 with it off, i.e. 95% of the creative move survives
+    on the green clip and 88% on the magenta one."""
+    img = cast(IMG, gain)
+    base, both = balanced(img), balanced(img, one("warmth"))
+    alone = out(one("warmth"), stats_of(img), img=img)
+
+    moved = m_rb(both) - m_rb(base)
+    assert moved > 0.015, (label, moved)
+    assert moved > 0.8 * (m_rb(alone) - m_rb(img)), (label, moved, m_rb(alone) - m_rb(img))
+
+
+def test_balance_is_the_point_the_same_look_lands_in_the_same_place():
+    """Why A6 exists, as a number. Two shots of one scene, one a little green
+    and one a little magenta, given the same sentence: the green/magenta
+    separation between the two results is 0.0602 without the balance and
+    0.00004 with it -- 1500x smaller, which is the whole point of A6."""
+    green, magenta = cast(IMG, (0.97, 1.04, 0.97)), cast(IMG, (1.04, 0.96, 1.04))
+    warm = one("warmth")
+
+    raw = abs(m_magenta(out(warm, stats_of(green), img=green)) -
+              m_magenta(out(warm, stats_of(magenta), img=magenta)))
+    fixed = abs(m_magenta(balanced(green, warm)) - m_magenta(balanced(magenta, warm)))
+    assert raw > 0.05, raw
+    assert fixed < 0.1 * raw, (raw, fixed)
+
+
+def test_an_unmeasured_hue_strength_is_not_read_as_no_cast():
+    """`hue_strength` defaults to 0.0 on sessions written before probe.py
+    measured it, and 0.0 otherwise means "correct in full". Real footage never
+    reads exactly 0 -- the flattest clip in this file is 6e-4 -- so an exact
+    zero next to real chroma is missing data, and a correction nobody asked for
+    does not get made on missing data."""
+    st = stats_of(cast(IMG, (1.06, 1.0, 0.94)))
+    assert compile_intent(Intent(), st, balance=True).rationale.startswith("Neutralised")
+    legacy = st.model_copy(update={"hue_strength": 0.0})
+    assert "cast" not in compile_intent(Intent(), legacy, balance=True).rationale
