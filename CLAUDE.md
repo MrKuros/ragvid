@@ -190,3 +190,4 @@ one look across a cut is the wrong answer.
 - **Windows PowerShell 5.1 has no `&&`.** One command per line in the README.
 - **A `<dialog>` opened with `showModal()` sits in the browser top layer**, so a normal-flow error banner is invisible behind its backdrop.
 - **`fetch()` cannot report upload progress**; `XMLHttpRequest.upload.onprogress` can. That is the one place XHR earns its keep.
+- **FFV1 belongs in `.mkv`, not `.mp4`.** MP4 only learned to carry it recently, so a lossless test fixture written to `.mp4` passes locally and fails CI with `Could not find tag for codec ffv1`. More generally: a green local suite does not prove a green CI, because the runner's ffmpeg is older than yours.
