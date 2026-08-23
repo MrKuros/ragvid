@@ -110,8 +110,19 @@ def test_the_escaped_form_round_trips_through_a_real_ffmpeg(tmp_path):
 
 
 def _fake_exe(path: Path) -> Path:
-    path.write_text("#!/bin/sh\nexit 0\n")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    """A do-nothing executable, on whatever OS is running the suite.
+
+    Windows resolves executables through PATHEXT and has no shebang, so an
+    extensionless /bin/sh script is not an executable there at all -- shutil.which
+    returns None and the override tests fail for a reason that has nothing to do
+    with the code under test.
+    """
+    if plat.is_windows():
+        path = path.with_suffix(".cmd")
+        path.write_text("@exit /b 0\r\n")
+    else:
+        path.write_text("#!/bin/sh\nexit 0\n")
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
 
 
@@ -185,10 +196,11 @@ def test_render_and_probe_both_go_through_discovery(tmp_path, monkeypatch):
     from ragvid import probe
 
     calls: list[str] = []
-    monkeypatch.setattr(plat, "find_binary", lambda name: calls.append(name) or "/bin/true")
+    noop = str(_fake_exe(tmp_path / "noop"))  # /bin/true does not exist on Windows
+    monkeypatch.setattr(plat, "find_binary", lambda name: calls.append(name) or noop)
     render.probe_duration("x.mp4")
     with pytest.raises(Exception):
-        probe._ffprobe("x.mp4")  # /bin/true prints nothing, so this is not JSON
+        probe._ffprobe("x.mp4")  # it prints nothing, so this is not JSON
     assert calls == ["ffprobe", "ffprobe"]
 
 

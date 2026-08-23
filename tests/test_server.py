@@ -240,21 +240,37 @@ def test_open_by_path(api):
     assert api.state() == body  # a read returns exactly what the mutation did
 
 
+def _work(tmp_path):
+    """The work dir, asked of the platform rather than spelled out.
+
+    The conftest fixture pins all three branches of platform.data_dir() into
+    tmp_path, so this is still isolated -- but the LAYOUT underneath differs
+    per OS (~/Library/Application Support on macOS, %APPDATA% on Windows), and
+    hardcoding the XDG one failed both of those runners while proving nothing
+    extra on Linux.
+    """
+    from ragvid.platform import data_dir
+
+    work = data_dir() / "work"
+    assert tmp_path in work.parents, work  # the isolation itself, asserted
+    return work
+
+
 def test_upload_lands_in_the_work_dir_byte_identical(api, tmp_path):
     data = SAMPLE.read_bytes()
     body = api.upload("/api/project", "clip.mp4", data).json
     landed = Path(body["source"])
-    assert landed == tmp_path / "xdg" / "ragvid" / "work" / "clip.mp4"
+    assert landed == _work(tmp_path) / "clip.mp4"
     assert landed.read_bytes() == data
 
 
 def test_upload_filename_cannot_escape_the_work_dir(api, tmp_path):
-    work = tmp_path / "xdg" / "ragvid" / "work"
+    work = _work(tmp_path)
     body = api.upload("/api/project", "../../../../etc/passwd.mp4", SAMPLE.read_bytes()).json
     assert Path(body["source"]) == work / "passwd.mp4"
     # Nothing was created anywhere above the work dir.
     assert sorted(p.name for p in work.iterdir()) == ["passwd.mp4"]
-    assert not (tmp_path / "etc").exists() and not (tmp_path / "xdg" / "etc").exists()
+    assert not (tmp_path / "etc").exists() and not (work.parent / "etc").exists()
 
 
 def test_reference_plans_a_grade_offline(api):

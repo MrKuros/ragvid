@@ -39,7 +39,7 @@ def _script(page: str) -> str:
 
 
 def _run_harness(page: str, tmp_path: Path) -> subprocess.CompletedProcess:
-    harness = HARNESS.read_text()
+    harness = HARNESS.read_text(encoding="utf-8")
     assert MARKER in harness
     js = tmp_path / "harness.js"
     js.write_text(harness.replace(MARKER, _script(page)))
@@ -53,7 +53,7 @@ def _needs_node():
 
 
 def test_the_page_runs_and_its_live_preview_behaves(tmp_path):
-    proc = _run_harness(server.INDEX.read_text(), tmp_path)
+    proc = _run_harness(server.INDEX.read_text(encoding="utf-8"), tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "page harness ok" in proc.stdout
 
@@ -79,7 +79,7 @@ def test_the_harness_fails_against_the_previous_page(tmp_path):
 
 
 def _shader(name: str) -> str:
-    page = server.INDEX.read_text()
+    page = server.INDEX.read_text(encoding="utf-8")
     found = re.search(rf"const {name} = `(.*?)`;", page, re.S)
     assert found, f"{name} is not in index.html"
     # One template substitution, and it is the clipping threshold.
@@ -241,7 +241,7 @@ GLSL_MASK_LINES = (
 
 def _gl_shapes():
     """The shapes index.html's gate will draw, from the page's own allow-list."""
-    page = server.INDEX.read_text()
+    page = server.INDEX.read_text(encoding="utf-8")
     found = re.search(r"const GL_SHAPES = new Set\(\[(.*?)\]\)", page)
     assert found, "index.html no longer allow-lists the shapes it can compute"
     return set(re.findall(r'"(\w+)"', found.group(1)))
@@ -252,7 +252,7 @@ GL_SHAPES = _gl_shapes()
 
 def _gl_edge():
     """index.html's `edge` -> (dir.x, dir.y, offset) packing, from the page."""
-    page = server.INDEX.read_text()
+    page = server.INDEX.read_text(encoding="utf-8")
     found = re.search(r"const GL_EDGE = \{(.*?)\};", page, re.S)
     assert found, "index.html no longer packs the linear edges"
     return {k: [float(n) for n in v.split(",")]
@@ -380,7 +380,7 @@ def test_the_shader_declares_the_slots_index_html_thinks_it_has():
     """GL_MAX_LAYERS lives in JS and the array size lives in GLSL. They are one
     number in two languages, and a stack past the smaller one is either a
     dropped layer or a link failure."""
-    page = server.INDEX.read_text()
+    page = server.INDEX.read_text(encoding="utf-8")
     n = int(re.search(r"const GL_MAX_LAYERS = (\d+);", page).group(1))
     fs = _shader("GL_FS")
     assert f"uniform sampler3D lay[{n}];" in fs
