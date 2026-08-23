@@ -32,10 +32,10 @@ prompt → LLM → Intent (typed verbs, no numbers) → compiler → GradeStack 
                             measured ClipStats from the clip
 ```
 
-The model **never emits a number**. It picks from a closed vocabulary of 16
+The model **never emits a number**. It picks from a closed vocabulary of 17
 verbs with a direction and a coarse amount (`subtle`/`moderate`/`strong`), and
 deterministic code in `compiler.py` decides magnitudes by consulting what was
-actually measured off the footage. `intent.py`'s schema is 824 bytes against
+actually measured off the footage. `intent.py`'s schema is 834 bytes against
 `GradeSpec`'s 2692.
 
 This is the load-bearing decision in the project. Measured against the older
@@ -73,7 +73,7 @@ worse than falling back.
 | `looks.py` | The retrieval corpus, used by the direct path only. |
 | `project.py` | Orchestrates probe → plan → bake → preview → export. |
 | `session.py` | Persistence, history, undo. |
-| `server.py` | The local HTTP server. `API_VERSION` currently **10**. |
+| `server.py` | The local HTTP server. `API_VERSION` currently **11**. |
 | `web/index.html` | The whole UI, one file. WebGL preview + the "what it did" list. |
 
 ## Invariants — break these and something silently corrupts
@@ -150,7 +150,8 @@ undo. "No exception raised" and "the tests pass" are not evidence.
 ```
 uv run ragvid serve              # the app, opens a browser
 uv run ragvid serve --no-browser --port 8765
-uv run pytest -q                 # 751 tests, ~2 min
+uv run pytest -q                 # 792 tests, ~2 min
+./scripts/check.sh               # the gate: tests + invariants (--ci, --live)
 ```
 
 Keys are entered in the GUI only. There is no CLI path for a key and no
@@ -160,14 +161,16 @@ by construction.
 ## Where it stands
 
 Tier A is complete. Tier C is complete. Tier B is complete except B3 curves,
-B4 a real HSL qualifier, B5 keyframes and B6 protect/exclude verbs.
+B4 a real HSL qualifier and B5 keyframes. Packaged for PyPI as 0.2.0
+(`uv tool install ragvid`) — the wheel is verified from a clean venv, but the
+tag has not been pushed and nothing is published yet.
 
-A sentence can name **what** to do (16 verbs), **how much** (three amounts plus
-a whole-look strength), and **which pixels** — by colour (ten hue families,
+A sentence can name **what** to do (17 verbs), **how much** (three amounts plus
+a whole-look strength), **which pixels** — by colour (ten hue families,
 including skin), by place (top/bottom/left/right/center/edges) or by thing
-(sky/foliage/person/water/buildings, via the local segmentation model). Refine
-edits that list rather than the numbers, so a second sentence no longer
-destroys the first one's regions.
+(sky/foliage/person/water/buildings, via the local segmentation model) — and
+**what to spare** (`protect`). Refine edits that list rather than the numbers,
+so a second sentence no longer destroys the first one's regions.
 
 Semantic masks are sampled **once**, not per frame: inference is 244 ms, so a
 10-minute clip would cost 58 minutes of segmentation against a 14-minute
@@ -175,9 +178,10 @@ export. The honest consequence — a subject leaving frame keeps its grade — i
 documented in `segment.py`.
 
 Next: **B3 curves** ("crush the blacks but keep the highlights soft") is the
-largest remaining gap in what a sentence can express. **A7** is measured and
-unused — `ClipStats.cuts` knows a clip spans a cut and nothing says so, while
-one look across a cut is the wrong answer.
+largest remaining gap in what a sentence can express. After that the honest
+1.0 blocker is not a feature: nobody has yet graded real footage with this,
+and the CI matrix has only just gained Windows and macOS — whose first run
+already turned up an `os.fchmod` call that made the app unconfigurable there.
 
 ## Things that bit us, so they don't again
 

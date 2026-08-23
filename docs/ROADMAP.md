@@ -73,7 +73,7 @@ Marks are against the code as of 2026-08-23: **[have] / [partial] / [none]**.
 | A4 | Built-in log transforms (S-Log3, V-Log, C-Log, Log-C, N-Log) | **[have]** | **removed** UI | `logspace.py` generates the conversion. All five land 18% grey on 0.408–0.412 against Rec.709's 0.409, from constant sets spanning 0.343–0.423. Two spans, three links and a file hunt became one `<select>`. |
 | A5 | Richer measurement feeding the compiler | **[have]** | invisible | The compiler reads them all. `hue_strength` added: HSV saturation cannot fall when a frame holds two opposite hues, so it could not carry hue confidence. |
 | A6 | Auto-balance before the creative grade | **[have]** | invisible (first row of the C3 list) | Green-cast and magenta-cast shots given the same "warmer" end up 1500× closer (0.0602 → 0.00004). A sodium street and a blue night are left bit-for-bit alone. |
-| A7 | Scene-cut awareness | **[partial]** | invisible | `cuts` counts luma-histogram jumps — a whip pan measures 1.00 by frame difference and 0.22 by histogram. Measured only; nothing acts on it yet. |
+| A7 | Scene-cut awareness | **[have]** | invisible (a row in the C3 list) | The grade says a clip does not look like one continuous shot, and changes no number to do it. Worded to what the detector knows — a hard flash and a 3-stop lighting change both register, so it does not claim to have found a cut. |
 | A8 | ASC CDL export + `look.json` sidecar | **[have]** | none — they just appear | Closed the data-loss bug: a `.cube` cannot carry `EffectSpec`. `exposure` folds exactly into CDL slope; what CDL cannot carry is named in its `<Description>`, diffed against identity so a new field joins the list automatically. |
 | A9 | LUT precision | **[have]** | — | `lut.py` escalates 33³→65³ when hue qualifiers are on, with measured banding error behind the choice. |
 
@@ -88,7 +88,7 @@ Each is a compiler pass plus a verb or two. **None adds a control to the screen.
 | B3 | Curves (master, per-channel, hue-vs-hue, hue-vs-sat, lum-vs-sat) | **[none]** | "crush the blacks but keep the highlights soft" |
 | B4 | Real HSL qualifier (arbitrary volume, matte finesse, despill) | **[partial]** | "kill the sodium streetlights" — six fixed bands cannot isolate one colour |
 | B5 | Keyframes / change over time | **[none]** | "get darker as he walks into the tunnel" |
-| B6 | Protect / exclude verbs | **[none]** | "…but don't touch skin" — needs B2; the most-repeated real note in grading |
+| B6 | Protect / exclude verbs | **[have]** | "darken the top but don't touch the person". A protect is an intersection — it narrows a region, never weakens one. A colour target is refused rather than faked: a once-sampled skin matte would be worse than the `skin` hue qualifier, which follows a face through a cut. |
 | B7 | Relative edits against the measured clip | **[have]** | "a stop brighter", "a bit less warm" — refine edits the verb list, not the 43 numbers, so regions survive it. |
 
 **B1 + B2 is the moat.** It is what Resolve users pay for (Magic Mask), and the

@@ -162,6 +162,7 @@ def api(httpd, tmp_path, monkeypatch) -> Api:
     monkeypatch.setattr(server.S, "project", None)
     monkeypatch.setattr(server.S, "version", 0)
     monkeypatch.setattr(server.S, "exports", {})
+    monkeypatch.setattr(server.S, "download", None)
     monkeypatch.setattr(server.S, "n_exports", 0)
     monkeypatch.setattr(server.S, "root", tmp_path / "state")
     host, port = httpd.server_address[:2]
@@ -1251,3 +1252,148 @@ def test_a_balance_body_that_is_not_a_boolean_is_a_400(api):
     api.open_clip()
     assert api.post("/api/balance", {"on": "yes"}).error["type"] == "InputError"
     assert api.post("/api/balance", {}).status == 400
+
+
+# ---- semantic masks: the precondition, and the gate that satisfies it -------
+# NO TEST HERE MAY DOWNLOAD ANYTHING. Everything is mocked at the `segment`
+# boundary: have_runtime, model_path, download_model. The one real thing is the
+# route plumbing, which is the part that was missing.
+
+SKY = {"intent": {"ops": [{"op": "exposure", "dir": "down", "amount": "moderate",
+                           "target": "sky"}], "strength": "full"}}
+
+
+@pytest.fixture
+def no_runtime(monkeypatch, tmp_path):
+    """The state EVERY user is in: `pip install ragvid` with no extra."""
+    monkeypatch.setattr("ragvid.segment.have_runtime", lambda: False)
+    monkeypatch.setattr("ragvid.segment.model_path", lambda: tmp_path / "nope.onnx")
+    monkeypatch.setattr(server.S, "download", None)
+
+
+@pytest.fixture
+def runtime_no_weights(monkeypatch, tmp_path):
+    """The extra is installed; the 15 MB file has never been fetched."""
+    monkeypatch.setattr("ragvid.segment.have_runtime", lambda: True)
+    monkeypatch.setattr("ragvid.segment.model_path", lambda: tmp_path / "nope.onnx")
+    monkeypatch.setattr(server.S, "download", None)
+
+
+def test_a_semantic_region_is_refused_before_it_lands_and_the_session_still_renders(
+        api, no_runtime):
+    """The whole bug, in one test.
+
+    Before this, "make the sky moody" compiled, was PUSHED onto the history, and
+    only then failed inside the frame render -- with a 500, because
+    SegmentUnavailable had no status. The session was left holding a grade that
+    could not be drawn. So the assertion that matters is the last one: the frame
+    still renders, at the grade that was there before.
+    """
+    api.open_clip()
+    before = api.plan()                       # an ordinary, renderable grade
+    assert api.get(f"/media/frame?t=1&graded=1&v={before['version']}").status == 200
+
+    r = api.post("/api/intent", SKY)
+    assert r.status == 428, r.body
+    assert r.error["type"] == "SegmentUnavailable"
+    assert r.error["needs_install"] is True
+    assert "ragvid[masks]" in r.error["hint"]
+
+    after = api.state()
+    assert after["history_depth"] == before["history_depth"], "the grade landed anyway"
+    assert after["layers"] == []
+    assert api.get(f"/media/frame?t=1&graded=1&v={after['version']}").status == 200
+
+
+def test_the_weights_being_absent_is_the_other_428(api, runtime_no_weights):
+    """Same status, different fix -- and the client can tell which without
+    parsing a message."""
+    api.open_clip()
+    r = api.post("/api/intent", SKY)
+    assert r.status == 428
+    assert r.error["needs_install"] is False
+    assert "download_model" in r.error["hint"]
+
+
+def test_a_geometric_region_is_untouched_by_the_guard(api, no_runtime):
+    """The guard must fire on `semantic` only. "the top" needs no model at all."""
+    api.open_clip()
+    body = {"intent": {"ops": [{"op": "exposure", "dir": "down", "amount": "moderate",
+                                "target": "top"}], "strength": "full"}}
+    r = api.post("/api/intent", body)
+    assert r.status == 200, r.body
+    assert r.json["layers"], "the geometric layer should still be there"
+
+
+def test_the_download_route_refuses_when_the_runtime_is_missing(api, no_runtime):
+    """15 MB of weights are useless without onnxruntime, and no browser button
+    can run pip -- so the server says so rather than downloading anyway."""
+    r = api.post("/api/segment/download")
+    assert r.status == 428
+    assert r.error["needs_install"] is True
+    assert server.S.download is None, "nothing was started"
+
+
+def test_the_download_reports_progress_completes_and_refuses_a_second(
+        api, runtime_no_weights, monkeypatch):
+    gate = threading.Event()
+    started = threading.Event()
+
+    def fake_download(progress=None):
+        started.set()
+        progress(0.25)
+        gate.wait(10)
+        progress(1.0)
+        return Path("/tmp/fake.onnx")
+
+    monkeypatch.setattr("ragvid.segment.download_model", fake_download)
+
+    r = api.post("/api/segment/download")
+    assert r.status == 202 and r.json["state"] == "running"
+    assert started.wait(5)
+
+    # Two at once must not both run -- the second is refused, not queued.
+    busy = api.post("/api/segment/download")
+    assert busy.status == 409 and busy.error["type"] == "ExportBusy"
+
+    for _ in range(100):
+        if api.get("/api/segment/download").json["progress"] == 0.25:
+            break
+        time.sleep(0.02)
+    assert api.get("/api/segment/download").json["progress"] == 0.25, "progress never arrived"
+
+    gate.set()
+    for _ in range(200):
+        job = api.get("/api/segment/download").json
+        if job["state"] != "running":
+            break
+        time.sleep(0.02)
+    assert job["state"] == "done" and job["progress"] == 1.0, job
+
+    # And once it is done, a second POST is allowed again.
+    gate.set()
+    assert api.post("/api/segment/download").status == 202
+
+
+def test_a_failed_download_lands_in_the_job_not_in_a_traceback(api, runtime_no_weights,
+                                                               monkeypatch):
+    from ragvid.segment import SegmentUnavailable
+
+    def boom(progress=None):
+        raise SegmentUnavailable("checksum mismatch", needs_install=False, hint="retry")
+
+    monkeypatch.setattr("ragvid.segment.download_model", boom)
+    assert api.post("/api/segment/download").status == 202
+    for _ in range(200):
+        job = api.get("/api/segment/download").json
+        if job["state"] != "running":
+            break
+        time.sleep(0.02)
+    assert job["state"] == "error"
+    assert job["error"]["type"] == "SegmentUnavailable"
+    assert job["error"]["needs_install"] is False
+
+
+def test_the_status_route_answers_before_anything_was_started(api, no_runtime):
+    body = api.get("/api/segment/download").json
+    assert body == {"state": "idle", "progress": 0.0, "error": None, "ready": False}

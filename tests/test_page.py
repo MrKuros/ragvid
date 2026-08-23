@@ -67,10 +67,10 @@ def test_the_harness_fails_against_the_previous_page(tmp_path):
     if git.returncode != 0:
         pytest.skip("no committed index.html to compare against")
     # The marker is the newest thing the harness asserts about, not the oldest:
-    # once regionMask is committed there is nothing older here to fail against
+    # once bannerGet is committed there is nothing older here to fail against
     # and the next change has to move this line to its own marker.
-    if "regionMask" in git.stdout:
-        pytest.skip("the regional composite is already committed; nothing older to fail against")
+    if "bannerGet" in git.stdout:
+        pytest.skip("the segmentation row is already committed; nothing older to fail against")
     proc = _run_harness(git.stdout, tmp_path)
     assert proc.returncode != 0, "the harness passed on the pre-change page — it tests nothing"
 

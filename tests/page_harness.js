@@ -345,6 +345,16 @@ const layer = (region) => ({ region, spec: { ...SPEC } });
   render(reset({ layers: Array(6).fill(layer(REGION_TOP)), version: 54 }));
   await settle();
   ok(liveOn === true && uniforms.nLayers === 6, "and exactly six is still live");
+  // A protect (roadmap B6) is an intersection the export applies and regionMask
+  // does not: mask x prod(1 - mask_protected). Drawing only the first factor
+  // grades the pixels the protect spares, so the whole layer declines.
+  render(reset({ layers: [layer({ ...REGION_TOP, exclude: [REGION_CENTER] })], version: 55 }));
+  await settle();
+  ok(liveOn === false, "a region with a protect falls back -- the shader has no exclusion");
+  ok(frameAsked(), "and the server-rendered still appears instead");
+  render(reset({ layers: [layer({ ...REGION_TOP, exclude: [] })], version: 56 }));
+  await settle();
+  ok(liveOn === true, "an empty exclude list is not a protect and stays live");
 
   render(reset({ spec: { ...SPEC, effects: { ...EFFECTS, grain: 0.3 } }, version: 5 }));
   await settle();
@@ -390,6 +400,47 @@ const layer = (region) => ({ region, spec: { ...SPEC } });
   await settle();
   ok(liveOn === false, "an unusable cube must not leave an ungraded canvas up");
   ok(frameAsked(), "it falls back to the server too");
+
+  // --- semantic masks: one row, and only when it can actually help ---------
+  // The optional extra is not installed by default, so this is the path EVERY
+  // user hits the first time they name a thing in the picture.
+  render(reset({ version: 60 }));
+  await settle();
+
+  showError({ info: { type: "SegmentUnavailable", message: "no runtime",
+                      needs_install: true, hint: "run: pip install 'ragvid[masks]'" } });
+  ok($("banner").classList.contains("show"), "a missing segmentation model is announced");
+  ok($("bannerMsg").textContent.includes("pip install 'ragvid[masks]'"),
+     "the install command is shown plainly -- no browser button can run pip");
+  ok($("bannerGet").hidden === true, "and no button is offered that could not work");
+
+  showError({ info: { type: "SegmentUnavailable", message: "no weights",
+                      needs_install: false, hint: "call download_model()" } });
+  ok($("bannerGet").hidden === false, "weights the app CAN fetch get a button");
+  ok(!$("bannerMsg").textContent.includes("pip install"),
+     "and the install line is not shown for a problem it does not fix");
+
+  // Pressing it reuses the upload bar rather than adding a second progress UI.
+  routes["/api/segment/download"] = { state: "running", progress: 0.4, error: null };
+  fetched.length = 0;
+  await $("bannerGet").onclick();
+  ok(fetched.filter((u) => u === "/api/segment/download").length >= 2,
+     "the button posts the download, then polls it");
+  ok($("uploading").hidden === false, "progress shows in the row that already exists");
+  ok($("upLabel").textContent === "40%" && $("upBar").style.width === "40%",
+     "and the bar reports what the server reported");
+
+  routes["/api/segment/download"] = { state: "done", progress: 1, error: null };
+  await $("bannerGet").onclick();
+  ok($("uploading").hidden === true, "the row goes away when the download finishes");
+  ok($("bannerMsg").textContent.includes("ready"), "and the user is told to ask again");
+
+  routes["/api/segment/download"] = { state: "error", progress: 0.5,
+                                      error: { type: "SegmentUnavailable", message: "checksum",
+                                               needs_install: false, hint: "retry" } };
+  await $("bannerGet").onclick();
+  ok($("uploading").hidden === true, "a failed download does not leave the bar up");
+  ok($("bannerGet").hidden === false, "and the offer comes back so it can be retried");
 
   console.log(`page harness ok (${checked} checks)`);
   process.exit(0);

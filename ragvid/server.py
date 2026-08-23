@@ -41,7 +41,7 @@ MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # the server is still running the Python it was started with -- which otherwise
 # shows up as fields silently missing and routes 404ing, with nothing on screen
 # to explain it.
-API_VERSION = 10
+API_VERSION = 11
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -68,7 +68,7 @@ class NothingToUndo(RagvidError):
 
 
 class ExportBusy(RagvidError):
-    """One export at a time."""
+    """One long job at a time — one export, and one model download."""
 
 
 # Looked up along the exception's MRO, so a new subclass of ProviderError (or of
@@ -81,6 +81,10 @@ STATUS = {
     "NothingToUndo": 409,
     "ExportBusy": 409,
     "ProviderNotConfigured": 428,
+    # Same shape of problem, so the same status: a precondition the caller can
+    # satisfy, not a failure. The exception's own `needs_install` and `hint`
+    # ride along through _error_response, which says WHICH precondition.
+    "SegmentUnavailable": 428,
     "RateLimited": 429,
     "FFmpegError": 500,
     "ProviderError": 502,
@@ -117,6 +121,8 @@ class _State:
     root: Path = Path.cwd()
     exports: dict[str, dict] = {}
     n_exports: int = 0
+    # One slot, not a registry: there is exactly one model to fetch, ever.
+    download: dict | None = None
 
 
 S = _State()
@@ -634,6 +640,54 @@ def r_export_status(req, q, name: str):
     return _ok(job)
 
 
+# ---- the segmentation model ------------------------------------------------
+# The consent gate for roadmap B2. Run exactly the way an export runs -- worker
+# thread, job dict, polled status -- because a second progress mechanism would
+# be a second thing to keep in step with the page for no gain.
+
+
+def r_segment_download(req, q):
+    """Fetch the segmentation weights (15 MB, once). POST *is* the consent.
+
+    Refuses with the same 428 the grade did when the optional extra is missing:
+    the weights are useless without onnxruntime, and no button in a browser can
+    run pip. That keeps the "no button offered" case true on the server and not
+    only in the page.
+    """
+    from . import segment
+
+    if not segment.have_runtime():
+        segment.require()
+    with LOCK:
+        if S.download and S.download["state"] == "running":
+            raise ExportBusy("a model download is already running")
+        S.download = {"state": "running", "progress": 0.0, "error": None}
+        job = S.download
+    threading.Thread(target=_run_download, args=(job,), daemon=True).start()
+    return _ok(job, 202)
+
+
+def _run_download(job: dict) -> None:
+    from . import segment
+
+    try:
+        segment.download_model(progress=lambda f: job.update(progress=round(float(f), 4)))
+        job.update(state="done", progress=1.0)
+    except Exception as exc:
+        _, _, payload = _error_response(exc)
+        job.update(state="error", error=json.loads(payload)["error"])
+
+
+def r_segment_status(req, q):
+    """How far the download got, plus the question a page actually has: can a
+    semantic region be resolved right now? `ready` is true with no job at all on
+    a machine that already has the weights."""
+    from . import segment
+
+    job = S.download or {"state": "idle", "progress": 0.0, "error": None}
+    return _ok({**job, "ready": segment.is_ready()})
+
+
 # ---- settings -------------------------------------------------------------
 # These live on the same 127.0.0.1 listener as everything else -- no new socket,
 # no wider bind. A key is only ever ACCEPTED here; nothing below ever returns
@@ -717,6 +771,8 @@ ROUTES = {
     ("POST", "/api/key"): r_set_key,
     ("POST", "/api/input_lut"): r_input_lut,
     ("POST", "/api/export"): r_export,
+    ("POST", "/api/segment/download"): r_segment_download,
+    ("GET", "/api/segment/download"): r_segment_status,
 }
 
 
@@ -834,6 +890,7 @@ def _selfcheck() -> None:
     """`python -m ragvid.server` — the three bits with edges: multipart, filenames,
     status mapping. Everything else is one call into Project."""
     from .errors import NoGrade, ProviderNotConfigured, RateLimited
+    from .segment import SegmentUnavailable
 
     body = (b'--X\r\nContent-Disposition: form-data; name="file"; filename="a b.mp4"\r\n'
             b"Content-Type: video/mp4\r\n\r\n\x00\x01PAYLOAD\r\n--X--\r\n")
@@ -843,7 +900,8 @@ def _selfcheck() -> None:
     assert _safe_name("a/b\\c.mp4") == "c.mp4"
     for exc, code in [(InputError("f", "bad"), 400), (NoGrade(), 409), (NothingToUndo("x"), 409),
                       (SessionNotFound("/r"), 404), (ProviderNotConfigured("groq", "K"), 428),
-                      (RateLimited("groq", 54.0), 429), (ValueError("boom"), 500)]:
+                      (RateLimited("groq", 54.0), 429), (ValueError("boom"), 500),
+                      (SegmentUnavailable("no model", False, "download it"), 428)]:
         status, _, raw = _error_response(exc)
         assert status == code, (exc, status, code)
         assert json.loads(raw)["error"]["type"] == type(exc).__name__

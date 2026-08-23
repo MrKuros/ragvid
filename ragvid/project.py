@@ -495,6 +495,22 @@ class Project:
 
     def _push(self, spec: GradeSpec, label: str = "", intent: Intent | None = None,
               layers: list[Layer] | None = None) -> GradeSpec:
+        """The one funnel every grade lands through. Guarded here for that reason.
+
+        A semantic layer needs the local segmentation model, and until this
+        guard existed the failure landed at RENDER time -- after the grade was
+        already on the history. The session then held a look that could not be
+        drawn, and the only way out was guessing at undo. Refusing before the
+        push leaves the session exactly as it was, still rendering.
+
+        `segment.require()` rather than `is_ready()` because the two causes
+        need different fixes and only that function knows which one applies;
+        rebuilding its SegmentUnavailable here would duplicate both hints.
+        """
+        if layers and GradeStack(base=spec, layers=layers).needs_frame:
+            from . import segment
+
+            segment.require()
         self.session.push(spec, label, intent, layers)
         self.save()
         return spec

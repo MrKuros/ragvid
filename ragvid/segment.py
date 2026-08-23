@@ -145,8 +145,14 @@ def is_ready() -> bool:
     return have_runtime() and model_path().is_file()
 
 
-def _require() -> None:
-    """Raise the typed, actionable failure. The whole degradation path."""
+def require() -> None:
+    """Raise the typed, actionable failure. The whole degradation path.
+
+    Public because project.py and server.py both need the *typed* answer, not
+    the bool `is_ready()` gives: the two causes carry different `needs_install`
+    and different hints, and rebuilding that at each caller would duplicate both
+    hint strings and let them drift.
+    """
     if not have_runtime():
         raise SegmentUnavailable(
             "semantic masks need the optional segmentation runtime",
@@ -211,7 +217,7 @@ def _session():
     """
     global _SESSION
     if _SESSION is None:
-        _require()
+        require()
         import onnxruntime as ort  # noqa: PLC0415 — deliberate, see above
 
         _SESSION = ort.InferenceSession(

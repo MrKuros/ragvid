@@ -40,7 +40,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
                       "text":"warmed it up"}]},
   "auto_balance": true,
   "balance": "neutralised a green cast, set the black point",
-  "api_version": 10,
+  "api_version": 11,
   "version": 8,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,
@@ -323,6 +323,48 @@ are in play: measured at 1080p30, the full effect stack runs 0.42× realtime on
 libx264 and 0.48× on NVENC, because the filters — not the encoder — are the
 ceiling. Colour-only exports run 1.38×. Size the progress bar's ETA accordingly.
 
+## The segmentation model
+
+A sentence that names a **thing** in the picture ("the sky", "the person") is
+resolved by a local model that is not installed by default. Every mutation that
+would compile such a region is refused **before** it lands, with `428
+SegmentUnavailable` — the grade never reaches the history, so the session keeps
+rendering whatever it had.
+
+The error's `needs_install` says which of the two preconditions is missing, and
+the fixes are not the same:
+
+| `needs_install` | What is missing | Client should |
+|---|---|---|
+| `true` | the optional extra | show `pip install 'ragvid[masks]'`. **Offer no button** — nothing over HTTP can install a Python package. |
+| `false` | the 15 MB weights | offer the download below |
+
+`POST /api/segment/download` → `202`
+
+```json
+{"state": "running", "progress": 0.0, "error": null}
+```
+
+The consent gate: posting here *is* the consent, and it is the only download in
+the app. Runs on a worker thread and is polled exactly like an export. One at a
+time — a second `POST` while one runs is `409 ExportBusy`. It returns `428` with
+`needs_install: true` when the extra is missing, because the weights are useless
+without it.
+
+`GET /api/segment/download` → `200`
+
+```json
+{"state": "idle", "progress": 0.0, "error": null, "ready": false}
+```
+
+`state` is `idle` | `running` | `done` | `error`; `error` is the object under
+[Errors](#errors). `ready` answers the question a client actually has — can a
+semantic region be resolved right now — and is `true` with no job at all on a
+machine that already has the weights.
+
+Once it is `done`, re-send the request that was refused. Nothing is retried
+automatically: the user asked for a grade, not for a download that then grades.
+
 ## Providers and keys
 
 `GET /api/providers` → `200`
@@ -412,7 +454,8 @@ Any non-2xx carries:
 ```
 
 `type` is the exception class name. Extra keys are the fields that class carries
-(`retry_after`, `env_var`, `path`, `reason`, `root`, `returncode`). The client
+(`retry_after`, `env_var`, `path`, `reason`, `root`, `returncode`,
+`needs_install`, `hint`). The client
 branches on `type` and shows `message`; it must never parse `message`.
 
 | `type` | Status | Client should |
@@ -421,6 +464,7 @@ branches on `type` and shows `message`; it must never parse `message`.
 | `NoGrade` | 409 | prompt to grade first |
 | `SessionNotFound` | 404 | show the empty state |
 | `ProviderNotConfigured` | 428 | explain which env var is missing |
+| `SegmentUnavailable` | 428 | branch on `needs_install`; see [the segmentation model](#the-segmentation-model) |
 | `RateLimited` | 429 | show a countdown from `retry_after` |
 | `ProviderError` | 502 | show the message |
 | `FFmpegError` | 500 | show the message, offer the log |

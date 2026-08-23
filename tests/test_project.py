@@ -761,3 +761,92 @@ def test_the_render_calls_are_handed_the_layers(project, tmp_path, monkeypatch):
     # ... and the ungraded half of a before/after compare gets none of it.
     project.preview(graded=False)
     assert seen["preview"] is None
+
+
+# ---- the semantic-mask precondition ----------------------------------------
+# Mocked at the `segment` boundary in every direction: no test here may install
+# an extra, download 15 MB, or run inference.
+
+
+def _sky() -> "Intent":
+    from ragvid.intent import Intent, Op
+
+    return Intent(ops=[Op(op="warmth"), Op(op="exposure", dir="down", target="sky")])
+
+
+def test_a_semantic_grade_is_refused_before_it_reaches_the_history(project, monkeypatch):
+    """The failure has to land BEFORE _push, not inside the render.
+
+    Pushed first, the session held a grade that could not be drawn and the only
+    escape was guessing at undo. So the assertions are about what did NOT
+    happen: no spec, no layer, no label.
+    """
+    from ragvid.intent import Intent, Op
+    from ragvid.segment import SegmentUnavailable
+
+    monkeypatch.setattr("ragvid.segment.have_runtime", lambda: False)
+    project.set_intent(Intent(ops=[Op(op="warmth")]), label="warmer")
+
+    with pytest.raises(SegmentUnavailable) as caught:
+        project.set_intent(_sky(), label="the sky moody")
+
+    assert caught.value.needs_install is True
+    assert "ragvid[masks]" in caught.value.hint
+    assert len(project.history) == 1, "the unrenderable grade landed anyway"
+    assert project.layers == []
+    assert [s["label"] for s in project.steps] == ["warmer"]
+    project.bake_layers()          # still renderable, which is the actual fix
+
+
+def test_the_weights_being_absent_is_the_same_refusal_with_a_different_fix(
+        project, monkeypatch, tmp_path):
+    from ragvid.segment import SegmentUnavailable
+
+    monkeypatch.setattr("ragvid.segment.have_runtime", lambda: True)
+    monkeypatch.setattr("ragvid.segment.model_path", lambda: tmp_path / "absent.onnx")
+
+    with pytest.raises(SegmentUnavailable) as caught:
+        project.set_intent(_sky())
+    assert caught.value.needs_install is False
+    assert project.history == []
+
+
+def test_the_guard_lets_a_semantic_grade_through_once_the_model_is_there(
+        project, monkeypatch, tmp_path):
+    """The guard must be exactly `needs_frame`, not "any semantic word ever".
+    With the model present the grade lands like any other."""
+    weights = tmp_path / "there.onnx"
+    weights.write_bytes(b"not a real model; nothing here loads it")
+    monkeypatch.setattr("ragvid.segment.have_runtime", lambda: True)
+    monkeypatch.setattr("ragvid.segment.model_path", lambda: weights)
+
+    project.set_intent(_sky())
+    assert len(project.layers) == 1
+    assert project.layers[0].region.shape == "semantic"
+
+
+def test_a_geometric_region_never_asks_about_the_model(project, monkeypatch):
+    """"the top" needs no model, and must not be gated on one -- the guard reads
+    GradeStack.needs_frame rather than "does this grade have layers"."""
+    def boom() -> bool:
+        raise AssertionError("a geometric region asked whether segmentation is ready")
+
+    monkeypatch.setattr("ragvid.segment.have_runtime", boom)
+    project.set_intent(_regional())
+    assert len(project.layers) == 1
+
+
+def test_a_protect_that_names_a_thing_hits_the_same_refusal(project, monkeypatch):
+    """B6's protect reaches the model through the back door: "darken the top but
+    not the person" is a GEOMETRIC region whose `exclude` is semantic. The guard
+    keys off GradeStack.needs_frame, which is recursive through `exclude`, so it
+    covers this without knowing the verb exists -- verified, not assumed."""
+    from ragvid.intent import Intent, Op
+    from ragvid.segment import SegmentUnavailable
+
+    monkeypatch.setattr("ragvid.segment.have_runtime", lambda: False)
+    intent = Intent(ops=[Op(op="exposure", dir="down", target="top"),
+                         Op(op="protect", target="person")])
+    with pytest.raises(SegmentUnavailable):
+        project.set_intent(intent)
+    assert project.history == []

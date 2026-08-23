@@ -234,7 +234,7 @@
   <button id="openBtn">Open clip…</button>
 </header>
 
-<div id="banner"><span id="bannerMsg"></span><button class="x" id="bannerX">✕</button></div>
+<div id="banner"><span id="bannerMsg"></span><button id="bannerGet" hidden>Download 15 MB</button><button class="x" id="bannerX">✕</button></div>
 
 <div id="uploading" hidden>
   <span class="upname" id="upName"></span>
@@ -411,7 +411,7 @@ const $ = (id) => document.getElementById(id);
 // Must match server.py's API_VERSION. The HTML is re-read on every request but
 // the Python is not, so an old `ragvid serve` will happily serve this file and
 // then answer with a contract it does not implement.
-const EXPECTED_API = 10;
+const EXPECTED_API = 11;
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
@@ -477,6 +477,11 @@ function showError(e) {
   } else if (info.type === "RateLimited") {
     countdown(Math.ceil(info.retry_after || 30));
     return;
+  } else if (info.type === "SegmentUnavailable") {
+    // Always the banner, never the dialog slot: the offer is a button and the
+    // button lives here. Nothing that names a thing in the picture is reachable
+    // from behind a dialog anyway.
+    return showSegment(info);
   } else if (info.type === "InputError") {
     msg = `${info.message}. Try another file.`;
   }
@@ -496,6 +501,50 @@ function countdown(secs) {
 }
 function hideBanner() { $("banner").classList.remove("show"); }
 $("bannerX").onclick = hideBanner;
+
+// ---- the segmentation model ------------------------------------------------
+// Naming a thing in the picture ("the sky") needs a local model. That is a
+// precondition the user can satisfy, exactly like a missing key -- so it gets
+// ONE row, in the banner that already exists, and no new panel.
+//
+// needs_install means the app cannot fix it itself: no button in a browser runs
+// pip. Offering one that cannot work is worse than showing the command, so the
+// command is what is shown and the button stays hidden.
+
+function showSegment(info) {
+  $("bannerMsg").textContent = info.needs_install
+    ? "Naming a thing in the picture needs an extra. Run  pip install 'ragvid[masks]'  "
+      + "and start ragvid again."
+    : "Naming a thing in the picture needs a one-off model download. It runs offline after that.";
+  $("bannerGet").hidden = !!info.needs_install;
+  $("banner").classList.add("show");
+}
+
+$("bannerGet").onclick = async () => {
+  hideBanner();
+  $("bannerGet").hidden = true;
+  showUpload(true, "segmentation model");        // the same bar an upload uses
+  try {
+    await call("/api/segment/download", { method: "POST" });
+    await pollSegment();
+  } catch (e) { showUpload(false); showError(e); }
+};
+
+async function pollSegment() {
+  const j = await call("/api/segment/download");
+  const pct = Math.round((j.progress || 0) * 100);
+  $("upBar").style.width = `${pct}%`;
+  $("upLabel").textContent = `${pct}%`;
+  if (j.state === "running") {
+    setTimeout(() => pollSegment().catch((e) => { showUpload(false); showError(e); }), 300);
+    return;
+  }
+  showUpload(false);
+  if (j.state === "error") return showError({ info: j.error });
+  $("bannerMsg").textContent = "The model is ready — ask again.";
+  $("bannerGet").hidden = true;
+  $("banner").classList.add("show");
+}
 
 // ---- rendering ------------------------------------------------------------
 
@@ -930,12 +979,21 @@ function glSetup() {
 //     a segmentation model, so there is no cx/cy/rx/ry to evaluate and no
 //     honest way to draw one here. Allow-list, never deny-list: an unknown
 //     shape must fall back rather than be silently drawn as a `linear`.
+//   * a region carrying `exclude` (roadmap B6's protect). The export computes
+//     mask x prod(1 - mask_protected); regionMask computes only the first
+//     factor, so the shader would grade the very pixels the protect spares --
+//     the preview/export disagreement this whole gate exists to prevent. Gated
+//     on the FIELD, not on the cases that visibly break: a single geometric
+//     protect happens to come through as a plain inverted `linear` and draw
+//     correctly, and shipping a gate that is right by coincidence is how the
+//     next combination gets drawn wrong.
 function cubeIsTheWholeGrade() {
   const e = (S.spec && S.spec.effects) || {};
   if (Object.values(e).some((v) => v)) return false;
   const layers = S.layers || [];
   return layers.length <= GL_MAX_LAYERS
-      && layers.every((l) => l && l.region && GL_SHAPES.has(l.region.shape));
+      && layers.every((l) => l && l.region && GL_SHAPES.has(l.region.shape)
+                          && !(l.region.exclude && l.region.exclude.length));
 }
 
 // -> true when the canvas is now the picture, so render() knows whether it
