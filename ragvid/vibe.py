@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ragvid import looks
+from ragvid.compiler import compile_intent
+from ragvid.errors import ProviderError
+from ragvid.intent import Intent
+from ragvid.providers.openai_compat import extract_json, missing_fields
 from ragvid.spec import GradeSpec
 
 if TYPE_CHECKING:  # probe imports nothing from us; this keeps the dependency one-way
@@ -218,3 +222,172 @@ def plan_vibe(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
         ) if part
     )
     return provider.plan(SYSTEM, user).sanitize()
+
+
+# ---- the intent path (roadmap A1) -----------------------------------------
+
+# NO DIGIT APPEARS IN THIS STRING, and tests/test_providers.py asserts it. The
+# whole claim of this path is that the model never emits a magnitude; a prompt
+# that quotes one — a range, a Kelvin figure, a default — hands it a number to
+# copy, and we are back to SYSTEM above, which spends most of its ~1700 tokens
+# telling a model how far to move 43 knobs it should not be holding.
+#
+# NO CLIP STATISTICS EITHER, deliberately, which is why plan_intent does not
+# take a stats argument for the prompt's sake. The measurement is what
+# compiler.py consults; showing it to the model only invites it to reason about
+# magnitude in prose, and it is the single largest block of tokens in the direct
+# path's request (format_stats is ~200 tokens, every call).
+#
+# AND NO RETRIEVAL. looks.ground() exists because "author 43 numbers from
+# nothing" is a job a 20B model does badly, so the corpus collapses it into
+# "edit these 43 numbers a bit" (looks.py docstring). There is nothing here to
+# collapse: the model picks from sixteen words. A corpus entry is a full 43-float
+# GradeSpec — ~350 tokens of exactly the numbers this path exists to stop the
+# model reading. It would be paying tokens to re-tempt it.
+#
+# MEASURED, against this exact prompt (scripts/bakeoff_intent.py, gpt-oss-120b,
+# ten sentences on test_files/test.mp4, judged on graded pixels): intent 21/23
+# checks and 8/10 prompts clean at 1858 tokens per prompt, direct 20/23 and 7/10
+# at 5158. Both misses were the same defect and it is in the prose below: the
+# "moody" example names deeper shadows, cooler and less colour, and the model
+# obediently answered "moody but keep it natural" and "make it feel like a rainy
+# night" with no `exposure` op at all, so mean luma moved -0.006 and -0.009
+# where the sentence asked for dark. Adding exposure to that example is the
+# obvious fix and is deliberately NOT applied here: it would make the numbers
+# above describe a prompt nobody measured. Change it and re-run the bake-off.
+INTENT_SYSTEM = """\
+You are a colorist. You output exactly one JSON object listing the moves a grade needs.
+You choose WORDS, and never numbers. Every number in the finished grade is computed from
+measured statistics of this particular clip, by code you do not see; your words decide
+which axis moves, which way, and roughly how far. There is no field here that takes a
+magnitude, and inventing one is the only way to get this task wrong.
+
+Return {"ops": [...], "strength": ...}. Each op has four fields:
+
+  op      which move — one of the verbs below, spelled exactly as it is written there.
+  dir     "up" or "down" along that verb's own axis. Every verb below says what up means.
+  amount  "subtle", "moderate" or "strong". "moderate" is the normal answer, and the
+          right one whenever the sentence just names a change ("warmer"). "subtle" is
+          for "a touch", "slightly", "a hint of", "just barely". "strong" is for
+          "really", "very", "heavily", "way more", "push it".
+  target  "" — the whole picture — for every verb except the four listed under TARGET
+          below. Leave it "".
+
+VERBS — TONE. Most looks live here.
+  exposure    up = brighter overall, down = darker overall.
+  contrast    up = punchier: deeper blacks and brighter whites. down = flatter, softer.
+  midtones    up = brighter mids, down = darker mids, without moving black or white.
+  shadows     up = lifted, faded, milky, filmic blacks. down = crushed, deep, inky blacks.
+  highlights  up = brighter whites. down = pulled back, recovered, protected highlights.
+
+VERBS — COLOUR.
+  warmth      up = warmer, oranger, golden, sunlit. down = cooler, bluer, icier.
+              This is the verb for every temperature word in the language. The tint
+              verbs are not a substitute for it.
+  tint        up = magenta or pink, down = green. That axis only, and it is rarely asked
+              for by name.
+  saturation  up = richer, more colourful. down = drained, muted, washed out; down with
+              amount "strong" is as close to black and white as this vocabulary goes.
+  shadow_tint     puts a colour into the DARK half of the picture only.
+  highlight_tint  puts a colour into the BRIGHT half only.
+              These two are how a split-tone look is said — "teal shadows, warm
+              highlights" is one of each — and a single warmth move cannot do it. dir up
+              adds the colour named in target, down takes that colour out.
+
+VERBS — TEXTURE. Spatial, applied outside the colour transform, and OFF unless the
+sentence is actually about texture: film, grain, dreamy, hazy, soft, sharp, vintage,
+VHS, clean, noisy.
+  grain     up = more film grain.
+  glow      up = more bloom around the highlights.
+  vignette  up = darker corners.
+  softness  up = softer, down = sharper.
+  denoise   up = cleaner, less sensor noise. Costs fine detail.
+  fringe    up = more chromatic aberration at the edges. Cheap lens, VHS, dream.
+
+TARGET, in full. The allowed values are "", red, orange, yellow, green, cyan, teal,
+blue, magenta, purple and skin. It means two different things, and only on four verbs:
+  - on saturation and exposure it SELECTS which pixels move, by their existing colour:
+    "drain the greens", "darken the reds", "keep the skin, kill everything else".
+  - on shadow_tint and highlight_tint it NAMES THE COLOUR being added.
+Every other verb ignores target. Leave it "" on all of them.
+
+STRENGTH is how much of the whole look survives against the untouched footage: "full",
+"strong", "moderate" or "subtle". Use "full" unless the user asked for the look itself to
+be held back — "half strength", "dial it back", "a subtle version", "just a hint of it".
+It is not a substitute for choosing a smaller amount on one op.
+
+HOW TO CHOOSE:
+- The fewest ops that read as the look. A real grade is three to eight moves, and a
+  sentence naming one thing is one op. Reaching for a verb you were not asked for is the
+  worst mistake available to you here; leaving one out is never wrong.
+- A mood word does imply moves, and naming them is the job: "moody" is deeper shadows,
+  cooler, a little less colour. Name the moves, never the mood.
+- One op per verb. Two warmth ops in one list compose into a bigger push than either of
+  them asked for; say it once, with the right amount.
+- Texture verbs and colour targets stay out of a grade that did not ask for them.
+- Order does not matter. The compiler decides the order the moves are applied in.
+- You are not told what this footage looks like, and you do not need to be. "Warmer" on
+  an already-orange clip and on a blue one is the same request; how far it actually goes
+  is measured from the clip, not guessed by you.
+
+Return only the JSON object."""
+
+
+def plan_intent(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
+    """Plan a grade for `vibe` the roadmap-A1 way: model -> Intent -> compiler.
+
+    Same signature and same return type as plan_vibe, so the two are swappable
+    at the call site. The difference is where the numbers come from: plan_vibe's
+    provider authors all 43, this one authors none of them — `stats` is read by
+    compiler.compile_intent, never shown to the model.
+    """
+    return compile_intent(ask_intent(vibe, provider), stats)
+
+
+def ask_intent(vibe: str, provider=None) -> Intent:
+    """The model call, and the only part of the intent path that can fail.
+
+    ponytail: talks to the endpoint directly instead of through Provider.plan(),
+    which is typed to return a GradeSpec and cannot carry an Intent. That costs
+    the structured-output ladder in openai_compat.py, so this works on the
+    strict-schema rows of the catalog (Groq, OpenAI, xAI, Mistral) and not on a
+    json_object-only endpoint. If the intent path ever replaces the direct one,
+    the honest fix is a second method on the protocol, not a ladder copied here.
+    """
+    if provider is None:
+        from ragvid.providers import get_provider
+
+        provider = get_provider()
+
+    response = provider.client.chat.completions.create(
+        model=provider.model,
+        messages=[
+            {"role": "system", "content": INTENT_SYSTEM},
+            {"role": "user", "content": f'The look the user asked for: "{vibe}"'},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "grade_intent",
+                "strict": True,
+                "schema": Intent.llm_json_schema(),
+            },
+        },
+    )
+    text = response.choices[0].message.content
+    raw = extract_json(text)
+    if raw is None:
+        raise ProviderError(
+            provider.name, f"returned no JSON object ({(text or '').strip()[:120] or 'empty response'})"
+        )
+    # Every field of Intent has a default, so pydantic would turn a reply missing
+    # `ops` into an empty intent — which compiles to the identity grade and looks
+    # to the user like a model that did nothing rather than an endpoint that
+    # answered wrong. Same argument, same check, as openai_compat._parse.
+    missing = sorted(missing_fields(Intent.llm_json_schema(), raw))
+    if missing:
+        raise ProviderError(provider.name, f"answered without {', '.join(missing)}")
+    try:
+        return Intent(**raw)
+    except Exception as exc:  # pydantic ValidationError: a verb outside the vocabulary
+        raise ProviderError(provider.name, f"returned JSON that is not an intent: {exc}") from exc

@@ -13,12 +13,13 @@ import httpx
 import pytest
 
 from ragvid.errors import ProviderError, ProviderNotConfigured, RateLimited
+from ragvid.intent import AMOUNTS, OPS, STRENGTHS, TARGETS, Intent, Op
 from ragvid.probe import ClipStats
 from ragvid.providers.base import CATALOG, DEFAULTS, describe, get_provider, load_env
 from ragvid.providers.groq import FALLBACK_MODEL, GroqProvider, parse_reset
 from ragvid.refine import refine_spec
 from ragvid.spec import RGB, GradeSpec
-from ragvid.vibe import SYSTEM, format_stats, plan_vibe
+from ragvid.vibe import INTENT_SYSTEM, SYSTEM, ask_intent, format_stats, plan_intent, plan_vibe
 
 STATS = ClipStats(
     mean=RGB(r=0.2137, g=0.1904, b=0.2510),
@@ -201,6 +202,108 @@ def test_refine_system_prompt_extends_the_vibe_one():
 def _json_block(text: str) -> str:
     start = text.index("{")
     return text[start : text.rindex("}") + 1]
+
+
+# ---- the intent path (roadmap A1) -----------------------------------------
+
+
+class FakeIntentProvider:
+    """A provider whose CLIENT is faked, because ask_intent talks to the
+    endpoint directly — Provider.plan() is typed to return a GradeSpec and
+    cannot carry an Intent (see ask_intent's ponytail note)."""
+
+    name = "fake"
+    model = "fake-model"
+
+    def __init__(self, script):
+        self.client = _fake(script)
+
+    @property
+    def calls(self):
+        return self.client.calls
+
+
+def _intent_reply(intent: Intent):
+    return _text(intent.model_dump_json())
+
+
+def test_the_intent_prompt_explains_every_word_the_model_can_emit():
+    """The sibling of the GradeSpec.model_fields guard above, and the same bug:
+    a verb the prompt never mentions is a verb the model never emits, which
+    makes the compiler pass behind it dead code that nobody notices is dead."""
+    for word in OPS + AMOUNTS + STRENGTHS:
+        assert word in INTENT_SYSTEM, f"intent prompt never mentions {word}"
+    for target in TARGETS:
+        assert not target or target in INTENT_SYSTEM, f"intent prompt never mentions {target}"
+
+
+def test_the_intent_prompt_contains_no_digit_anywhere():
+    """The one claim this path lives or dies on. A range, a Kelvin figure or a
+    default quoted in the prompt is a magnitude for the model to copy, and the
+    numbers are supposed to come from compiler.py reading the clip."""
+    assert not re.search(r"\d", INTENT_SYSTEM)
+
+
+def test_ask_intent_sends_the_strict_schema_and_only_the_sentence():
+    want = Intent(ops=[Op(op="warmth", dir="up", amount="moderate")], strength="full")
+    p = FakeIntentProvider([_intent_reply(want)])
+
+    assert ask_intent("warm it up", provider=p) == want
+
+    sent = p.calls[0]
+    assert sent["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "grade_intent",
+            "strict": True,
+            "schema": Intent.llm_json_schema(),
+        },
+    }
+    assert sent["messages"][0]["content"] == INTENT_SYSTEM
+    assert "warm it up" in sent["messages"][1]["content"]
+
+
+def test_the_intent_request_never_shows_the_model_a_measurement():
+    """Deliberate, and worth a test because it is the token saving: the stats go
+    to compiler.compile_intent, not to the model. Showing them invites reasoning
+    about magnitude, which is the job this path took away from it."""
+    p = FakeIntentProvider([_intent_reply(Intent())])
+    plan_intent("rainy tokyo night", STATS, provider=p)
+    everything = "".join(m["content"] for m in p.calls[0]["messages"])
+    assert "0.2137" not in everything and "0.1735" not in everything
+
+
+def test_plan_intent_compiles_the_reply_against_the_measured_clip():
+    reply = Intent(ops=[Op(op="warmth", dir="up", amount="moderate")], strength="moderate")
+    spec = plan_intent("warmer, half strength", STATS, provider=FakeIntentProvider(
+        [_intent_reply(reply)]))
+
+    assert spec.temperature > 0.0            # the verb became a number
+    assert spec.look_mix == 0.65             # ... and so did the strength word
+    assert spec.saturation == 1.0            # nothing else moved
+    assert spec.rationale.startswith("Warmed it up")  # written by describe(), not by the model
+
+
+def test_an_empty_intent_is_the_identity_grade():
+    """A model that answers "nothing to do" must not be able to invent a look."""
+    spec = plan_intent("do nothing", STATS, provider=FakeIntentProvider([_intent_reply(Intent())]))
+    assert spec.is_identity()
+
+
+@pytest.mark.parametrize("body, match", [
+    ("I'd rather not.", "no JSON object"),
+    ('{"strength": "full"}', "ops"),
+    ('{"ops": [{"op": "bokeh", "dir": "up", "amount": "moderate", "target": ""}], '
+     '"strength": "full"}', "not an intent"),
+])
+def test_a_reply_that_is_not_an_intent_fails_like_the_direct_path(body, match):
+    """Same three failures openai_compat._parse names, for the same reason: every
+    field of Intent has a default, so a half-answer would quietly compile to a
+    grade that does less than the user asked for instead of raising."""
+    p = FakeIntentProvider([_text(body)])
+    with pytest.raises(ProviderError, match=match) as info:
+        ask_intent("warmer", provider=p)
+    assert info.value.provider == "fake"
 
 
 # ---- sanitizing insane model output ---------------------------------------
