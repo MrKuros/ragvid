@@ -598,7 +598,11 @@ def test_the_masked_edge_is_soft_all_the_way_through_ffmpeg(tmp_path):
     A hard edge bands visibly; so does a mask quantised to a handful of levels.
     Measured through the real filter chain, not in numpy.
     """
-    grey = tmp_path / "grey.mp4"
+    # .mkv, not .mp4: MP4 only learned to carry FFV1 recently, so an .mp4 here
+    # passes on a new local ffmpeg and fails CI's with "Could not find tag for
+    # codec ffv1". Matroska has always taken it, which is what the sibling
+    # tests below already use.
+    grey = tmp_path / "grey.mkv"
     render._run(["-f", "lavfi", "-i", f"color=c=0x808080:s={W}x{H}:d=1:r=10",
                  "-c:v", "ffv1", str(grey)], timeout=60)
     out = tmp_path / "f.png"
@@ -767,7 +771,11 @@ def semantic_layer(tmp_path: Path, monkeypatch, stops: float = -1.0):
 
 def test_a_semantic_mask_darkens_its_subject_and_leaves_the_rest_alone(tmp_path, monkeypatch):
     """Measured on real pixels through the real chain, not on a filter string."""
-    grey = tmp_path / "grey.mp4"
+    # .mkv, not .mp4: MP4 only learned to carry FFV1 recently, so an .mp4 here
+    # passes on a new local ffmpeg and fails CI's with "Could not find tag for
+    # codec ffv1". Matroska has always taken it, which is what the sibling
+    # tests below already use.
+    grey = tmp_path / "grey.mkv"
     render._run(["-f", "lavfi", "-i", f"color=c=0x808080:s={W}x{H}:d=1:r=10",
                  "-c:v", "ffv1", str(grey)], timeout=60)
     out = tmp_path / "f.png"
@@ -783,7 +791,11 @@ def test_the_semantic_edge_is_soft_all_the_way_through_ffmpeg(tmp_path, monkeypa
     from geometry. The feather is measured in region.py at 13.2 code values per
     row on the float mask and 14 on the 8-bit PNG; here it is measured on the
     graded frame, where the layer's own -1 stop halves the step."""
-    grey = tmp_path / "grey.mp4"
+    # .mkv, not .mp4: MP4 only learned to carry FFV1 recently, so an .mp4 here
+    # passes on a new local ffmpeg and fails CI's with "Could not find tag for
+    # codec ffv1". Matroska has always taken it, which is what the sibling
+    # tests below already use.
+    grey = tmp_path / "grey.mkv"
     render._run(["-f", "lavfi", "-i", f"color=c=0x808080:s={W}x{H}:d=1:r=10",
                  "-c:v", "ffv1", str(grey)], timeout=60)
     out = tmp_path / "f.png"
