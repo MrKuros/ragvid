@@ -411,7 +411,7 @@ const $ = (id) => document.getElementById(id);
 // Must match server.py's API_VERSION. The HTML is re-read on every request but
 // the Python is not, so an old `ragvid serve` will happily serve this file and
 // then answer with a contract it does not implement.
-const EXPECTED_API = 9;
+const EXPECTED_API = 10;
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
@@ -640,6 +640,14 @@ function loadFrames() {
 //      ponytail: vignette and fringe are pointwise and could be reproduced
 //      exactly; grain and the three convolutions cannot. Split the gate per
 //      effect only if looks with a vignette turn out to be the common case.
+//   4. Regional layers whose masks this shader can actually compute. Geometry
+//      it can: `linear` and `radial` are closed-form, so each layer is one
+//      more 3D LUT and one more lerp and the canvas keeps the whole grade.
+//      A shape it cannot -- roadmap B2's semantic masks come out of a
+//      segmentation model, not out of cx/cy/rx/ry -- goes back to the server,
+//      as does a stack deeper than the shader's six slots. Both are the same
+//      rule as gate 3: decline rather than draw a picture the export will not
+//      produce.
 //
 // Interpolation is TETRAHEDRAL and written out rather than left to the
 // hardware, because that is what ffmpeg does: lut3d defaults to tetrahedral and
@@ -666,8 +674,46 @@ uniform sampler2D src;
 uniform sampler3D tech, grade;
 uniform int techN, gradeN;
 uniform bool useTech, useGrade, marks;
+// The regional layers (roadmap B1), one 3D LUT and one packed geometry each.
+// Six is not a round number: region._FOR_TARGET is the entire vocabulary a
+// sentence can reach and it has six words, so six holds every stack the
+// compiler can build. Six extra samplers is also comfortably inside WebGL2's
+// guaranteed 16 fragment texture units (units 0/1/2 are source/tech/grade).
+uniform sampler3D lay[6];
+uniform int layN[6];
+uniform vec4 rA[6], rB[6];
+uniform int nLayers;
 in vec2 uv;
 out vec4 frag;
+
+// region.Region.mask(), analytically -- no mask image is uploaded at all. The
+// PNG exists because ffmpeg needs a file; the geometry is six lines of maths
+// and re-deriving it on the GPU is not a second implementation of the falloff
+// so long as it stays this literal a transcription (tests/test_page.py pins it
+// against Region.mask over a grid of regions).
+//
+// uv is already frame-relative and already sampled at pixel centres: the
+// canvas is sized to the decoded frame, so the fragment at column i has
+// uv.x == (i + 0.5) / width, which is exactly what Region.mask evaluates.
+//
+// The falloff is spec._smoothstep spelled out rather than GLSL's smoothstep(),
+// which would re-do the clamp with its own edge parameters.
+float regionMask(vec4 a, vec4 b, vec2 p) {
+  float s = max(b.y, 1e-6);        // region._EPS: softness 0 is a legal hard edge
+  float t;
+  if (b.x > 0.5) {                 // radial: a = (cx, cy, rx, ry)
+    vec2 d = (p - a.xy) / max(abs(a.zw), vec2(1e-6));
+    t = (1.0 - length(d)) / s;     // 1 at the centre, 0 at r == 1
+  } else {                         // linear: a = (dir.x, dir.y, offset, extent)
+    // dot(p, dir) + offset is y / 1-y / x / 1-x for top / bottom / left /
+    // right -- Region.mask's dictionary, without a branch per edge.
+    float u = dot(p, a.xy) + a.z;
+    t = (a.w + 0.5 * s - u) / s;
+  }
+  t = clamp(t, 0.0, 1.0);
+  float m = t * t * (3.0 - 2.0 * t);
+  return b.z > 0.5 ? 1.0 - m : m;  // invert
+}
 
 vec3 lut3d(sampler3D t, int n, vec3 c) {
   vec3 x = clamp(c, 0.0, 1.0) * float(n - 1);
@@ -700,6 +746,18 @@ void main() {
   // technical and the grade sits on top of it, exactly as _vf() composes them.
   if (useTech) c = lut3d(tech, techN, c);
   if (useGrade) c = lut3d(grade, gradeN, c);
+  // Then the regional layers, in list order, each grading the ACCUMULATED
+  // result -- region.GradeStack.apply and render._region_filters are the same
+  // chain, and mix(x, y, m) is their x + (y - x) * m: exact at m == 0, and
+  // continuous across an overlap so nothing steps at a boundary.
+  // Unrolled with literal indices because ESSL 3.00 only permits a constant
+  // expression to index an array of samplers.
+  if (nLayers > 0) c = mix(c, lut3d(lay[0], layN[0], c), regionMask(rA[0], rB[0], uv));
+  if (nLayers > 1) c = mix(c, lut3d(lay[1], layN[1], c), regionMask(rA[1], rB[1], uv));
+  if (nLayers > 2) c = mix(c, lut3d(lay[2], layN[2], c), regionMask(rA[2], rB[2], uv));
+  if (nLayers > 3) c = mix(c, lut3d(lay[3], layN[3], c), regionMask(rA[3], rB[3], uv));
+  if (nLayers > 4) c = mix(c, lut3d(lay[4], layN[4], c), regionMask(rA[4], rB[4], uv));
+  if (nLayers > 5) c = mix(c, lut3d(lay[5], layN[5], c), regionMask(rA[5], rB[5], uv));
   c = clamp(c, 0.0, 1.0);
   if (marks) {
     // probe.py's own test, pixel for pixel: the MAX channel at the top rail is
@@ -718,6 +776,8 @@ const glU = {}, glTex = {};
 let liveOn = false;            // the canvas is what you are looking at
 let vidFor = null;             // which S.source the <video> element holds
 let cubeFor = null, techFor = null;   // which cube URL each 3D texture holds
+let layersFor = null;          // the layer cube URLs the layer textures hold
+let layerCount = 0;            // how many of the six slots are live
 let lutToken = 0;              // newest cube load wins; see glSyncLuts
 let lutsStale = false;         // a cube is on its way; hold the last good frame
 let videoBroken = false;       // this clip's codec did not decode here
@@ -777,6 +837,27 @@ function glUpload3D(n, data) {
   gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB32F, n, n, n, 0, gl.RGB, gl.FLOAT, data);
 }
 
+// The geometry /api/state carries, packed the way the shader reads it. `edge`
+// becomes a direction and an offset so the shader needs no branch per side.
+const GL_MAX_LAYERS = 6;                       // must equal the array size in GL_FS
+const GL_SHAPES = new Set(["linear", "radial"]);   // what regionMask can compute
+const GL_EDGE = { top: [0, 1, 0], bottom: [0, -1, 1], left: [1, 0, 0], right: [-1, 0, 1] };
+
+// A field that is missing or not a number would reach the shader as NaN and
+// paint the frame black -- the exact silent-wrong-picture failure the gates
+// exist to avoid -- so it falls back to region.py's own default instead.
+const glNum = (v, d) => (Number.isFinite(+v) ? +v : d);
+
+function glSetRegion(i, r) {
+  const radial = r.shape === "radial";
+  const e = GL_EDGE[r.edge] || GL_EDGE.top;
+  gl.uniform4f(glU[`rA[${i}]`],
+               ...(radial ? [glNum(r.cx, 0.5), glNum(r.cy, 0.5),
+                             glNum(r.rx, 0.5), glNum(r.ry, 0.5)]
+                          : [e[0], e[1], e[2], glNum(r.extent, 0.5)]));
+  gl.uniform4f(glU[`rB[${i}]`], radial ? 1 : 0, glNum(r.softness, 0.5), r.invert ? 1 : 0, 0);
+}
+
 function glSetup() {
   try { gl = $("gl").getContext("webgl2", { alpha: false, antialias: false }); }
   catch (e) { gl = null; }
@@ -797,8 +878,12 @@ function glSetup() {
   gl.linkProgram(glProg);
   if (!gl.getProgramParameter(glProg, gl.LINK_STATUS)) return false;
   gl.useProgram(glProg);        // the only program there is; never swapped
-  for (const n of ["src", "tech", "grade", "techN", "gradeN", "useTech", "useGrade", "marks"])
+  for (const n of ["src", "tech", "grade", "techN", "gradeN", "useTech", "useGrade",
+                   "marks", "nLayers"])
     glU[n] = gl.getUniformLocation(glProg, n);
+  for (let i = 0; i < GL_MAX_LAYERS; i++)
+    for (const n of [`lay[${i}]`, `layN[${i}]`, `rA[${i}]`, `rB[${i}]`])
+      glU[n] = gl.getUniformLocation(glProg, n);
 
   // One triangle covering the viewport. No matrices, no mesh, no resize logic.
   gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
@@ -817,21 +902,40 @@ function glSetup() {
   gl.uniform1i(glU.src, 0);
   glTex.tech = glLutTexture(1, glU.tech);
   glTex.grade = glLutTexture(2, glU.grade);
+  // All six layer slots exist from the start, identity and unused: a sampler3D
+  // bound to nothing is undefined behaviour even where its branch never runs.
+  glTex.lay = [];
+  for (let i = 0; i < GL_MAX_LAYERS; i++) {
+    glTex.lay.push(glLutTexture(3 + i, glU[`lay[${i}]`]));
+    gl.uniform1i(glU[`layN[${i}]`], 2);
+  }
   // Both LUTs start as that 2^3 identity with their switch off, so no uniform
   // is ever read at whatever GLSL happens to default it to.
-  for (const n of ["useTech", "useGrade", "marks"]) gl.uniform1i(glU[n], 0);
+  for (const n of ["useTech", "useGrade", "marks", "nLayers"]) gl.uniform1i(glU[n], 0);
   for (const n of ["techN", "gradeN"]) gl.uniform1i(glU[n], 2);
   return true;
 }
 
-// Everything a 3D LUT cannot carry. `some` over the object rather than a list
-// of six names, so a seventh field in EffectSpec closes this gate by itself; and
-// `S.layers` defensively, because a regional grade is a second LUT behind a mask
-// and is the same category -- the day /api/state carries one, this must already
-// be shut rather than newly wrong.
+// Everything the shader cannot carry. `some` over the effects object rather
+// than a list of six names, so a seventh field in EffectSpec closes this gate
+// by itself.
+//
+// Regional layers are no longer disqualifying in themselves -- each one is a
+// second 3D LUT behind an analytic mask, which is what regionMask and the six
+// slots in GL_FS are. What still is:
+//
+//   * more layers than there are slots. Six covers every stack compile_stack
+//     can build, but a look.json is a file and can say anything.
+//   * a shape regionMask cannot compute. Roadmap B2's semantic masks come from
+//     a segmentation model, so there is no cx/cy/rx/ry to evaluate and no
+//     honest way to draw one here. Allow-list, never deny-list: an unknown
+//     shape must fall back rather than be silently drawn as a `linear`.
 function cubeIsTheWholeGrade() {
   const e = (S.spec && S.spec.effects) || {};
-  return !Object.values(e).some((v) => v) && !(S.layers && S.layers.length);
+  if (Object.values(e).some((v) => v)) return false;
+  const layers = S.layers || [];
+  return layers.length <= GL_MAX_LAYERS
+      && layers.every((l) => l && l.region && GL_SHAPES.has(l.region.shape));
 }
 
 // -> true when the canvas is now the picture, so render() knows whether it
@@ -868,7 +972,8 @@ function stopLive() {
 function liveFallback() {
   glOk = false;
   lutsStale = false;
-  cubeFor = techFor = null;
+  cubeFor = techFor = layersFor = null;
+  layerCount = 0;
   stopLive();
   loadFrames();
 }
@@ -877,35 +982,55 @@ async function glSyncLuts() {
   const mine = ++lutToken;                 // a later state's cubes always win
   const grade = S.planned ? `/media/cube?v=${S.version}` : null;
   const tech = S.input_lut ? `/media/cube?input=1&v=${S.version}` : null;
-  if (grade === cubeFor && tech === techFor) return;
+  // One URL per layer, in evaluation order. The version is in each of them, so
+  // a changed region or a changed layer grade is a changed URL and re-uploads.
+  const regions = (S.layers || []).map((l) => l.region);
+  const lay = regions.map((_, i) => `/media/cube?layer=${i}&v=${S.version}`);
+  if (grade === cubeFor && tech === techFor && lay.join(" ") === layersFor) return;
   // Hold the last good frame rather than redraw with the cube that is being
   // replaced: a flash of the PREVIOUS grade is the same lie the ?v= cache
   // buster exists to prevent on the still path.
   lutsStale = true;
   if (grade !== cubeFor) {
     cubeFor = grade;
-    if (!(await glLoadCube(grade, 2, "gradeN", "useGrade"))) return liveFallback();
+    if (!(await glLoadCube(grade, 2, glTex.grade, "gradeN", "useGrade"))) return liveFallback();
     if (mine !== lutToken) return;
   }
   if (tech !== techFor) {
     techFor = tech;
-    if (!(await glLoadCube(tech, 1, "techN", "useTech"))) return liveFallback();
+    if (!(await glLoadCube(tech, 1, glTex.tech, "techN", "useTech"))) return liveFallback();
     if (mine !== lutToken) return;
+  }
+  if (lay.join(" ") !== layersFor) {
+    layersFor = lay.join(" ");
+    // Zero first: a half-loaded stack must never be drawn as if it were whole.
+    layerCount = 0;
+    gl.uniform1i(glU.nLayers, 0);
+    for (let i = 0; i < lay.length; i++) {
+      if (!(await glLoadCube(lay[i], 3 + i, glTex.lay[i], `layN[${i}]`, null)))
+        return liveFallback();
+      if (mine !== lutToken) return;
+      glSetRegion(i, regions[i]);
+    }
+    layerCount = lay.length;
+    gl.uniform1i(glU.nLayers, layerCount);
   }
   lutsStale = false;
   drawLive();
 }
 
-async function glLoadCube(url, unit, sizeU, useU) {
-  if (!url) { gl.uniform1i(glU[useU], 0); return true; }
+// `useU` is null for a layer: nLayers is its switch, so there is no per-slot
+// bool to leave stale.
+async function glLoadCube(url, unit, tex, sizeU, useU) {
+  if (!url) { if (useU) gl.uniform1i(glU[useU], 0); return true; }
   try {
     const cube = parseCube(await (await fetch(url)).text());
     if (!cube) return false;
     gl.activeTexture(gl.TEXTURE0 + unit);
-    gl.bindTexture(gl.TEXTURE_3D, unit === 1 ? glTex.tech : glTex.grade);
+    gl.bindTexture(gl.TEXTURE_3D, tex);
     glUpload3D(cube.size, cube.data);
     gl.uniform1i(glU[sizeU], cube.size);
-    gl.uniform1i(glU[useU], 1);
+    if (useU) gl.uniform1i(glU[useU], 1);
     return true;
   } catch (e) { return false; }
 }
@@ -921,7 +1046,12 @@ function drawLive() {
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, glTex.src);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, v);
-  gl.uniform1i(glU.useGrade, holding || !S.planned || cubeFor === null ? 0 : 1);
+  // Hold-to-compare drops the whole creative half -- base grade and layers
+  // alike -- but keeps the technical LUT, because the "before" of a log clip is
+  // the converted image, not the log one.
+  const creative = !(holding || !S.planned || cubeFor === null);
+  gl.uniform1i(glU.useGrade, creative ? 1 : 0);
+  gl.uniform1i(glU.nLayers, creative ? layerCount : 0);
   gl.uniform1i(glU.marks, marksOn ? 1 : 0);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }

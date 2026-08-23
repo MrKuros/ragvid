@@ -66,8 +66,11 @@ def test_the_harness_fails_against_the_previous_page(tmp_path):
                          capture_output=True, text=True, cwd=Path(__file__).parent.parent)
     if git.returncode != 0:
         pytest.skip("no committed index.html to compare against")
-    if "parseCube" in git.stdout:
-        pytest.skip("the live preview is already committed; nothing older to fail against")
+    # The marker is the newest thing the harness asserts about, not the oldest:
+    # once regionMask is committed there is nothing older here to fail against
+    # and the next change has to move this line to its own marker.
+    if "regionMask" in git.stdout:
+        pytest.skip("the regional composite is already committed; nothing older to fail against")
     proc = _run_harness(git.stdout, tmp_path)
     assert proc.returncode != 0, "the harness passed on the pre-change page — it tests nothing"
 
@@ -179,17 +182,133 @@ def apply_shader(x, table, size):
     return out
 
 
-def _frame_rgb(video, at, cube=None):
-    """One frame as uint8 RGB, optionally through ffmpeg's own lut3d."""
+def _frame_rgb(video, at, cube=None, vf=None):
+    """One frame as uint8 RGB, optionally through ffmpeg's own filter chain.
+
+    `cube` is the one-node shorthand the base-cube checks use; `vf` is a whole
+    chain, which is how the regional checks feed in `render._vf`'s own output
+    rather than a second spelling of it.
+    """
     import numpy as np
 
-    vf = ["-vf", f"lut3d=file={cube}"] if cube else []
+    chain = vf if vf else (f"lut3d=file={cube}" if cube else None)
     proc = subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-         "-ss", str(at), "-i", str(video), *vf, "-frames:v", "1",
-         "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+         "-ss", str(at), "-i", str(video), *(["-vf", chain] if chain else []),
+         "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
         capture_output=True, check=True)
     return np.frombuffer(proc.stdout, dtype=np.uint8).reshape(-1, 3)
+
+
+def _frame_size(video, at=0.0):
+    """(width, height) as the DECODER produces it, not as ffprobe reports it.
+
+    Those differ on a clip with rotation side data, and the mask has to be
+    written at the size the pixels actually arrive in or scale2ref resamples it
+    -- which is a second geometry and the whole point of this file is that there
+    is one.
+    """
+    out = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-ss", str(at), "-i", str(video),
+         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True, check=True)
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height", "-of", "csv=p=0", str(video)],
+        capture_output=True, check=True, text=True)
+    w, h = (int(v) for v in probe.stdout.strip().split(","))
+    assert len(out.stdout) == w * h * 3, "the decoder disagrees with ffprobe on this clip"
+    return w, h
+
+
+# ---- the regional composite -------------------------------------------------
+# The shader's masks and its layer lerp, evaluated in numpy the same way its
+# tetrahedra already are. `regionMask` is a transcription rather than a parse --
+# vec2 swizzles are more machinery to translate than the six lines are worth --
+# so it is pinned three ways: the GLSL's own text below, an equality check
+# against `Region.mask` (the one true geometry), and the ffmpeg comparison.
+
+GLSL_MASK_LINES = (
+    "float s = max(b.y, 1e-6);",
+    "t = (1.0 - length(d)) / s;",
+    "float u = dot(p, a.xy) + a.z;",
+    "t = (a.w + 0.5 * s - u) / s;",
+    "t = clamp(t, 0.0, 1.0);",
+    "float m = t * t * (3.0 - 2.0 * t);",
+    "return b.z > 0.5 ? 1.0 - m : m;",
+)
+
+
+def _gl_shapes():
+    """The shapes index.html's gate will draw, from the page's own allow-list."""
+    page = server.INDEX.read_text()
+    found = re.search(r"const GL_SHAPES = new Set\(\[(.*?)\]\)", page)
+    assert found, "index.html no longer allow-lists the shapes it can compute"
+    return set(re.findall(r'"(\w+)"', found.group(1)))
+
+
+GL_SHAPES = _gl_shapes()
+
+
+def _gl_edge():
+    """index.html's `edge` -> (dir.x, dir.y, offset) packing, from the page."""
+    page = server.INDEX.read_text()
+    found = re.search(r"const GL_EDGE = \{(.*?)\};", page, re.S)
+    assert found, "index.html no longer packs the linear edges"
+    return {k: [float(n) for n in v.split(",")]
+            for k, v in re.findall(r"(\w+): \[([^\]]+)\]", found.group(1))}
+
+
+def pack_region(region):
+    """glSetRegion()'s two vec4s, from a `Region`."""
+    if region.shape == "radial":
+        a = [region.cx, region.cy, region.rx, region.ry]
+    else:
+        a = [*_gl_edge()[region.edge], region.extent]
+    return a, [1.0 if region.shape == "radial" else 0.0,
+               region.softness, 1.0 if region.invert else 0.0, 0.0]
+
+
+def shader_mask(region, w, h):
+    """regionMask() over a (h, w) frame, at the uv the rasteriser hands it."""
+    import numpy as np
+
+    a, b = pack_region(region)
+    x = (np.arange(w) + 0.5) / w                 # uv.x at the fragment centre
+    y = ((np.arange(h) + 0.5) / h)[:, None]      # uv.y, 0 at the top row
+    s = max(b[1], 1e-6)
+    if b[0] > 0.5:
+        d = np.hypot((x - a[0]) / max(abs(a[2]), 1e-6),
+                     (y - a[1]) / max(abs(a[3]), 1e-6))
+        t = (1.0 - d) / s
+    else:
+        u = x * a[0] + y * a[1] + a[2]
+        t = (a[3] + 0.5 * s - u) / s
+    t = np.clip(t, 0.0, 1.0)
+    m = np.broadcast_to(t * t * (3.0 - 2.0 * t), (h, w))
+    return (1.0 - m) if b[2] > 0.5 else m
+
+
+def read_lut(path):
+    """`lut.read_cube` in apply_shader's argument order: (table, size)."""
+    from ragvid.lut import read_cube
+
+    size, table = read_cube(path)
+    return table, size
+
+
+def apply_stack(x, w, h, base, layers):
+    """The whole fragment shader: base cube, then each layer through its mask.
+
+    `x` is (w*h, 3) in row-major order, `base` is (table, size) and each layer
+    is (table, size, Region). This is GL_FS's main() and
+    `render._region_filters`' chain, which are the same chain.
+    """
+    out = apply_shader(x, *base)
+    for table, size, region in layers:
+        m = shader_mask(region, w, h).reshape(-1, 1)
+        out = out + (apply_shader(out, table, size) - out) * m
+    return out
 
 
 @pytest.mark.parametrize("name", ["identity", "strong"])
@@ -255,3 +374,216 @@ def test_the_marks_are_clipstats_own_counts(tmp_path):
     assert blown.mean() == pytest.approx(stats["clipped_high"])
     assert crushed.mean() == pytest.approx(stats["crushed_low"])
     assert blown.any() and crushed.any(), "the fixture marks nothing; it proves nothing"
+
+
+def test_the_shader_declares_the_slots_index_html_thinks_it_has():
+    """GL_MAX_LAYERS lives in JS and the array size lives in GLSL. They are one
+    number in two languages, and a stack past the smaller one is either a
+    dropped layer or a link failure."""
+    page = server.INDEX.read_text()
+    n = int(re.search(r"const GL_MAX_LAYERS = (\d+);", page).group(1))
+    fs = _shader("GL_FS")
+    assert f"uniform sampler3D lay[{n}];" in fs
+    assert f"uniform vec4 rA[{n}], rB[{n}];" in fs
+    # One composite line per slot, and no more: an unrolled loop that stops
+    # short would silently drop the last layer.
+    assert fs.count("c = mix(c, lut3d(lay[") == n
+    for i in range(n):
+        assert f"if (nLayers > {i}) c = mix(c, lut3d(lay[{i}], layN[{i}], c), " \
+               f"regionMask(rA[{i}], rB[{i}], uv));" in fs
+
+    # region._FOR_TARGET is the whole vocabulary compile_stack can reach. The
+    # shader needs a slot for every ANALYTIC word in it, or the common case
+    # falls back; the semantic ones (roadmap B2) have no closed form and are
+    # turned away by cubeIsTheWholeGrade instead.
+    from ragvid import region as region_mod
+
+    analytic = [r for r in region_mod._FOR_TARGET.values() if r.shape in GL_SHAPES]
+    assert n >= len(analytic), f"{len(analytic)} geometric region words, {n} slots"
+
+
+def test_the_shaders_mask_is_region_pys_own_geometry():
+    """Worst case over every region the vocabulary can produce, plus the awkward
+    ones (softness 0, inverted, off-centre): 0.0 -- the transcription and
+    `Region.mask` are the same arithmetic in the same order.
+
+    This is the check that keeps the shader from being a SECOND implementation
+    of the falloff, which is the bug region.py's module docstring exists about.
+    """
+    import numpy as np
+
+    from ragvid.region import Region, _FOR_TARGET
+
+    # Only the geometric ones: a semantic mask comes out of segment.py and has
+    # no closed form for the shader to be checked against.
+    regions = [r.model_copy(deep=True) for r in _FOR_TARGET.values()
+               if r.shape in GL_SHAPES] + [
+        Region(shape="linear", edge="bottom", extent=0.0, softness=0.0),
+        Region(shape="linear", edge="left", extent=0.9, softness=1.0, invert=True),
+        Region(shape="linear", edge="right", extent=0.25, softness=0.05),
+        Region(shape="radial", cx=0.2, cy=0.8, rx=0.15, ry=0.4, softness=0.0),
+        Region(shape="radial", cx=0.5, cy=0.5, rx=0.0, ry=0.0, softness=0.3),
+    ]
+    worst = 0.0
+    for r in regions:
+        for w, h in [(320, 180), (17, 5)]:      # 16:9, and an odd little one
+            worst = max(worst, float(np.abs(shader_mask(r, w, h) - r.mask(w, h)).max()))
+    assert worst == 0.0, f"the shader's mask differs from Region.mask by {worst}"
+
+    # ...and the GLSL those numpy lines were transcribed from is still that.
+    fs = _shader("GL_FS")
+    for line in GLSL_MASK_LINES:
+        assert line in fs, f"the shader no longer contains: {line}"
+
+
+def test_the_soft_edge_stays_soft_through_the_shader(tmp_path):
+    """A region's whole point is that it has no visible boundary. Sampled down
+    the column that crosses one, the composited output must fall monotonically
+    from the graded plateau to the untouched one -- and by no more per row than
+    the smoothstep's own maximum slope allows.
+    """
+    import numpy as np
+
+    from ragvid.lut import bake_cube
+    from ragvid.region import Region
+    from ragvid.spec import GradeSpec
+
+    base = str(tmp_path / "base.cube")
+    dark = str(tmp_path / "dark.cube")
+    bake_cube(GradeSpec(), base)
+    bake_cube(GradeSpec(exposure=-1.0), dark)
+
+    w, h = 8, 240
+    region = Region(shape="linear", edge="top", extent=0.4, softness=0.4)
+    flat = np.full((h * w, 3), 0.5)
+    out = apply_stack(flat, w, h, read_lut(base), [(*read_lut(dark), region)])
+    col = out.reshape(h, w, 3)[:, 0, 0]
+
+    assert np.all(np.diff(col) >= -1e-12), "the falloff is not monotonic"
+    assert col[0] < 0.5 - 0.1, "the top is not graded"
+    assert abs(col[-1] - 0.5) < 2e-3, "the bottom is not left alone"
+    # Whole-frame amplitude times the smoothstep's max slope (1.5) over the
+    # ramp's height in rows. A step anywhere -- a `where` instead of a lerp, a
+    # mask quantised to 8 bits -- breaks this before it breaks the eye.
+    span = float(col[-1] - col[0])
+    assert np.abs(np.diff(col)).max() < span * 1.5 / (region.softness * h) + 1e-9
+
+
+def test_overlapping_layers_compose_in_the_stacks_order(tmp_path):
+    """Worst case against `GradeStack.apply`, which is the definition: 1.8 in
+    8-bit code values -- the 33^3 cube's own approximation of these two specs,
+    with the layers themselves adding nothing. `GradeStack.apply` evaluates the
+    spec exactly; the shader reads a baked LUT, so a difference of this size is
+    the bake, not the composite.
+
+    Then the same two layers in the other order, which must NOT agree -- an
+    implementation that composited them as a set rather than a sequence would
+    pass the first assertion and fail this one. Measured: 24 code values apart,
+    i.e. more than an order of magnitude above the bake's own error.
+    """
+    import numpy as np
+
+    from ragvid.lut import bake_cube
+    from ragvid.region import GradeStack, Layer, Region
+    from ragvid.spec import GradeSpec
+
+    w, h = 48, 32
+    top = Region(shape="linear", edge="top", extent=0.4, softness=0.4)
+    mid = Region(shape="radial", cx=0.5, cy=0.5, rx=0.6, ry=0.75, softness=0.7)
+    specs = [GradeSpec(exposure=0.5, saturation=0.2), GradeSpec(contrast=0.6, temperature=-1500.0)]
+    base_spec = GradeSpec(saturation=1.2, exposure=-0.2)
+
+    cubes = []
+    for i, s in enumerate([base_spec, *specs]):
+        p = str(tmp_path / f"c{i}.cube")
+        bake_cube(s, p)
+        cubes.append(read_lut(p))
+
+    img = np.random.default_rng(7).random((h, w, 3))
+    flat = img.reshape(-1, 3)
+
+    layers = [Layer(region=top, spec=specs[0]), Layer(region=mid, spec=specs[1])]
+    want = GradeStack(base=base_spec, layers=layers).apply(img).reshape(-1, 3)
+    got = apply_stack(flat, w, h, cubes[0], [(*cubes[1], top), (*cubes[2], mid)])
+    worst = float(np.abs(got - want).max()) * 255
+    assert worst < 2.0, f"the composite is {worst:.3f} code values off the stack"
+
+    # The control: the same arithmetic through the same LUTs, layers reversed.
+    swapped = apply_stack(flat, w, h, cubes[0], [(*cubes[2], mid), (*cubes[1], top)])
+    out_of_order = float(np.abs(swapped - want).max()) * 255
+    assert out_of_order > 10 * worst, (
+        f"reversing the layers moved only {out_of_order:.2f} code values -- this "
+        f"check cannot tell an ordered composite from an unordered one")
+
+
+def test_the_shader_agrees_with_ffmpeg_with_regions_active(tmp_path):
+    """Worst case, per channel, in 8-bit code values, on a real frame with two
+    overlapping regional layers and deliberately strong grades: **6**, mean
+    0.39, 95.1% of samples within 1.
+
+    Against 1 for the base cube alone, and the extra five are NOT the mask.
+    Measured by taking the terms away one at a time:
+
+      * the masks agree with `Region.mask` exactly (0.0 -- the test above), and
+        a single layer whose mask is 255 everywhere still disagrees by 2, so
+        the geometry contributes none of it;
+      * `format=argb,format=rgb24` on this clip, with no grade at all, is
+        already 2 code values away from a direct yuv420p->rgb24 decode. The
+        region chain forces argb (movie/alphamerge need an alpha plane), so
+        that swscale round trip is inside the measurement and inside the
+        export;
+      * the remaining 4 is the base cube's own 1 code value AMPLIFIED. ffmpeg
+        hands each filter an 8-bit buffer, so the layer's lut3d re-quantises
+        and then multiplies whatever error it was given by its own slope --
+        these two layers run contrast 0.4 and saturation 1.3. The shader stays
+        in float and rounds once, at the end, so it is the more accurate of the
+        two; the disagreement grows with layer count and layer strength, not
+        with mask softness.
+
+    So: 4 without swscale in the way, 2 with one layer, 1 with none. Modelling
+    ffmpeg's per-node rounding in the numpy port does not close the gap, which
+    is what rules the shader out as the source of it.
+    """
+    import numpy as np
+
+    from ragvid import render
+    from ragvid.lut import bake_cube
+    from ragvid.region import Region
+    from ragvid.spec import RGB, GradeSpec
+
+    w, h = _frame_size("assets/sample.mp4")
+    regions = [
+        Region(shape="linear", edge="top", extent=0.4, softness=0.4),
+        Region(shape="radial", cx=0.5, cy=0.5, rx=0.6, ry=0.75, softness=0.7, invert=True),
+    ]
+    specs = [
+        GradeSpec(exposure=-0.6, saturation=0.35, shadow_tint=RGB(r=0.0, g=0.02, b=0.08)),
+        GradeSpec(contrast=0.4, temperature=1400.0, saturation=1.3),
+    ]
+    base_spec = GradeSpec(saturation=1.25, contrast=0.3, exposure=0.15)
+
+    base = str(tmp_path / "base.cube")
+    bake_cube(base_spec, base)
+    made, tables = [], []
+    for i, (r, s) in enumerate(zip(regions, specs)):
+        cube = str(tmp_path / f"layer{i}.cube")
+        bake_cube(s, cube)
+        made.append((cube, r.write_png(tmp_path / f"layer{i}.png", w, h)))
+        tables.append((*read_lut(cube), r))
+
+    # render.py's own chain, not a second spelling of it.
+    vf = render._vf(None, render._lut_filter(base), layers=made)
+    ffmpeg_out = _frame_rgb("assets/sample.mp4", 1.0, vf=vf).astype(np.int16)
+    source = _frame_rgb("assets/sample.mp4", 1.0)
+    shader_out = apply_stack(source.astype(np.float64) / 255.0, w, h,
+                             read_lut(base), tables)
+    shader_8 = np.clip(np.rint(shader_out * 255), 0, 255).astype(np.int16)
+
+    diff = np.abs(shader_8 - ffmpeg_out)
+    worst, mean, within = int(diff.max()), float(diff.mean()), float((diff <= 1).mean())
+    assert worst <= 6, f"worst-case disagreement with regions: {worst} code values"
+    # The max alone cannot tell a rounding tail from a wrong picture: a mask off
+    # by a pixel, a layer applied in the wrong order or a mask that is silently
+    # 1 everywhere all move the bulk of the frame, not its worst pixel.
+    assert mean < 0.5, f"mean disagreement {mean:.3f} code values"
+    assert within > 0.94, f"only {within:.1%} of samples within 1 code value"

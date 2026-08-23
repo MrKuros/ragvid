@@ -326,6 +326,78 @@ def test_cube_downloads(api):
     assert b"LUT_3D_SIZE" in r.body
 
 
+# ---- the regional layers, one cube each ------------------------------------
+# The live WebGL preview composites them itself, so it needs each layer's grade
+# as a .cube. The MASK is not served and is not needed: a Region is closed-form
+# geometry and `state.layers[n].region` carries the fields, so the shader
+# rebuilds it. The PNG exists because ffmpeg needs a file.
+
+
+# One distinct verb per position, so no two layers can bake the same cube and
+# an ignored index would go unnoticed.
+_REGION_OPS = ["exposure", "contrast", "saturation", "warmth"]
+
+
+def _regional(api, targets=("top",)):
+    """A grade with one regional layer per target, via the intent route."""
+    api.open_clip()
+    ops = [{"op": "warmth", "dir": "up", "amount": "moderate", "target": ""}]   # the base
+    ops += [{"op": _REGION_OPS[i], "dir": "down", "amount": "strong", "target": t}
+            for i, t in enumerate(targets)]
+    r = api.post("/api/intent", {"intent": {"ops": ops, "strength": "full"}})
+    assert r.status == 200, r.body
+    state = r.json
+    assert len(state["layers"]) == len(targets), state["layers"]
+    return state
+
+
+def test_each_regional_layer_serves_its_own_cube(api):
+    state = _regional(api, ("top", "center"))
+    base = api.get("/media/cube").body
+
+    cubes = [api.get(f"/media/cube?layer={i}&v={state['version']}") for i in (0, 1)]
+    for r in cubes:
+        assert r.status == 200 and r.ctype.startswith("text/plain")
+        assert b"LUT_3D_SIZE" in r.body
+    # Three different corrections: the base grade and one per layer. Two that
+    # matched would mean the index is being ignored, which is the failure that
+    # looks like it works.
+    assert len({base, cubes[0].body, cubes[1].body}) == 3
+
+
+def test_the_layer_index_is_bounded_at_both_ends(api):
+    """A stale page asking for a layer the grade no longer has must get a 404,
+    and a negative index must NOT wrap round to the last one -- that is the one
+    way an index can quietly name a different file."""
+    _regional(api, ("top",))
+    assert api.get("/media/cube?layer=0").status == 200
+    assert api.get("/media/cube?layer=1").status == 404
+    assert api.get("/media/cube?layer=-1").status == 404
+    assert api.get("/media/cube?layer=99").status == 404
+    assert api.get("/media/cube?layer=x").status == 400
+    assert api.get("/media/cube?layer=0.5").status == 400
+
+
+def test_a_flat_grade_has_no_layer_zero(api):
+    api.open_clip()
+    api.plan()
+    assert api.state()["layers"] == []
+    assert api.get("/media/cube?layer=0").status == 404
+    assert api.get("/media/cube").status == 200      # ...and the base is unaffected
+
+
+def test_state_carries_the_geometry_the_shader_needs(api):
+    """Every field `Region.mask` reads, or the preview cannot rebuild the mask
+    and has to fall back to a server-rendered still."""
+    state = _regional(api, ("top", "center"))
+    for layer in state["layers"]:
+        region = layer["region"]
+        assert set(region) >= {"shape", "edge", "extent", "cx", "cy", "rx", "ry",
+                               "softness", "invert"}
+        assert layer["spec"]["saturation"] is not None   # a whole GradeSpec, not a diff
+    assert [l["region"]["shape"] for l in state["layers"]] == ["linear", "radial"]
+
+
 # ---- the source clip, for the in-browser preview ---------------------------
 # The narrowest route in the file: no parameter at all, so the only path it can
 # ever open is the Project's own.

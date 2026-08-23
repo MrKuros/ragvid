@@ -41,7 +41,7 @@ MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # the server is still running the Python it was started with -- which otherwise
 # shows up as fields silently missing and routes 404ing, with nothing on screen
 # to explain it.
-API_VERSION = 9
+API_VERSION = 10
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -182,12 +182,14 @@ def _state_json() -> dict:
         # refine, or a provider on the direct path). The page must degrade to
         # `spec.rationale`, not render an empty list.
         "intent": intent_view(p.intent),
-        # Regional layers, empty for the flat grade almost everything is. The
-        # live WebGL preview samples the base cube only, so it gates itself off
-        # whenever this is non-empty and falls back to the server-rendered
-        # frame -- a preview that ignored the regions would show a look the
-        # export does not produce, which is the disagreement render_preview's
-        # per-tile comment exists to prevent.
+        # Regional layers, empty for the flat grade almost everything is. Each
+        # one carries its Region, which is all the live WebGL preview needs to
+        # rebuild the mask analytically: it fetches /media/cube?layer=N and
+        # composites the same chain render.py's _region_filters does. It still
+        # declines a `shape` it cannot compute in closed form (roadmap B2's
+        # semantic masks) -- a preview that ignored a region would show a look
+        # the export does not produce, which is the disagreement
+        # render_preview's per-tile comment exists to prevent.
         "layers": p.to_dict().get("layers", []),
         # Auto-balance: whether it is on, and what it does to THIS clip in its
         # own words ("" when there is nothing to correct). Both, because the UI
@@ -498,12 +500,16 @@ def r_frame(req, q):
 
 def r_cube(req, q):
     """The grade as a .cube -- or, with ?input=1, the camera log conversion in
-    force instead.
+    force instead, or with ?layer=N, regional layer N's own grade.
 
-    Both, because the WebGL preview has to reproduce the ffmpeg chain and that
-    chain is two lut3d nodes: the technical conversion first, the creative grade
-    on top. One with the other missing is not a smaller error, it is a different
-    picture. The path served is the Project's own, never a caller's.
+    All three, because the WebGL preview has to reproduce the ffmpeg chain and
+    that chain is the technical conversion, then the creative grade, then one
+    masked lut3d per layer (render._region_filters). One node missing is not a
+    smaller error, it is a different picture.
+
+    Every path served is the Project's own -- an index, never a filename. There
+    is nothing caller-supplied that reaches the filesystem, exactly as
+    /media/source has no parameter at all.
     """
     project = _project()
     if _param(q, "input", "") not in ("", "0", "false", "no"):
@@ -511,6 +517,25 @@ def r_cube(req, q):
         if not lut:
             raise NotFound("no input LUT is in force")
         return 200, "text/plain; charset=utf-8", Path(lut).read_bytes()
+    layer = _param(q, "layer", "")
+    if layer != "":
+        try:
+            i = int(layer)
+        except ValueError as exc:
+            raise InputError("layer", f"not an integer: {layer!r}") from exc
+        with LOCK:
+            # ponytail: bake_layers re-bakes every layer, so a page loading an
+            # n-layer stack costs n^2 bakes (~67 ms each, so ~1.1 s once for the
+            # deepest stack compile_stack can build). It is per grade change,
+            # not per scrub -- the ~190 ms round trip this replaces was per
+            # scrub. Cache in project.py if a deeper stack ever shows up.
+            made = project.bake_layers()
+        # An index off the end is a stale page, not a crash. Negative is
+        # rejected rather than wrapping to the last layer, which is the one way
+        # an index can quietly mean a different file.
+        if not 0 <= i < len(made):
+            raise NotFound(f"no layer {i}: the grade has {len(made)}")
+        return 200, "text/plain; charset=utf-8", Path(made[i][0]).read_bytes()
     with LOCK:
         data = project.bake().read_bytes()
     return 200, "text/plain; charset=utf-8", data

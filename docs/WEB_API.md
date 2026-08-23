@@ -40,7 +40,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
                       "text":"warmed it up"}]},
   "auto_balance": true,
   "balance": "neutralised a green cast, set the black point",
-  "api_version": 9,
+  "api_version": 10,
   "version": 8,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,
@@ -54,6 +54,10 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
             "effects": {"denoise":0,"glow":0,"softness":0,
                         "grain":0,"vignette":0,"fringe":0},
             "rationale": "..." },
+  "layers": [{"region": {"shape": "linear", "edge": "top", "extent": 0.4,
+                         "cx": 0.5, "cy": 0.5, "rx": 0.5, "ry": 0.5,
+                         "softness": 0.4, "invert": false},
+              "spec": { "...one whole GradeSpec..." }}],
   "input_lut": null,
   "input_format": null,
   "stats": { "mean": {"r":0.2,"g":0.15,"b":0.15}, "saturation": 0.48,
@@ -73,6 +77,26 @@ rather than left to `/api/providers`, so an opening screen can prompt for a key
 without a second round trip — a first-time user does not know one is needed, and
 finds out by typing a mood and getting an error.
 When open but not yet graded: `"planned": false`, `"spec": null`.
+
+### Regional layers
+
+`layers` is the spatial half of the grade (roadmap B1) and is `[]` for the flat
+grade almost every look is. Each entry is one whole `GradeSpec` plus the `Region`
+saying where it lands, and they compose **in list order**, each grading the
+accumulated result: `out = out + (layer.spec(out) - out) * layer.region.mask()`.
+That is `region.GradeStack.apply` and `render._region_filters`, and a client
+reproducing the picture has to keep the order.
+
+`region` is closed-form geometry in frame-relative coordinates, so the same
+fields describe a 4K export and a 480p preview. `shape` selects which fields are
+read — `edge`/`extent` for `linear`, `cx`/`cy`/`rx`/`ry` for `radial` — and
+`softness` (falloff width, 0 = hard) and `invert` apply to both. The falloff is
+`smoothstep`, sampled at pixel centres. **Treat `shape` as an allow-list**: more
+shapes will land, and one a client cannot evaluate must send it back to
+`/media/frame` rather than be approximated.
+
+A grade with layers is colour-only in `/media/cube`, which serves the **base**
+alone. `/media/cube?layer=<n>` is the rest of it.
 
 ### The intent object
 
@@ -216,9 +240,22 @@ Colour only — see above — and 33³ or 65³ depending on whether the grade us
 hue qualifier, so the response is ~1 MB or ~7.4 MB. Do not assume a fixed size.
 
 `GET /media/cube?input=1` → the camera log conversion in force instead, same
-media type. `404 NotFound` when there is none. Both exist because the ffmpeg
-chain is two `lut3d` nodes — the technical conversion, then the grade on top —
-and anything reproducing that picture needs both.
+media type. `404 NotFound` when there is none.
+
+`GET /media/cube?layer=<n>&v=<version>` → regional layer `n`'s own `.cube`, same
+media type, indexed into `state.layers` in evaluation order. `404 NotFound` for
+an index the grade does not have (a stale page, not a crash) and `400 InputError`
+for one that is not an integer. It is an **index**, never a filename: nothing a
+caller sends reaches the filesystem, the same rule `/media/source` keeps by
+taking no parameter at all.
+
+All three exist because the ffmpeg chain is a stack of `lut3d` nodes — the
+technical conversion, then the grade, then one masked node per layer — and
+anything reproducing that picture needs every one of them.
+
+No mask image is served, and none is needed: a `Region` is closed-form geometry
+and `state.layers[n].region` carries the six fields it takes to evaluate. The
+PNG `render.py` blends with exists because ffmpeg needs a file.
 
 ## The source clip — the in-browser preview path
 
@@ -239,12 +276,28 @@ the clip in a `<video>`, uploads `/media/cube` (and `?input=1`) as 3D textures
 and samples them in a fragment shader, tetrahedrally, the way `lut3d` does.
 Scrubbing then costs nothing and playback is possible at all.
 
+Regional layers ride along in the same shader: one more 3D LUT per layer, one
+more `mix(c, lut(c), mask(uv))`, in `state.layers` order — `region.py`'s
+evaluation order and `render._region_filters`' composite, which are the same
+thing. The mask is rebuilt from `region` analytically, at pixel centres,
+`smoothstep` falloff.
+
 It is used **only** when the browser can produce the same picture the export
-will: WebGL2 present, the codec decodable, and `spec.effects` all zero. The six
-`effects` are an ffmpeg filter chain and are not in the cube, so a grade
-carrying any of them falls back to `/media/frame` rather than showing a
-different picture from the one that will be written. A client that skips that
-check is lying to its user.
+will:
+
+- WebGL2 present and the shader compiles;
+- the codec is one this browser decodes;
+- `spec.effects` are all zero. The six are an ffmpeg filter chain — `hqdn3d`,
+  `gblur`, `cas`, ffmpeg's own noise PRNG — and are not in the cube;
+- every `layers[n].region.shape` is one the shader can evaluate in closed form
+  (`linear`, `radial`), and there are at most six layers. An **allow-list**: a
+  shape a client does not recognise — roadmap B2's semantic masks come out of a
+  segmentation model, not out of `cx`/`cy`/`rx`/`ry` — must fall back, not be
+  drawn as something it is not.
+
+Anything failing falls back to `/media/frame` rather than showing a different
+picture from the one that will be written. A client that skips that check is
+lying to its user.
 
 ## Export
 

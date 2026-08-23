@@ -105,6 +105,7 @@ const glBase = {
   texImage2D: () => glCalls.push(["texImage2D"]),
   texImage3D: (target, lvl, ifmt, n) => glCalls.push(["texImage3D", n, activeUnit]),
   uniform1i: (loc, v) => { uniforms[loc] = v; glCalls.push(["uniform1i", loc, v]); },
+  uniform4f: (loc, ...v) => { uniforms[loc] = v; glCalls.push(["uniform4f", loc, v]); },
   viewport: () => {},
   drawArrays: () => { draws++; },
   pixelStorei: () => {},
@@ -119,7 +120,9 @@ let routes = {};
 globalThis.fetch = async (url, opts) => {
   fetched.push(url);
   const path = String(url).split("?")[0];
-  const body = routes[path];
+  // Whole URL first, so a check can answer one layer's cube differently from
+  // the rest; path otherwise.
+  const body = routes[String(url)] !== undefined ? routes[String(url)] : routes[path];
   if (body === undefined) {
     return { ok: false, status: 404,
              headers: { get: () => "application/json" },
@@ -167,7 +170,7 @@ function state(over = {}) {
     open: true, api_version: EXPECTED_API, version: 3, source: "/clips/a.mp4",
     name: "a.mp4", duration: 10, planned: true, can_undo: true, history_depth: 1,
     steps: [], spec: { ...SPEC }, intent: null, auto_balance: true, balance: "",
-    stats: {}, input_lut: null, input_format: null, providers: [],
+    layers: [], stats: {}, input_lut: null, input_format: null, providers: [],
     provider: "groq", model: "m", configured: true, ...over,
   };
 }
@@ -189,10 +192,17 @@ const frameAsked = () => String($("imgGraded").src).startsWith("/media/frame");
 // What a page reload would do -- the live path caches its verdicts on purpose.
 function forget() {
   glOk = null; videoBroken = false;
-  vidFor = null; cubeFor = null; techFor = null;
+  vidFor = null; cubeFor = null; techFor = null; layersFor = null; layerCount = 0;
   for (const k of Object.keys(uniforms)) delete uniforms[k];
   glCalls.length = 0;
 }
+
+// region.py's "top" and "center" entries, as /api/state serialises a Region.
+const REGION_TOP = { shape: "linear", edge: "top", extent: 0.4, cx: 0.5, cy: 0.5,
+                     rx: 0.5, ry: 0.5, softness: 0.4, invert: false };
+const REGION_CENTER = { shape: "radial", edge: "top", extent: 0.5, cx: 0.5, cy: 0.5,
+                        rx: 0.6, ry: 0.75, softness: 0.7, invert: false };
+const layer = (region) => ({ region, spec: { ...SPEC } });
 
 (async () => {
   // First, and deliberately phrased in terms that need nothing new to express:
@@ -275,15 +285,67 @@ function forget() {
   ok(units.includes("TEXTURE01") && units.includes("TEXTURE02"),
      "technical on unit 1, grade on unit 2 -- never the same texture twice");
 
+  // --- regional layers composite in the shader, not on the server ----------
+  forget();
+  render(reset({ layers: [layer(REGION_TOP), layer(REGION_CENTER)], version: 20 }));
+  await settle();
+  ok(liveOn === true, "a regional grade stays live -- the shader composites it");
+  ok(!frameAsked(), "and costs no ffmpeg round trip");
+  ok(fetched.some((u) => String(u).startsWith("/media/cube?layer=0&v=20")),
+     "layer 0's cube is fetched at the current version");
+  ok(fetched.some((u) => String(u).startsWith("/media/cube?layer=1&v=20")),
+     "and layer 1's");
+  ok(uniforms.nLayers === 2, "both layers are switched on");
+  ok(uniforms["layN[0]"] === 2 && uniforms["layN[1]"] === 2, "each layer knows its cube size");
+  const layerUnits = glCalls.filter((c) => c[0] === "texImage3D").map((c) => c[2]);
+  ok(layerUnits.includes("TEXTURE03") && layerUnits.includes("TEXTURE04"),
+     "layers land on units 3 and 4 -- never on top of the grade's own");
+
+  // The packing the shader reads. `top` is dir (0,1), offset 0, so
+  // u = dot(uv, dir) + off is uv.y, which is region.Region.mask's "top".
+  ok(String(uniforms["rA[0]"]) === "0,1,0,0.4", "a linear region packs to (dir, offset, extent)");
+  ok(String(uniforms["rB[0]"]) === "0,0.4,0,0", "...with shape 0, its softness and no invert");
+  ok(String(uniforms["rA[1]"]) === "0.5,0.5,0.6,0.75", "a radial region packs to (cx, cy, rx, ry)");
+  ok(String(uniforms["rB[1]"]) === "1,0.7,0,0", "...with shape 1 and its softness");
+
+  // Hold-to-compare must drop the layers too, or the "before" is half-graded.
+  $("frame").dispatch("mousedown", { preventDefault() {} });
+  ok(uniforms.nLayers === 0 && uniforms.useGrade === 0, "holding drops the layers as well");
+  $("frame").dispatch("mouseup");
+  ok(uniforms.nLayers === 2 && uniforms.useGrade === 1, "and they come back on release");
+
+  // A layer cube that will not parse is the same failure as a base cube that
+  // will not: the canvas must come down, not stay up missing a layer.
+  forget();
+  const badLayer = reset({ layers: [layer(REGION_TOP)], version: 21 });
+  routes["/media/cube?layer=0&v=21"] = "LUT_3D_SIZE 2\n0 0 0\n";   // truncated
+  render(badLayer);
+  await settle();
+  ok(liveOn === false && frameAsked(), "an unusable layer cube falls back to the server");
+
   // --- gate: a spatial effect is not in the cube, so the server renders -----
+  forget();
   render(reset({ spec: { ...SPEC, effects: { ...EFFECTS, grain: 0.3 } }, version: 5 }));
   await settle();
   ok(liveOn === false, "grain sends the frame back to ffmpeg");
-  // A regional grade is the same category and this gate has to be shut before
-  // /api/state ever carries one, not after.
-  render(reset({ layers: [{ region: "sky" }], version: 51 }));
+  // A mask that does not come from geometry (roadmap B2's segmentation model)
+  // has nothing for regionMask to evaluate. Allow-list, so an unknown shape
+  // falls back rather than being drawn as a `linear`.
+  render(reset({ layers: [layer({ ...REGION_TOP, shape: "semantic" })], version: 51 }));
   await settle();
-  ok(liveOn === false, "a regional layer is not in the cube either");
+  ok(liveOn === false, "a shape the shader cannot compute goes back to the server");
+  ok(frameAsked(), "and the server-rendered still appears");
+  render(reset({ layers: [{ region: "sky" }], version: 52 }));
+  await settle();
+  ok(liveOn === false, "a region that is not even an object falls back too");
+  // Six slots is every stack compile_stack can build; a look.json can say more.
+  render(reset({ layers: Array(7).fill(layer(REGION_TOP)), version: 53 }));
+  await settle();
+  ok(liveOn === false, "more layers than the shader has slots falls back");
+  render(reset({ layers: Array(6).fill(layer(REGION_TOP)), version: 54 }));
+  await settle();
+  ok(liveOn === true && uniforms.nLayers === 6, "and exactly six is still live");
+
   render(reset({ spec: { ...SPEC, effects: { ...EFFECTS, grain: 0.3 } }, version: 5 }));
   await settle();
   ok($("gl").hidden === true, "the canvas is hidden, not left stale");
