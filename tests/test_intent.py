@@ -18,7 +18,9 @@ import pytest
 from ragvid.intent import (
     AMOUNTS,
     DIRECTIONS,
+    MASK_OPS,
     OPS,
+    REGION_NAMES,
     STRENGTH_MIX,
     STRENGTHS,
     TARGETS,
@@ -132,9 +134,14 @@ def test_an_intent_is_smaller_on_the_wire_than_the_spec_it_compiles_to(capsys):
 
 def test_every_verb_renders_a_sentence_in_both_directions():
     for direction in DIRECTIONS:
-        lines = describe(every_op(dir=direction))
-        assert len(lines) == len(OPS)
-        for line in lines:
+        # Two passes, because MASK_OPS are the one kind of verb whose sentence
+        # depends on having a target: with nothing to protect there is nothing
+        # to report, and describe() must stay silent rather than promise it.
+        plain = describe(every_op(dir=direction))
+        assert len(plain) == len(OPS) - len(MASK_OPS)
+        regional = describe(every_op(dir=direction, target="person"))
+        assert len(regional) == len(OPS)
+        for line in plain + regional:
             assert line and "{" not in line       # no unfilled template slot
             assert line == line.strip().lower() or line[0].islower()
 
@@ -331,3 +338,58 @@ def test_skin_is_still_a_colour_and_not_a_mask():
     assert for_target("skin") is None
     assert describe(Intent(ops=[Op(op="saturation", dir="down", target="skin")])) == \
         ["drained the colour in the skin tones"]
+
+
+# ---- protect (roadmap B6) --------------------------------------------------
+
+
+def test_a_protect_reads_as_the_sentence_that_asked_for_it():
+    """"...but don't touch the sky" is the note this verb exists for, so the
+    list the UI shows has to contain a phrase a person would recognise as the
+    answer to it -- not "region person, inverted"."""
+    assert describe(Intent(ops=[
+        Op(op="exposure", dir="down"),
+        Op(op="protect", target="person"),
+    ])) == ["darkened it", "left the person alone"]
+
+    for target, said in [("sky", "left the sky alone"),
+                         ("top", "left the top alone"),
+                         ("edges", "left the edges alone"),
+                         ("center", "left the middle alone")]:
+        assert describe(Intent(ops=[Op(op="protect", target=target)])) == [said]
+
+
+def test_a_protect_reports_neither_a_direction_nor_an_amount():
+    """A region is in or out. "left the sky alone a little" would describe a
+    thing this vocabulary cannot do, and dir has no opposite to render."""
+    lines = {tuple(describe(Intent(ops=[Op(op="protect", target="sky",
+                                          dir=d, amount=a)])))
+             for d in DIRECTIONS for a in AMOUNTS}
+    assert lines == {("left the sky alone",)}
+
+
+@pytest.mark.parametrize("bad", ["", "skin", "blue", "teal"])
+def test_a_colour_cannot_be_protected_and_does_not_claim_to_be(bad):
+    """The B6 decision, asserted rather than described. A protect is a MASK, and
+    a colour is not one: gating the whole grade on hue is a per-pixel bypass
+    GradeSpec cannot express, and a once-sampled matte of skin-coloured pixels
+    would be strictly worse than the `skin` hue qualifier already is. So it is
+    cleared at the Intent boundary -- exactly as a region on a texture verb is
+    -- and the sentence then says nothing rather than promising a grade that
+    went straight through the skin."""
+    op = Op(op="protect", target=bad)
+    assert op.target == ""
+    assert describe(Intent(ops=[op])) == []
+    assert describe(Intent(ops=[Op(op="warmth"), op])) == ["warmed it up"]
+
+
+def test_every_maskable_target_can_be_protected():
+    """The guard the region words already have, from the other end: a protect
+    the compiler can honour for "top" but not for "water" would be a vocabulary
+    that means two different things depending on the word."""
+    from ragvid.intent import REGIONS
+
+    for target in REGIONS:
+        op = Op(op="protect", target=target)
+        assert op.target == target
+        assert describe(Intent(ops=[op])) == [f"left {REGION_NAMES[target]} alone"]

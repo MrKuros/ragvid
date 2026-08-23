@@ -242,3 +242,109 @@ def test_a_region_round_trips_through_json():
     r = for_target("foliage")
     assert Region.model_validate(r.model_dump()) == r
     assert '"subject":"foliage"' in r.model_dump_json().replace(" ", "")
+
+
+# ---- exclusions (roadmap B6) -----------------------------------------------
+#
+# A protect reaches the picture as `Region.exclude`, so these are the mask
+# arithmetic B6 rests on. Measured on the mask, which is the only thing render.py
+# and GradeStack.apply ever see.
+
+
+def test_an_exclusion_is_a_set_difference_and_nothing_else():
+    """The composition rule, as arithmetic. Multiplication by (1 - the excluded
+    mask) can only ever REMOVE coverage, is exactly 0 where the exclusion is
+    exactly 1, and is bit-for-bit the unexcluded mask where it is exactly 0."""
+    top = for_target("top")
+    cut = for_target("top")
+    cut.exclude = [for_target("bottom")]
+    a, b = top.mask(32, 96), cut.mask(32, 96)
+    assert np.all(b <= a + 1e-12)
+    assert b[0, 0] == a[0, 0] == 1.0, "the far end of the frame is untouched"
+    assert b[-1, 0] == 0.0
+    # And bitwise where the exclusion is exactly zero, not merely close.
+    off = for_target("bottom").mask(32, 96) == 0.0
+    assert off.any() and np.array_equal(b[off], a[off])
+
+
+def test_two_exclusions_compose_in_either_order():
+    """(1-a)(1-b) is symmetric, which is what makes "and don't touch that
+    either" mean one thing. A rule with an order would make the sentence's word
+    order load-bearing, which no person expects of it.
+
+    allclose and not array_equal, and the difference is the whole reason this
+    test says what it says: float multiplication commutes but does not
+    ASSOCIATE, so (m*a)*b and (m*b)*a differ by up to a measured 5.6e-17 here --
+    1.4e-14 of one 8-bit code value, i.e. the same order as region.py's
+    documented full-frame-mask ulp and nothing a mask can carry."""
+    def m(*words):
+        r = for_target("center")
+        r.exclude = [for_target(w) for w in words]
+        return r.mask(64, 48)
+
+    assert np.abs(m("top", "left") - m("left", "top")).max() < 1e-15
+    assert np.all(m("top", "left") <= m("top") + 1e-12)
+
+
+def test_an_exclusion_survives_the_invert_it_sits_outside_of(monkeypatch):
+    """`invert` is part of the region's OWN shape and the exclusion is applied
+    to whatever that leaves. So "everything except the sky, minus the person"
+    spares the person -- the failure would be an exclusion that inverts with
+    the region and grades exactly the pixels it promised to spare."""
+    stub_prob(monkeypatch, horizon(0.5))
+    r = for_target("sky")
+    r.invert = True
+    r.exclude = [for_target("top")]
+    m = r.mask(320, 180, frame=frame(180, 320))
+    assert m[:20].max() == 0.0, "the top is spared on BOTH sides of the invert"
+    assert m[-1, 0] == 1.0, "and the bottom, which neither covers, is fully in"
+
+
+def test_outside_is_the_whole_frame_minus_the_union():
+    """What a protect leaves for the ops that named no region of their own."""
+    from ragvid.region import outside
+
+    m = outside([for_target("top"), for_target("bottom")]).mask(32, 96)
+    a = for_target("top").mask(32, 96)
+    b = for_target("bottom").mask(32, 96)
+    assert np.allclose(m, (1.0 - a) * (1.0 - b))
+    assert m[0, 0] == 0.0 and m[-1, 0] == 0.0
+    # "everything except the edges" is the middle, not the edges again: outside()
+    # flips whatever invert the vocabulary already carries rather than setting it.
+    assert outside([for_target("edges")]).mask(80, 60)[30, 40] == 1.0
+    assert outside([for_target("center")]).mask(80, 60)[30, 40] == 0.0
+
+
+def test_needs_frame_is_recursive_through_the_exclusions():
+    """project.bake_layers decides whether to decode a frame from this ONE
+    property. A geometric region protecting a person needs the picture, and a
+    caller that answered from `shape` alone would hand mask() no frame and get
+    a ValueError where it wanted a mask."""
+    r = for_target("top")
+    assert r.needs_frame is False
+    r.exclude = [for_target("person")]
+    assert r.needs_frame is True
+    assert GradeStack(base=GradeSpec.identity(),
+                      layers=[Layer(region=r, spec=GradeSpec.identity())]).needs_frame
+
+    with pytest.raises(ValueError, match="person"):
+        r.mask(64, 48)
+
+
+def test_an_excluded_region_round_trips_through_json():
+    """session.json holds the layers, so a protect has to survive undo and
+    reload with the thing it spares intact."""
+    r = for_target("top")
+    r.exclude = [for_target("person")]
+    assert Region.model_validate(r.model_dump()) == r
+    assert '"subject":"person"' in r.model_dump_json().replace(" ", "")
+
+
+def test_a_region_with_no_exclusions_is_bit_for_bit_what_b1_shipped():
+    """The identity property one level down: adding a field to Region must not
+    have moved a single mask that does not use it."""
+    for word in ("top", "left", "center", "edges"):
+        r = for_target(word)
+        assert r.exclude == []
+        m = r.mask(64, 48)
+        assert np.array_equal(m, r.model_copy(deep=True).mask(64, 48))

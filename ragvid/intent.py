@@ -44,8 +44,10 @@ from pydantic import BaseModel, Field, model_validator
 
 from .segment import CLASSES
 
-# The verb vocabulary. Sixteen words, each a thing a person says out loud about
-# a picture. `dir` means up/down on that axis and is documented per verb below.
+# The verb vocabulary. Seventeen words, each a thing a person says out loud
+# about a picture. Sixteen of them MOVE something and take a direction and an
+# amount; the seventeenth, `protect`, names pixels for the other sixteen to
+# skip. `dir` means up/down on that axis and is documented per verb below.
 OpName = Literal[
     # tone
     "exposure",        # up = brighter overall
@@ -66,8 +68,21 @@ OpName = Literal[
     "softness",        # up = softer, down = sharper
     "denoise",
     "fringe",
+    # selection (roadmap B6) -- "...but don't touch the sky". It writes no
+    # GradeSpec field at all: compiler.compile_stack subtracts its region from
+    # every other op's, so it is a verb by grammar and a mask by mechanism.
+    # `dir` and `amount` are meaningless on it (a region is in or out) and
+    # describe() deliberately reports neither.
+    "protect",
 ]
 OPS = get_args(OpName)
+
+# Verbs that answer "which pixels" instead of "what changes". Named here rather
+# than spelled `== "protect"` in three files: compiler.py has to keep them OUT
+# of the per-verb table (a verb with no compiler entry is normally a bug, and
+# this is the one exception), and describe() has to render them without a
+# direction or an adverb.
+MASK_OPS = ("protect",)
 
 Direction = Literal["up", "down"]
 DIRECTIONS = get_args(Direction)
@@ -150,6 +165,17 @@ class Op(BaseModel):
         # describe(), which would then report a move that never happened.
         if self.target in REGIONS and self.op in EFFECT_OPS:
             self.target = ""
+        # The mirror of that rule for B6: a protect is a MASK, and the only
+        # targets that are masks are the places and the things. A colour is not
+        # one -- "spare the skin" would need the grade itself to be gated on
+        # hue, which is a per-pixel bypass GradeSpec's 43 numbers cannot express
+        # and a once-sampled matte of skin-coloured pixels would be strictly
+        # worse than the hue qualifier `skin` already is on the verbs that take
+        # it. Cleared rather than honoured, and describe() then says nothing
+        # about it, because the failure to avoid is a sentence claiming the skin
+        # was spared over a grade that went straight through it.
+        if self.op in MASK_OPS and self.target not in REGIONS:
+            self.target = ""
         return self
 
 
@@ -218,6 +244,9 @@ _PHRASES: dict[str, tuple[str, str]] = {
     "softness": ("softened it", "sharpened it"),
     "denoise": ("cleaned up the noise", "left the noise alone"),
     "fringe": ("added colour fringing", "took the fringing out"),
+    # One phrase for both directions: there is no opposite of sparing something.
+    # " it" is the slot _in_region fills, so this renders "left the sky alone".
+    "protect": ("left it alone", "left it alone"),
 }
 
 # Verbs whose `target` selects WHICH PIXELS, rather than naming a colour to add.
@@ -252,6 +281,15 @@ def describe(intent: Intent) -> list[str]:
     """
     out = []
     for item in intent.ops:
+        if item.op in MASK_OPS:
+            # No direction and no adverb: a region is in or out, so "left the
+            # sky alone a little" would describe a thing this cannot do. A
+            # protect whose target was cleared by Op's validator protects
+            # nothing and says nothing -- the alternative is a sentence
+            # promising the model's unmaskable target was spared.
+            if item.target:
+                out.append(_in_region(_PHRASES[item.op][0], item.target))
+            continue
         up, down = _PHRASES[item.op]
         phrase = up if item.dir == "up" else down
         # A region answers "which pixels"; a colour name answers either "which

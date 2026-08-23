@@ -350,6 +350,18 @@ VHS, clean, noisy.
   denoise   up = cleaner, less sensor noise. Costs fine detail.
   fringe    up = more chromatic aberration at the edges. Cheap lens, VHS, dream.
 
+VERB — LEAVING SOMETHING OUT. This one moves nothing by itself.
+  protect   every other move in the list skips the part of the frame its target
+            names — "but don't touch the sky", "leave the buildings out of it",
+            "keep the water as it is". The rest of the picture still gets the full
+            move; nothing is weakened, it is only narrowed. dir and amount are
+            ignored here, because a part of the frame is either in or out.
+            Its target must be a PLACE or a THING from the lists below. A colour
+            cannot be protected and a protect with no target does nothing, so if
+            the sentence asks for a colour to be spared, either name the thing it
+            belongs to or leave the protect out entirely. Somebody asking for
+            skin to be left alone is asking about a person.
+
 TARGET, in full. It answers WHICH PIXELS, and takes either a colour or a place.
 
 COLOURS: red, orange, yellow, green, cyan, teal, blue, magenta, purple, skin.
@@ -393,8 +405,8 @@ HOW TO CHOOSE:
   asked for a darker one.
 - One op per verb. Two warmth ops in one list compose into a bigger push than either of
   them asked for; say it once, with the right amount.
-- Texture verbs, colour targets and place targets stay out of a grade that did not ask
-  for them.
+- Texture verbs, protect, colour targets and place targets stay out of a grade that did
+  not ask for them.
 - Order does not matter. The compiler decides the order the moves are applied in.
 - You are not told what this footage looks like, and you do not need to be. "Warmer" on
   an already-orange clip and on a blue one is the same request; how far it actually goes
@@ -443,10 +455,14 @@ HOW TO MAKE THE EDIT THE REQUEST ASKS FOR:
 - SOMETHING THE LIST DOES NOT MENTION AT ALL -- add one new op for it, chosen exactly as
   you would have chosen it in a fresh grade.
 - A MOVE TO STOP ENTIRELY -- "take the grain out", "lose the vignette", "forget the
-  warmth", "leave the top alone" -- delete that op from the list. Deleting is NOT the
+  warmth", "stop darkening the top" -- delete that op from the list. Deleting is NOT the
   same as making it subtle: a subtle op still changes the picture, and somebody asking
   for a move to go away wants it gone. Shrink the amount when the sentence asks for
   less of something; delete the op when it asks for none of it.
+- SOMETHING TO LEAVE OUT OF THE WHOLE GRADE -- "but don't touch the sky", "leave her
+  alone", "keep the buildings as they are". If the list already holds a move aimed at
+  that place or that thing, the request is to DELETE that op. If it does not, the
+  request is a protect op, and every other move in the list then skips those pixels.
 - THE WHOLE LOOK HELD BACK, OR LET OUT AGAIN -- "half strength", "dial it back", "a
   subtle version of that", "go all in" -- change `strength` and leave every op alone.
   strength is a ladder too, from full down through strong and moderate to subtle, and it

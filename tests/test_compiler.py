@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from ragvid.compiler import compile_intent
-from ragvid.intent import AMOUNTS, OPS, Intent, Op
+from ragvid.intent import AMOUNTS, MASK_OPS, OPS, Intent, Op
 from ragvid.lut import _grid
 from ragvid.probe import ClipStats, _stats_from_frames
 from ragvid.spec import LUMA, RGB, GradeSpec
@@ -140,7 +140,13 @@ CASES: dict[str, dict] = {
 EFFECT_CASES = {"grain": "grain", "glow": "glow", "vignette": "vignette",
                 "softness": "softness", "denoise": "denoise", "fringe": "fringe"}
 
-assert sorted(set(CASES) | set(EFFECT_CASES)) == sorted(OPS), "a verb with no measured test"
+# MASK_OPS move no pixel by themselves, so there is no moment to measure here.
+# They are covered by the B6 section at the end of the file, which measures what
+# they do to the pixels the OTHER verbs reach -- and they are subtracted by name
+# rather than left to fall out of this set, so a new verb still has to declare
+# itself one thing or the other.
+assert sorted(set(CASES) | set(EFFECT_CASES) | set(MASK_OPS)) == sorted(OPS), \
+    "a verb with no measured test"
 
 
 # ---- identity -------------------------------------------------------------
@@ -935,3 +941,298 @@ def test_the_rationale_names_the_semantic_move_too():
         Op(op="warmth"), Op(op="exposure", dir="down", target="sky")]), STATS)
     assert "sky" in stack.base.rationale
     assert "darkened the sky" in stack.layers[0].spec.rationale
+
+
+# ---- protect (roadmap B6) --------------------------------------------------
+#
+# THE COMPOSITION RULE, MEASURED. A protect intersects every other op's mask,
+# where an op with no region of its own has a mask of 1. So a protect NARROWS a
+# region and never weakens one, and the tests below assert exactly that on
+# pixels: the spared pixels do not move at all, and the pixels beside them get
+# the same grade they would have got had nobody asked for a protect.
+#
+# segment.class_prob is stubbed, as it is in tests/test_region.py and for the
+# same reason: no test downloads the model. The stub puts the "person" in the
+# LEFT half of the frame so that it overlaps a "top" region partially, which is
+# the only arrangement that can tell the chosen rule apart from the two rules it
+# was chosen over.
+
+FRAME = IMG[: 96 * 96].reshape(96, 96, 3)
+# The oracle for "this pixel did not move", for the reason IDENTITY_OUT exists:
+# apply()'s saturation lerp costs ~1 ulp on arbitrary floats, so `== FRAME` would
+# assert a property spec.py never claimed. Every stack below has an identity
+# base, and a mask of exactly 0 lerps back to it bitwise.
+FRAME_OUT = GradeSpec.identity().apply(FRAME)
+
+
+def person_on_the_left(monkeypatch, at: float = 0.5):
+    """The 128x128 probability grid segment.py returns: a subject filling the
+    left `at` of the frame."""
+    from ragvid import segment
+
+    p = np.full((128, 128), 0.02)
+    p[:, : int(128 * at)] = 0.98
+    monkeypatch.setattr(segment, "class_prob", lambda rgb, name: p)
+
+
+# Sample well inside each zone, never across a falloff: "top" is full above row
+# 19 and zero below row 57 (extent 0.4, softness 0.4 on 96 rows), and the
+# semantic feather is ~2 px either side of column 48.
+TOP_IN = (slice(0, 16), slice(0, 40))       # top AND person
+TOP_OUT = (slice(0, 16), slice(56, 96))     # top, NOT person
+BOTTOM = (slice(70, 96), slice(0, 96))      # neither
+
+
+def d_luma(after, before, zone) -> float:
+    return float((after[zone] @ LUMA).mean() - (before[zone] @ LUMA).mean())
+
+
+def test_a_protect_spares_its_pixels_and_leaves_every_other_one_at_full_strength(monkeypatch):
+    """The verb's whole claim, on pixels. Measured here, mean luma of the
+    protected half:
+
+        darken, no protect      0.3986 -> 0.3127   (-0.0859)
+        darken, protect person  0.3986 -> 0.3986   ( 0.0000, bitwise)
+
+    and of the unprotected half, which must NOT be weakened by the protect:
+
+        darken, no protect      -0.0860
+        darken, protect person  -0.0860   (max difference 1.4e-17 per pixel)
+    """
+    from ragvid.compiler import compile_stack
+
+    person_on_the_left(monkeypatch)
+    plain = compile_stack(one("exposure", dir="down"), STATS).apply(FRAME)
+    spared = compile_stack(Intent(ops=[
+        Op(op="exposure", dir="down"), Op(op="protect", target="person")]), STATS).apply(FRAME)
+
+    left, right = (slice(None), slice(0, 40)), (slice(None), slice(56, 96))
+    assert d_luma(plain, FRAME, left) < -0.05, "the darkening has to be worth measuring"
+    assert np.array_equal(spared[left], FRAME_OUT[left]), "a protected pixel moves not at all"
+    # The rest still gets the WHOLE move -- a protect that quietly halved the
+    # grade everywhere would pass every "it moved less" assertion above.
+    assert np.abs(spared[right] - plain[right]).max() < 1e-15
+    assert d_luma(spared, FRAME, right) < -0.05
+
+
+def test_a_protect_narrows_a_region_instead_of_weakening_it(monkeypatch):
+    """"darken the top but don't touch the person" -- the sentence the two
+    candidate composition rules disagree about. Measured mean luma change:
+
+        the top, where she is        0.0000  (bitwise: spared)
+        the top, where she is not   -0.0855  (the full regional move, to the
+                                              last bit: max difference 0.0
+                                              against the same grade unprotected)
+        the bottom                   0.0000  (bitwise: outside the region)
+
+    An "inverted region applied to every other op" cannot produce this row set:
+    replacing the op's region loses the top entirely, and adding a second layer
+    cannot subtract a grade an earlier layer already applied."""
+    from ragvid.compiler import compile_stack
+
+    person_on_the_left(monkeypatch)
+    got = compile_stack(Intent(ops=[
+        Op(op="exposure", dir="down", target="top"),
+        Op(op="protect", target="person"),
+    ]), STATS).apply(FRAME)
+
+    assert np.array_equal(got[TOP_IN], FRAME_OUT[TOP_IN])
+    assert d_luma(got, FRAME, TOP_OUT) < -0.05
+    assert np.array_equal(got[BOTTOM], FRAME_OUT[BOTTOM])
+    # And the unprotected part of the top got exactly the move it would have got
+    # with no protect in the sentence at all.
+    alone = compile_stack(one("exposure", dir="down", target="top"), STATS).apply(FRAME)
+    assert np.abs(got[TOP_OUT] - alone[TOP_OUT]).max() < 1e-15
+
+
+def test_a_protect_moves_the_whole_frame_ops_into_a_layer_and_says_so():
+    """A base GradeSpec is a colour map and cannot spare a pixel, so under a
+    protect the global ops become a layer over `region.outside(...)` and the
+    base stays identity. That is the same trade a region already makes."""
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(Intent(ops=[
+        Op(op="warmth"), Op(op="protect", target="sky")]), STATS)
+    layer, = stack.layers
+    assert stack.base.is_identity() and not stack.is_flat
+    assert layer.spec.temperature > 0.0, "the warmth belongs in the layer"
+    assert layer.region.shape == "semantic" and layer.region.subject == "sky"
+    assert layer.region.invert is True, "everything EXCEPT the sky"
+    assert "left the sky alone" in stack.base.rationale
+
+
+def test_a_protect_reaches_every_layer_and_not_just_the_first(monkeypatch):
+    """Two regions and one protect: the exclusion has to land on both masks, or
+    the sentence spares the sky from one half of the grade and not the other."""
+    from ragvid.compiler import compile_stack
+
+    person_on_the_left(monkeypatch)
+    stack = compile_stack(Intent(ops=[
+        Op(op="exposure", dir="down"),                      # whole frame
+        Op(op="warmth", target="top"),
+        Op(op="saturation", dir="down", target="bottom"),
+        Op(op="protect", target="person"),
+    ]), STATS)
+    assert len(stack.layers) == 3
+    # Asserted on the MASKS, not on the `exclude` field: the whole-frame layer
+    # carries the protect as an inverted region (region.outside) and the two
+    # regional ones carry it as an exclusion, and what has to be true of all
+    # three is the same thing -- no layer reaches her.
+    for layer in stack.layers:
+        m = layer.region.mask(96, 96, frame=FRAME)
+        assert m[:, :40].max() == 0.0, layer.spec.rationale
+        assert m.max() == 1.0, "and each still covers the pixels it was asked to"
+
+
+def test_two_protects_are_both_honoured(monkeypatch):
+    """"don't touch the sky or the person" is a union to spare, so both masks
+    are subtracted -- and naming one of them twice must not subtract it twice
+    and soften its own edge."""
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(Intent(ops=[
+        Op(op="warmth", target="top"),
+        Op(op="protect", target="person"),
+        Op(op="protect", target="bottom"),
+        Op(op="protect", target="person"),
+    ]), STATS)
+    layer, = stack.layers
+    assert [e.subject or e.edge for e in layer.region.exclude] == ["person", "bottom"]
+
+
+def test_a_geometric_protect_needs_no_model_at_all():
+    """The two mask sources have to behave identically here too: "don't touch
+    the bottom" is the same mechanism as "don't touch the person", one lookup
+    apart, and it must not drag the segmentation model into a grade that never
+    mentioned a thing."""
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(Intent(ops=[
+        Op(op="exposure", dir="down"), Op(op="protect", target="bottom")]), STATS)
+    layer, = stack.layers
+    assert stack.needs_frame is False
+    got = stack.apply(FRAME)
+    assert d_luma(got, FRAME, (slice(0, 16), slice(None))) < -0.05
+    # Row 77 down: "bottom" is at full strength from y >= 0.8 (extent 0.4 with
+    # softness 0.4), and rows 70-76 sit in its falloff and are only part spared.
+    assert np.array_equal(got[80:], FRAME_OUT[80:])
+
+
+def test_a_protect_on_its_own_changes_nothing():
+    """There is nothing to spare it from. The honest answer is the identity
+    grade with a sentence that says only what was actually done."""
+    from ragvid.compiler import compile_stack
+
+    stack = compile_stack(Intent(ops=[Op(op="protect", target="sky")]), STATS)
+    assert stack.is_flat and stack.base.is_identity()
+    assert stack.base.rationale == "Left the sky alone."
+
+
+def test_a_protect_that_names_no_maskable_thing_is_not_a_grade_change():
+    """A colour cannot be protected (intent.py: it would need a per-pixel hue
+    bypass GradeSpec has no field for). Op's validator clears the target, and
+    what must NOT then happen is the grade quietly moving into a layer over a
+    region that spares nothing."""
+    from ragvid.compiler import compile_stack
+
+    plain = compile_stack(one("warmth"), STATS)
+    with_skin = compile_stack(Intent(ops=[
+        Op(op="warmth"), Op(op="protect", target="skin")]), STATS)
+    assert with_skin.is_flat
+    assert np.array_equal(with_skin.base.apply(IMG), plain.base.apply(IMG))
+    assert with_skin.base.rationale == plain.base.rationale
+
+
+def test_an_unprotected_grade_is_bit_for_bit_what_b1_and_b2_shipped():
+    """B6 added a field to Region and a branch to compile_stack. Neither may
+    have moved a grade that protects nothing -- the flat fast path especially,
+    which is the overwhelmingly common case."""
+    from ragvid.compiler import compile_stack
+
+    for intent in (Intent(), one("warmth"), one("exposure", dir="down", target="top"),
+                   one("saturation", dir="down", target="green")):
+        stack = compile_stack(intent, STATS)
+        assert np.array_equal(stack.base.apply(IMG),
+                              compile_intent(intent, STATS).apply(IMG))
+        for layer in stack.layers:
+            assert layer.region.exclude == []
+
+
+# ---- one look across a cut (roadmap A7) ------------------------------------
+#
+# `ClipStats.cuts` has been measured since A7 landed and nothing has ever read
+# it. The feature is that the grade SAYS so; not one number moves on it, and the
+# second test below is what holds that line.
+
+
+# tests/test_probe.py's two shots, verbatim: the histogram distance the detector
+# measures comes from the LUMA RANGE differing, so two takes of the same plate at
+# different phases are not a splice and must not be used to fake one.
+_PLATES = [(1, 0.10, 0.75, (1.00, 0.95, 0.85)),
+           (2, 0.02, 0.30, (0.70, 0.85, 1.00))]
+
+
+def spliced(shots: int, per: int = 5) -> ClipStats:
+    """Measure `shots` takes back to back with the REAL cut detector.
+
+    Built from _stats_from_frames rather than through ffmpeg: this file is about
+    the compiler, and a synthetic splice needs no container to be a splice.
+    Frames are (N, 3) because that is the shape probe.py samples into.
+    """
+    frames = []
+    for seed, lo, hi, tint in _PLATES[:shots]:
+        r = np.random.default_rng(seed)
+        y, x = np.linspace(0, 1, 48)[:, None], np.linspace(0, 1, 64)[None, :]
+        g = lo + (hi - lo) * (0.5 + 0.5 * np.sin(6 * x + 2 * y + r.uniform(0, 6))) * (0.6 + 0.4 * y)
+        g = g + r.normal(0.0, 0.02, (48, 64))
+        plate = np.clip(np.stack([g * t for t in tint], -1), 0.0, 1.0)
+        # A slow drift, so no two frames of one take are equal.
+        frames += [np.round(np.clip(np.roll(plate, i, axis=1) * (1 + 0.004 * i), 0, 1)
+                            * 255).astype(np.uint8).reshape(-1, 3) for i in range(per)]
+    return _stats_from_frames(frames, 64, 48, 4.0)
+
+
+def test_the_rationale_says_when_the_clip_is_not_one_shot():
+    """The whole of A7: the thing that was measured and never said."""
+    cut = spliced(2)
+    assert cut.cuts > 0, "the detector has to fire, or this test asserts nothing"
+    said = compile_intent(one("warmth"), cut).rationale
+    assert "one continuous shot" in said and "one look is covering all of it" in said
+    assert "warmed it up" in said, "and it still reports the grade"
+
+
+def test_a_continuous_shot_says_nothing_about_cuts():
+    one_take = spliced(1, per=10)
+    assert one_take.cuts == 0
+    assert compile_intent(one("warmth"), one_take).rationale == "Warmed it up."
+
+
+def test_the_cut_note_is_a_sentence_and_not_a_grade_change():
+    """A7 is measurement made visible, nothing more. Shot detection at one
+    sample per second is a lower bound on the cuts in a clip and never a shot
+    list, so there is nothing here to split a grade on -- and a look that
+    changed because the detector fired would be acting on a number that cannot
+    support it."""
+    st = clip_stats()
+    intent = Intent(ops=[Op(op="warmth"), Op(op="contrast"), Op(op="exposure", dir="down")])
+    quiet = compile_intent(intent, st)
+    noisy = compile_intent(intent, st.model_copy(update={"cuts": 3}))
+    assert noisy.model_dump(exclude={"rationale"}) == quiet.model_dump(exclude={"rationale"})
+    assert np.array_equal(noisy.apply(IMG), quiet.apply(IMG))
+    assert noisy.rationale != quiet.rationale
+
+
+def test_the_cut_note_comes_before_the_balance_it_casts_doubt_on():
+    """It is the reason to doubt everything after it, not another thing done."""
+    st = clip_stats(cuts=1, dominant_hue=120.0, hue_strength=0.02, saturation=0.3,
+                    mean=RGB(r=0.36, g=0.46, b=0.36))
+    said = compile_intent(one("warmth"), st, balance=True).rationale
+    assert said.index("continuous shot") < said.index("cast") < said.index("warmed")
+
+
+def test_an_empty_intent_on_a_spliced_clip_is_still_the_identity_grade():
+    """The sentence is the only thing that changes. If saying it cost a number,
+    the identity property the whole design rests on would be gone."""
+    spec = compile_intent(Intent(), spliced(2))
+    assert spec.is_identity()
+    assert "one continuous shot" in spec.rationale

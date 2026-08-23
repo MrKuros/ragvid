@@ -47,9 +47,18 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ragvid.intent import DEFAULT_TINT, OPS, REGIONS, STRENGTH_MIX, Intent, Op, describe
+from ragvid.intent import (
+    DEFAULT_TINT,
+    MASK_OPS,
+    OPS,
+    REGIONS,
+    STRENGTH_MIX,
+    Intent,
+    Op,
+    describe,
+)
 from ragvid.match import match_reference
-from ragvid.region import GradeStack, Layer, for_target
+from ragvid.region import GradeStack, Layer, Region, for_target, outside
 from ragvid.spec import LUMA, RGB, GradeSpec
 
 if TYPE_CHECKING:  # probe imports nothing from us; keeps the dependency one-way
@@ -364,8 +373,12 @@ _COMPILERS = {
 }
 # A verb the compiler does not implement would silently do nothing, which is the
 # worst possible failure mode here: the user gets a sentence back describing a
-# move that never happened.
-assert set(_COMPILERS) == set(OPS), sorted(set(OPS) ^ set(_COMPILERS))
+# move that never happened. MASK_OPS are the one exception and they are excluded
+# BY NAME rather than by being absent: they change no GradeSpec field, so
+# compile_stack consumes them before _run_ops ever sees one, and a protect that
+# reached this table would be a protect that lost its mask.
+_MOVES = set(OPS) - set(MASK_OPS)
+assert set(_COMPILERS) == _MOVES, sorted(_MOVES ^ set(_COMPILERS))
 
 
 # ---- auto-balance ----------------------------------------------------------
@@ -540,6 +553,31 @@ def _balance(d: dict, stats: "ClipStats", m: _Measured) -> list[str]:
     return said
 
 
+# ---- one look across a cut (roadmap A7) ------------------------------------
+#
+# `ClipStats.cuts` has been measured since A7 landed as measurement-only and
+# NOTHING has ever read it, so a clip that spans a splice has been graded as one
+# shot without a word said about it. This is the whole of the feature: say the
+# true thing, in the same list of sentences every other move is reported in.
+#
+# THE GRADE DOES NOT CHANGE. Not one number moves on `cuts`, deliberately —
+# shot detection at one sample per second is a lower bound on the cuts in the
+# clip and never a shot list (probe.py's ClipStats.cuts), so there is nothing
+# here to split a grade on. Acting on it would mean guessing where the cut is;
+# saying so costs nothing and is not a guess.
+#
+# THE WORDING IS BOUNDED BY THE DETECTOR. probe._CUT_TV documents two known
+# false positives that are not fixable at this sample rate: a hard flash reads
+# 1.00 (and is counted twice, once entering and once leaving) and a 3-stop
+# lighting change reads 0.74 against a real splice's 0.63. So the sentence
+# claims "not one continuous shot" and lists all three causes, rather than
+# claiming a cut it cannot distinguish from a light coming on. It also does not
+# quote `cuts` itself: the number is a count of adjacent SAMPLE PAIRS, which is
+# neither the number of cuts nor an upper bound on it.
+_CUT_NOTE = ("this clip does not look like one continuous shot "
+             "(a cut, a flash, or a big lighting change), and one look is covering all of it")
+
+
 # ---- the compiler ----------------------------------------------------------
 
 
@@ -572,14 +610,55 @@ def compile_stack(intent: Intent, stats: "ClipStats", balance: bool = False) -> 
     of region needs a model and the other does not. That is the test of whether
     B2 was a mask source or an architecture: if it had needed a branch in this
     file, it was the wrong shape.
+
+    A PROTECT INTERSECTS EVERY OTHER OP'S MASK (roadmap B6), and that is the
+    whole composition rule. Each op already answers "which pixels" — a region
+    word for the ones that name one, the whole frame for the rest — and a
+    protect multiplies (1 - its mask) into that answer, whichever it was. So:
+
+      * "darken it, but don't touch the person"  -> everything except her
+      * "darken the top, but don't touch the person" -> the top MINUS her, and
+        the rest of the top still gets the FULL move. A protect narrows a
+        region; it never weakens one.
+
+    The rejected alternative was "an inverted region applied to every other op",
+    which reads the same until a sentence has both a region and a protect and
+    then has nowhere to put the invert: replacing the op's own region loses the
+    top, and adding a second layer cannot work at all, because region.py applies
+    each layer forward and no later layer can un-grade what an earlier one did.
+    Intersection is also the only rule with no order — (1-a)(1-b) is symmetric,
+    so two protects in either order are the same mask — and an unordered
+    composite is exactly what a person means by "and don't touch that either".
+
+    The cost is that the WHOLE-FRAME ops stop being the base: a base GradeSpec
+    is a colour map and cannot spare a pixel, so under a protect they become a
+    layer over `region.outside(...)` and the base stays identity. That is the
+    same trade regions already make (a protected grade cannot bake to one
+    `.cube`), and it is why the flat-stack fast path survives untouched for
+    every intent that protects nothing.
     """
     m = _measure(stats)
     d = GradeSpec.identity().model_dump()
 
+    # dict.fromkeys, not a set, and for both lists below: layer order is
+    # evaluation order (region.py), so it has to be the order the person said
+    # things in. Here it also stops "don't touch the sky, and not the sky"
+    # multiplying one mask in twice, which would soften its own edge.
+    spared = [t for t in dict.fromkeys(
+        o.target for o in intent.ops if o.op in MASK_OPS) if t]
+    ops = [o for o in intent.ops if o.op not in MASK_OPS]
+    whole = [o for o in ops if o.target not in REGIONS]
+
     # Before the verbs: they add into the same CDL and later steps, so the look
-    # lands on top of the corrected base rather than beside it.
+    # lands on top of the corrected base rather than beside it. The balance is
+    # NOT narrowed by a protect: it is a technical correction of the whole
+    # frame's cast and black point, and half a frame balanced is a new cast.
     said = _balance(d, stats, m) if balance else []
-    _run_ops([o for o in intent.ops if o.target not in REGIONS], d, m, intent.strength)
+    if stats.cuts:
+        # A7. First, ahead of the balance's own sentences, because it is the
+        # reason to doubt everything after it rather than another thing done.
+        said.insert(0, _CUT_NOTE)
+    _run_ops([] if spared else whole, d, m, intent.strength)
 
     # The model no longer writes the rationale — the sentences ARE the intent,
     # so they cannot drift from what the numbers do. Every op is named here,
@@ -590,16 +669,39 @@ def compile_stack(intent: Intent, stats: "ClipStats", balance: bool = False) -> 
     d["rationale"] = (text[0].upper() + text[1:] + ".") if text else ""
 
     layers = []
-    # dict.fromkeys, not a set: layer order is evaluation order (region.py), so
-    # it has to be the order the person said things in and nothing else.
-    for target in dict.fromkeys(o.target for o in intent.ops if o.target in REGIONS):
-        ops = [o for o in intent.ops if o.target == target]
-        ld = GradeSpec.identity().model_dump()
-        _run_ops(ops, ld, m, intent.strength)
-        ld["rationale"] = ", ".join(describe(Intent(ops=ops)))
-        layers.append(Layer(region=for_target(target), spec=GradeSpec(**ld).sanitize()))
+    if spared and whole:
+        layers.append(_layer(outside(_spare(spared)), whole, m, intent.strength))
+    for target in dict.fromkeys(o.target for o in ops if o.target in REGIONS):
+        region = for_target(target)
+        region.exclude = _spare(spared)
+        layers.append(_layer(region, [o for o in ops if o.target == target],
+                             m, intent.strength))
 
     return GradeStack(base=GradeSpec(**d).sanitize(), layers=layers)
+
+
+def _spare(targets: list[str]) -> list[Region]:
+    """Fresh Regions for the protected targets, one set per layer that uses them.
+
+    Fresh because a Region is a mutable model: two layers sharing one would let
+    an edit to either reach the other, and `for_target` is a dict lookup and a
+    copy, so there is nothing to save by sharing.
+    """
+    return [for_target(t) for t in targets]
+
+
+def _layer(region: Region, ops: list[Op], m: _Measured, strength: str) -> Layer:
+    """One region's ops, compiled from a FRESH identity spec.
+
+    Shared by the regional layers and by the whole-frame-minus-a-protect one so
+    that both are the same code path — the alternative is two implementations of
+    "compile a group of ops" that drift, which is the argument _run_ops already
+    makes one level down.
+    """
+    d = GradeSpec.identity().model_dump()
+    _run_ops(ops, d, m, strength)
+    d["rationale"] = ", ".join(describe(Intent(ops=ops)))
+    return Layer(region=region, spec=GradeSpec(**d).sanitize())
 
 
 def compile_intent(intent: Intent, stats: "ClipStats", balance: bool = False) -> GradeSpec:
@@ -614,6 +716,11 @@ def _run_ops(ops: list[Op], d: dict, m: _Measured, strength: str) -> None:
     Shared by the base and by every layer so that a regional correction is
     computed by exactly the code path a global one is — the alternative is two
     implementations of "moderate warm" that drift.
+
+    A MASK_OP never reaches here — compile_stack consumes it into the layers'
+    regions — and if one ever did, `_COMPILERS[item.op]` raises rather than
+    skipping it. That is on purpose: a protect quietly doing nothing is a grade
+    running straight over the pixels the sentence promised to spare.
     """
     for item in ops:
         k = UNIT[item.amount] * (1.0 if item.dir == "up" else -1.0)

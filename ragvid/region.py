@@ -179,6 +179,21 @@ class Region(BaseModel):
     softness: float = Field(0.5, description="Width of the falloff, as a fraction of the region. 0 = hard edge.")
     invert: bool = Field(False, description="Swap inside and outside.")
 
+    # Roadmap B6. Regions taken OUT of this one, by multiplying (1 - their mask)
+    # into it -- an intersection with the complement, i.e. a set difference.
+    # A list and not one Region because "don't touch the sky or the person" is
+    # a union of two things to spare, and (1-a)*(1-b) is that union's
+    # complement while a single nested exclude is not.
+    #
+    # A FIELD ON Region, not a fourth `shape` and not a second container: every
+    # consumer of a mask -- write_png, GradeStack.apply, render.py's PNG,
+    # project.bake_layers -- goes through mask(), so subtracting here reaches
+    # all of them at once and none of them learns that a region can now be a
+    # difference of two. The alternative, a second layer that "un-grades" the
+    # protected pixels, cannot exist: region.py's evaluation order applies a
+    # spec forward and nothing can undo an earlier layer.
+    exclude: list["Region"] = Field(default_factory=list, description="Regions subtracted from this one (roadmap B6).")
+
     @property
     def needs_frame(self) -> bool:
         """True when mask() cannot be answered from width and height alone.
@@ -186,8 +201,13 @@ class Region(BaseModel):
         Exists so a caller (project.bake_layers, a UI) can find out whether it
         must supply a frame WITHOUT reading `shape` and reimplementing this
         file's knowledge of which shapes are which.
+
+        Recursive through `exclude` for the same reason: "the top, minus the
+        person" is geometric on the outside and needs the picture anyway, and a
+        caller that answered from `shape` alone would decode no frame and get a
+        ValueError out of bake_layers instead of a mask.
         """
-        return self.shape == "semantic"
+        return self.shape == "semantic" or any(e.needs_frame for e in self.exclude)
 
     def mask(self, width: int, height: int, frame: np.ndarray | None = None) -> np.ndarray:
         """(height, width) float64 in [0, 1]. 1 = fully inside the region.
@@ -247,7 +267,7 @@ class Region(BaseModel):
 
         m = _smoothstep(np.clip(t, 0.0, 1.0))
         m = np.broadcast_to(m, (height, width))
-        return (1.0 - m) if self.invert else np.ascontiguousarray(m)
+        return self._finish(m, width, height, frame)
 
     def _semantic_mask(self, width: int, height: int, frame: np.ndarray | None) -> np.ndarray:
         """segment.py's 128x128 probability grid -> a feathered frame-sized mask.
@@ -284,7 +304,33 @@ class Region(BaseModel):
         p = _resize(class_prob(frame, self.subject), width, height)
         r = int(round(max(float(self.softness), 0.0) * _FEATHER_FRAC * min(width, height)))
         m = _smoothstep(_box_blur((p > DECIDED).astype(np.float64), r))
-        return (1.0 - m) if self.invert else np.ascontiguousarray(m)
+        return self._finish(m, width, height, frame)
+
+    def _finish(self, m: np.ndarray, width: int, height: int,
+                frame: np.ndarray | None) -> np.ndarray:
+        """`invert`, then the exclusions. Shared by both mask sources.
+
+        THE ORDER IS THE B6 COMPOSITION RULE and it is not arbitrary: `invert`
+        belongs to THIS region's own shape ("the edges" IS an inverted radial),
+        and an exclusion is intersected with whatever shape that leaves. So
+        "everything except the middle, minus the person" spares the person on
+        both sides of the invert, which is the only reading of "don't touch
+        her" that survives someone rewording the region around it.
+
+        Multiplication, not a max or a where: it is the same lerp-friendly
+        continuous operation the falloff already is, it composes for any number
+        of exclusions without an order, and it is exactly 0 wherever an
+        exclusion is exactly 1 -- so a protected pixel is bitwise untouched,
+        not merely almost.
+
+        With no exclusions this is the expression that was here before, so an
+        unprotected region is bit-for-bit what B1 and B2 shipped.
+        """
+        if self.invert:
+            m = 1.0 - m
+        for e in self.exclude:
+            m = m * (1.0 - e.mask(width, height, frame))
+        return np.ascontiguousarray(m)
 
     def write_png(self, path: str | Path, width: int, height: int,
                   frame: np.ndarray | None = None) -> str:
@@ -412,6 +458,27 @@ def for_target(target: str) -> Region | None:
     return r.model_copy(deep=True) if r else None
 
 
+def outside(regions: list[Region]) -> Region:
+    """The whole frame MINUS every region in `regions` (roadmap B6).
+
+    What a protect leaves for the ops that named no region of their own: their
+    grade is no longer the whole frame, so it needs a region, and this is it.
+
+    Built by inverting the first and excluding the rest rather than by adding a
+    "whole frame" shape, because that shape would be a fourth branch in mask()
+    whose only job is to return ones -- and 1 - (union) is what the existing
+    invert plus the existing exclusion already spell. The two agree by
+    construction: `not r.invert` rather than `True`, so a protect naming
+    "edges" (itself an inverted radial) comes back as the middle and not as
+    the edges again.
+    """
+    first, *rest = regions
+    r = first.model_copy(deep=True)
+    r.invert = not r.invert
+    r.exclude = [e.model_copy(deep=True) for e in rest]
+    return r
+
+
 def _self_check() -> None:
     """`python -m ragvid.region` -- the properties the mask contract rests on."""
     r = for_target("top")
@@ -444,6 +511,17 @@ def _self_check() -> None:
     step = np.zeros((64, 64)); step[:, 32:] = 1.0
     assert np.abs(np.diff(_box_blur(step, 5)[32])).max() <= 1.0 / 11 + 1e-12
     assert np.array_equal(_box_blur(step, 0), step), "softness 0 stays a hard edge"
+
+    # B6: an exclusion is a set difference, exact at both ends.
+    top, bottom = for_target("top"), for_target("bottom")
+    plain, cut = top.mask(32, 96), top.model_copy(update={"exclude": [bottom]}).mask(32, 96)
+    assert np.all(cut <= plain + 1e-12), "an exclusion can only ever remove"
+    assert cut[0, 0] == plain[0, 0] == 1.0, "and must not touch pixels it does not cover"
+    assert cut[-1, 0] == 0.0
+    assert outside([bottom]).mask(32, 96)[0, 0] == 1.0
+    assert outside([bottom]).mask(32, 96)[-1, 0] == 0.0
+    # "the edges, minus the middle" is not "the edges" again.
+    assert outside([for_target("edges")]).mask(80, 60)[30, 40] == 1.0
 
     # A flat stack is bit-for-bit its base.
     img = np.random.default_rng(0).random((12, 16, 3))
