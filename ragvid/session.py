@@ -36,6 +36,11 @@ class Session:
     # as a path rather than copied in: it belongs to the shoot, not the session,
     # and the same file is normally shared by every clip from that camera.
     input_lut: str | None = None
+    # Which logspace format that LUT was baked from, when it was ragvid that
+    # baked it. None means the file is the user's own and ragvid knows nothing
+    # about what it does -- the two are stored separately because only one of
+    # them can be re-generated.
+    input_format: str | None = None
     specs: list[GradeSpec] = field(default_factory=list)
     # What the user actually asked for, one per spec. The spec's own `rationale`
     # is the model explaining itself; this is the person's own words, which is
@@ -83,6 +88,7 @@ class Session:
                 {
                     "source": self.source,
                     "input_lut": self.input_lut,
+                    "input_format": self.input_format,
                     "stats": json.loads(self.stats.model_dump_json()),
                     "specs": [json.loads(s.model_dump_json()) for s in self.specs],
                     "labels": self.labels,
@@ -92,9 +98,10 @@ class Session:
         )
 
     @classmethod
-    def create(cls, source: str, stats: "ClipStats",
-               input_lut: str | None = None) -> "Session":
-        return cls(source=source, stats=stats, input_lut=input_lut)
+    def create(cls, source: str, stats: "ClipStats", input_lut: str | None = None,
+               input_format: str | None = None) -> "Session":
+        return cls(source=source, stats=stats, input_lut=input_lut,
+                   input_format=input_format)
 
     @classmethod
     def load(cls, root: str | Path | None = None) -> "Session":
@@ -115,9 +122,12 @@ class Session:
             labels = list(raw.get("labels") or [])
             labels += [""] * (len(specs) - len(labels))
             # .get, not ["input_lut"]: sessions written before log support have
-            # no such key and must still open.
+            # no such key and must still open. Same for input_format, which
+            # arrived later still -- an older session with a vendor .cube set
+            # loads with format None, which is exactly what it means.
             return cls(source=raw["source"], stats=ClipStats(**raw["stats"]),
                        input_lut=raw.get("input_lut") or None,
+                       input_format=raw.get("input_format") or None,
                        specs=specs, labels=labels[:len(specs)])
         # ValueError covers JSONDecodeError and pydantic's ValidationError; TypeError
         # covers a session.json whose shape is wrong rather than merely incomplete.

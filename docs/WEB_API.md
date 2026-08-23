@@ -35,7 +35,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
   "can_undo": true,
   "history_depth": 3,
   "steps": [{"index":0,"label":"warm and nostalgic","rationale":"...","current":false}],
-  "api_version": 6,
+  "api_version": 7,
   "version": 7,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,
@@ -50,6 +50,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
                         "grain":0,"vignette":0,"fringe":0},
             "rationale": "..." },
   "input_lut": null,
+  "input_format": null,
   "stats": { "mean": {"r":0.2,"g":0.15,"b":0.15}, "saturation": 0.48,
              "width": 720, "height": 405, "frames_sampled": 10 },
   "providers": ["groq", "anthropic", "openai", "..."],
@@ -232,8 +233,24 @@ and left the app unusable until the key was typed.
 
 ## Log footage
 
-`POST /api/input_lut` `{"path": "/luts/slog3_to_709.cube"}` sets the camera's
-technical LUT; `{"path": null}` clears it. Returns the new state.
+`POST /api/input_lut` `{"format": "slog3"}` names the camera's recording curve
+and ragvid bakes the conversion itself — one of `slog3`, `vlog`, `clog3`,
+`logc3`, `nlog` (`ragvid.logspace.NAMES`; display names such as "Sony S-Log3"
+are the UI's business, not this contract's). `{"path": "/luts/vendor.cube"}`
+uses a vendor file instead, for the minority who have one. Either key, null or
+absent, clears. Returns the new state.
+
+State reports both: `input_lut` is always the `.cube` actually in force, and
+`input_format` is the format name when ragvid generated that file, `null` when
+it is the user's own. A generated cube lands in the session dir beside
+`current.cube` and is re-baked (67 ms, measured) on every change, so it is
+derived data and nothing has to invalidate it.
+
+Opening a clip asks `logspace.detect()` first. It answers `null` for almost
+every file on purpose — a camera *make* is not evidence of a picture profile,
+and H.273 has no code point for any log curve — so on the rare clip that carries
+an explicit tag the format simply arrives already set, and on every other clip
+nothing changes.
 
 It is applied before the grade — a creative look sits on top of the conversion,
 never mixed into it — and before the clip is measured. Setting one **re-probes**,

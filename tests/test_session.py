@@ -92,3 +92,24 @@ def test_session_file_is_json_in_dot_ragvid():
     assert Session.path().is_absolute()
     assert raw["source"] == "clip.mp4"
     assert len(raw["specs"]) == 1
+
+
+def test_input_format_round_trips_and_an_older_session_still_loads():
+    """The generated-LUT case needs both halves back: the file in force, and
+    which format ragvid baked it from."""
+    s = Session.create("clip.mp4", _stats(), input_lut="/w/.ragvid/log_slog3.cube",
+                       input_format="slog3")
+    s.save()
+
+    got = Session.load()
+    assert got.input_lut == "/w/.ragvid/log_slog3.cube"
+    assert got.input_format == "slog3"
+
+    # Every session written before format names existed. It must open, and a
+    # vendor .cube with no format is exactly what None means.
+    raw = json.loads(Session.path().read_text())
+    del raw["input_format"]
+    Session.path().write_text(json.dumps(raw))
+    older = Session.load()
+    assert older.input_format is None
+    assert older.input_lut == "/w/.ragvid/log_slog3.cube"

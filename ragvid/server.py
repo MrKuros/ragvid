@@ -38,7 +38,7 @@ MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # the server is still running the Python it was started with -- which otherwise
 # shows up as fields silently missing and routes 404ing, with nothing on screen
 # to explain it.
-API_VERSION = 6
+API_VERSION = 7
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -177,6 +177,7 @@ def _state_json() -> dict:
         "spec": p.spec.model_dump() if p.is_planned else None,
         "stats": stats.model_dump(),
         "input_lut": p.input_lut,
+        "input_format": p.input_format,
         **base,
     }
 
@@ -289,16 +290,20 @@ def r_reference(req, q):
 
 
 def r_input_lut(req, q):
-    """Set or clear the camera's log-to-Rec.709 LUT.
+    """Set or clear the camera's log-to-Rec.709 conversion.
 
-    `{"path": null}` clears it. Setting one RE-PROBES the clip, which is the
-    slowest thing on this route and the reason it exists at all: every statistic
-    the model is given has to describe the converted image, not the log one.
+    `{"format": "slog3"}` names one of `logspace.NAMES` and ragvid bakes the
+    transform itself; `{"path": "/luts/vendor.cube"}` uses a file the user
+    already has. Either key, null or absent, clears.
+
+    Setting one RE-PROBES the clip, which is the slowest thing on this route and
+    the reason it exists at all: every statistic the model is given has to
+    describe the converted image, not the log one.
     """
-    raw = _json_body(req).get("path")
-    path = str(raw).strip() if raw else None
+    body = _json_body(req)
+    raw = body.get("format") or body.get("path")
     with LOCK:
-        _project().set_input_lut(path)
+        _project().set_input_lut(str(raw).strip() if raw else None)
         return _mutated()
 
 

@@ -360,3 +360,62 @@ def test_available_providers_tracks_the_catalog(monkeypatch):
     assert "custom" not in available_providers()
     monkeypatch.setenv("RAGVID_BASE_URL", "http://localhost:1234/v1")
     assert "custom" in available_providers()
+
+
+# ---- log footage ----------------------------------------------------------
+
+
+def test_a_format_name_bakes_its_own_conversion(project, tmp_path):
+    """The thing a person can actually answer is what they shot, not where the
+    vendor's .cube is."""
+    lut = project.set_input_lut("slog3")
+
+    assert lut == str(tmp_path / "proj" / ".ragvid" / "log_slog3.cube")
+    assert Path(lut).read_text().startswith('TITLE "ragvid slog3 to Rec.709"')
+    assert project.input_format == "slog3"
+    # Derived data: it lives with the rest of the project's artifacts and comes
+    # back on reopen without anything being copied out of the way.
+    assert Project.open(tmp_path / "proj").input_format == "slog3"
+
+
+def test_a_vendor_cube_still_works_and_reports_no_format(project, tmp_path):
+    """People who do have their camera's LUT must keep working unchanged."""
+    cube = tmp_path / "vendor.cube"
+    cube.write_text("LUT_3D_SIZE 2\n")
+
+    assert project.set_input_lut(cube) == str(cube.resolve())
+    assert project.input_format is None
+
+
+def test_an_unknown_format_name_is_an_input_error(project):
+    with pytest.raises(InputError):
+        project.set_input_lut("slog9")
+    assert project.input_lut is None
+
+
+def test_setting_a_format_reprobes_through_the_generated_lut(project, monkeypatch):
+    """Same rule as a vendor LUT: the cached stats have to describe the image
+    the grade will land on."""
+    seen = {}
+    monkeypatch.setattr(
+        "ragvid.probe.probe_video",
+        lambda path, n_frames=10, input_lut=None: seen.update(lut=input_lut) or STATS,
+    )
+    project.set_input_lut("vlog")
+    assert seen["lut"].endswith("log_vlog.cube")
+
+
+def test_opening_a_clip_applies_a_detected_format_and_nothing_otherwise(clip, tmp_path,
+                                                                       monkeypatch):
+    """detect() answers None for most clips on purpose, and None must change
+    nothing at all -- a wrong technical LUT is worse than no LUT."""
+    monkeypatch.setattr("ragvid.logspace.detect", lambda path: "logc3")
+    assert Project.create(clip, root=tmp_path / "a").input_format == "logc3"
+
+    monkeypatch.setattr("ragvid.logspace.detect", lambda path: None)
+    quiet = Project.create(clip, root=tmp_path / "b")
+    assert quiet.input_format is None and quiet.input_lut is None
+
+    # An explicit choice is never second-guessed by the metadata.
+    monkeypatch.setattr("ragvid.logspace.detect", lambda path: "logc3")
+    assert Project.create(clip, root=tmp_path / "c", input_lut="nlog").input_format == "nlog"

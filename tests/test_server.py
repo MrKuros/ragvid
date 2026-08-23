@@ -827,3 +827,79 @@ def test_the_settings_panel_never_puts_a_key_into_its_input():
     page = server.INDEX.read_text()
     assert 'id="keyInput"' in page and 'type="password"' in page
     assert '$("keyInput").value = "";' in page
+
+
+def _log_clip(path: Path, fmt: str = "slog3") -> Path:
+    """A clip whose pixel values really are `fmt` code values.
+
+    A scene-linear ramp from 0 to 1.5 encoded through the curve, so the
+    conversion has something true to invert rather than a picture that merely
+    looks flat. testsrc2 cannot stand in here: it is full-range bars, already
+    sitting at p99 = 1.0 and std = 0.48, so a conversion cannot move it.
+    """
+    import subprocess
+
+    import numpy as np
+
+    from ragvid import logspace
+
+    w, h, n = 160, 120, 25
+    lin = np.linspace(0.0, 1.5, w)[None, :].repeat(h, 0)
+    code = np.clip(logspace.lin_to_log(fmt, lin), 0.0, 1.0)
+    frame = np.repeat((code * 255 + 0.5).astype(np.uint8)[:, :, None], 3, axis=2).tobytes()
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", "25", "-i", "-",
+         "-frames:v", str(n), "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p",
+         str(path)],
+        input=frame * n, check=True, capture_output=True,
+    )
+    return path
+
+
+def test_a_camera_format_can_be_chosen_by_name(api, tmp_path):
+    """The point of the whole feature: someone who shot log names what they
+    shot, instead of hunting for a vendor .cube they probably do not have.
+
+    The assertions are on measured statistics, not on the string coming back --
+    a route that stored the name and generated nothing would pass that.
+    Decoding log expands the range the camera compressed, so contrast rises and
+    the highlights reach the top: measured on this ramp, std 0.104 -> 0.253 and
+    p99 0.637 -> 0.988.
+    """
+    clip = _log_clip(tmp_path / "slog3.mp4")
+    assert api.post("/api/project", {"path": str(clip)}).status == 200
+    before = api.state()["stats"]
+    assert before["p99"]["g"] < 0.8, "the fixture is not log-like; nothing to convert"
+
+    r = api.post("/api/input_lut", {"format": "slog3"})
+    assert r.status == 200
+    assert r.json["input_format"] == "slog3"
+    assert r.json["input_lut"].endswith("log_slog3.cube")
+    after = r.json["stats"]
+    assert after["std"]["g"] > before["std"]["g"] * 1.8
+    assert after["p99"]["g"] > 0.95
+
+    cleared = api.post("/api/input_lut", {"format": None}).json
+    assert cleared["input_format"] is None and cleared["input_lut"] is None
+    assert cleared["stats"]["std"]["g"] == before["std"]["g"]
+
+
+def test_an_unknown_format_name_is_a_400(api):
+    """Only the five names, and the error arrives at the moment it is picked --
+    a name ragvid cannot bake is the same failure as a .cube that is not there."""
+    api.open_clip()
+    r = api.post("/api/input_lut", {"format": "slog9"})
+    assert r.status == 400
+    assert r.error["type"] == "InputError"
+    assert api.state()["input_format"] is None
+
+
+def test_the_page_offers_every_format_the_module_implements(api):
+    """The display names live in the HTML because they are display text; this is
+    the check that stops the list drifting from logspace.NAMES."""
+    from ragvid import logspace
+
+    page = server.INDEX.read_text()
+    for name in logspace.NAMES:
+        assert f'<option value="{name}">' in page, f"{name} is not offered in the UI"

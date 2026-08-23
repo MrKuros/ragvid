@@ -45,6 +45,23 @@ def _check_lut(path: str | Path | None) -> str | None:
     return str(lut.resolve())
 
 
+def _resolve_lut(value: str | Path | None, root: Path) -> tuple[str | None, str | None]:
+    """A .cube path or a `logspace` format name -> (lut path, format name).
+
+    A generated conversion is derived data, so it lands in the session dir beside
+    current.cube rather than in a shared cache: measured 67 ms to bake a 33^3
+    cube against a re-probe measured in seconds, so it is re-generated every time
+    a format is chosen and there is nothing to invalidate or clean up. Deleting
+    .ragvid resets it exactly like every other artifact in there.
+    """
+    from . import logspace
+
+    name = value.strip().lower() if isinstance(value, str) else ""
+    if name in logspace.NAMES:
+        return logspace.bake_conversion(name, str(Session.dir(root) / f"log_{name}.cube")), name
+    return _check_lut(value), None
+
+
 CUBE_NAME = "current.cube"
 PREVIEW_NAME = "preview.png"
 SOURCE_PREVIEW_NAME = "source.png"
@@ -70,17 +87,27 @@ class Project:
         file picker does something sensible without asking the user where state
         should live.
 
-        `input_lut` is for log footage — see `set_input_lut`.
+        `input_lut` is for log footage — a `.cube` path or a format name; see
+        `set_input_lut`. Left unset, the clip's own metadata is asked, which
+        answers for almost nothing (`logspace.detect`) and silently does the
+        right thing when it does answer.
         """
+        from . import logspace
         from .probe import probe_video
 
         video = Path(video).expanduser()
         if not video.exists():
             raise InputError(str(video), "no such file")
         root = Path(root).expanduser() if root else video.parent
-        lut = _check_lut(input_lut)
+        # Only when the caller said nothing: an explicit choice always wins, and
+        # detect() returns None for most clips on purpose -- a wrong technical
+        # LUT bakes a wrong contrast curve under every grade that follows.
+        if input_lut is None:
+            input_lut = logspace.detect(str(video))
+        lut, fmt = _resolve_lut(input_lut, root)
         stats = probe_video(str(video), n_frames=n_frames, input_lut=lut)
-        session = Session.create(str(video.resolve()), stats, input_lut=lut)
+        session = Session.create(str(video.resolve()), stats, input_lut=lut,
+                                 input_format=fmt)
         return cls(session, root)
 
     @classmethod
@@ -165,8 +192,20 @@ class Project:
         """The technical LUT applied before the grade, or None."""
         return self.session.input_lut
 
-    def set_input_lut(self, path: str | Path | None, n_frames: int = 10) -> str | None:
-        """Set (or clear) the camera's log-to-Rec.709 LUT and RE-PROBE.
+    @property
+    def input_format(self) -> str | None:
+        """Which `logspace` format that LUT was generated from, or None when it
+        is a vendor file the user supplied. A UI shows one or the other."""
+        return self.session.input_format
+
+    def set_input_lut(self, lut: str | Path | None, n_frames: int = 10) -> str | None:
+        """Set (or clear) the log-to-Rec.709 conversion and RE-PROBE.
+
+        `lut` is either a path to a camera vendor's `.cube` or one of
+        `logspace.NAMES` ("slog3", "vlog", "clog3", "logc3", "nlog"), in which
+        case ragvid bakes the transform itself. Naming the format is the path
+        most people can actually take: they know what they shot, they rarely
+        have the vendor's file.
 
         Re-probing is not an optimisation to skip. Every number the model is
         given describes the image the grade will land on, and a conversion LUT
@@ -180,12 +219,17 @@ class Project:
         """
         from .probe import probe_video
 
-        lut = _check_lut(path)
-        if lut == self.session.input_lut:
-            return lut
-        self.session.input_lut = lut
-        self.session.stats = probe_video(self.source, n_frames=n_frames, input_lut=lut)
-        return lut
+        path, fmt = _resolve_lut(lut, self.root)
+        if path == self.session.input_lut:
+            return path
+        self.session.input_lut = path
+        self.session.input_format = fmt
+        self.session.stats = probe_video(self.source, n_frames=n_frames, input_lut=path)
+        # Saved here, unlike the old version: the stats this just replaced are
+        # cached in session.json, so not writing them left a reopened project
+        # measuring the log image while rendering the converted one.
+        self.save()
+        return path
 
     @property
     def is_planned(self) -> bool:
@@ -392,6 +436,7 @@ class Project:
             "source": self.source,
             "root": str(self.root),
             "input_lut": self.input_lut,
+            "input_format": self.input_format,
             "duration": self.duration,
             "spec": self.spec.model_dump() if self.is_planned else None,
             "history_depth": len(self.session.specs),
