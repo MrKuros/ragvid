@@ -41,7 +41,7 @@ MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # the server is still running the Python it was started with -- which otherwise
 # shows up as fields silently missing and routes 404ing, with nothing on screen
 # to explain it.
-API_VERSION = 11
+API_VERSION = 12
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -405,6 +405,56 @@ def r_close(req, q):
         return _mutated()
 
 
+def r_restore(req, q):
+    """Put an earlier step back at the END of the history, deleting nothing.
+
+    What clicking a history entry USED to do was `/api/revert`, which truncates
+    -- so looking at an old step destroyed every step after it. This appends
+    instead. An optional `intent` restores that step with an edit already
+    applied, which is one call and one history row for what is one gesture:
+    dragging a slider on a step that is not the current one.
+    """
+    body = _json_body(req)
+    try:
+        index = int(body.get("index"))
+    except (TypeError, ValueError) as exc:
+        raise InputError("<index>", "expected an integer index") from exc
+    raw = body.get("intent")
+    intent = None
+    if raw is not None:
+        if not isinstance(raw, dict):
+            raise InputError("<intent>", "expected an object")
+        try:
+            # Extra keys ignored, same as r_intent: the page posts back the
+            # object it was given, `text` and all.
+            intent = Intent(**raw)
+        except Exception as exc:  # a verb outside the vocabulary -> 400, not 500
+            raise InputError("<intent>", str(exc)) from exc
+    with LOCK:
+        _project().restore(index, intent)
+        return _mutated()
+
+
+def r_step_delete(req, q):
+    """Remove ONE entry from the history, leaving the rest in order.
+
+    The only destructive thing the history list can now do, and it happens
+    because it was asked for rather than as the side effect of a click.
+    """
+    body = _json_body(req)
+    try:
+        index = int(body.get("index"))
+        # One row in the list is one PROMPT plus the tweaks folded into it, so a
+        # delete is a run. Defaulting to 1 keeps a plain {"index": n} working.
+        count = int(body.get("count", 1))
+    except (TypeError, ValueError) as exc:
+        raise InputError("<index>", "expected an integer index") from exc
+    with LOCK:
+        if not _project().delete_step(index, count):
+            raise InputError("<index>", f"no step {index} to delete")
+        return _mutated()
+
+
 def r_revert(req, q):
     """Jump back to any point in the history. -1 is the ungraded clip.
 
@@ -765,6 +815,8 @@ ROUTES = {
     ("POST", "/api/close"): r_close,
     ("POST", "/api/reset"): r_reset,
     ("POST", "/api/revert"): r_revert,
+    ("POST", "/api/restore"): r_restore,
+    ("POST", "/api/step/delete"): r_step_delete,
     ("GET", "/api/browse"): r_browse,
     ("GET", "/api/providers"): r_providers,
     ("POST", "/api/provider"): r_set_provider,

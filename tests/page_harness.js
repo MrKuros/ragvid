@@ -16,14 +16,29 @@ let nextId = 0;
 
 function mk(id) {
   const listeners = {};
+  const appended = [];
   let kids = null;
+  let html = "";
   const el = {
     id: id || `anon${++nextId}`,
-    hidden: false, disabled: false, textContent: "", innerHTML: "", value: "",
+    hidden: false, disabled: false, textContent: "", value: "",
+    // `innerHTML = ""` is how the builders clear a list before rebuilding it,
+    // so it must drop the recorded children too or rows pile up across renders.
+    get innerHTML() { return html; },
+    set innerHTML(v) { html = String(v); if (!html) appended.length = 0; },
     src: "", title: "", placeholder: "", type: "", checked: false,
     paused: true, currentTime: 0, readyState: 0, videoWidth: 0, videoHeight: 0,
     width: 0, height: 0,
     style: {}, dataset: {}, attrs: {}, listeners,
+    // In a browser `className = "a b"` and `classList` are two views of ONE
+    // thing. Here they were two unrelated things, so a check written the
+    // natural way (`classList.contains`) silently read false on an element the
+    // page had just classed via `className`. Keeping them in step below.
+    get className() { return [...el.classList.set].join(" "); },
+    set className(v) {
+      el.classList.set.clear();
+      String(v).split(/\s+/).filter(Boolean).forEach((c) => el.classList.set.add(c));
+    },
     classList: {
       set: new Set(),
       add(c) { this.set.add(c); }, remove(c) { this.set.delete(c); },
@@ -31,7 +46,13 @@ function mk(id) {
       toggle(c, on) { on === undefined ? (this.set.has(c) ? this.set.delete(c) : this.set.add(c))
                                        : (on ? this.set.add(c) : this.set.delete(c)); },
     },
-    get children() { return kids || (kids = [mk(), mk(), mk()]); },
+    // Real children when something appended them, three blank stubs otherwise.
+    // The stubs exist because the page does `b.children[0].textContent = ...`
+    // straight after `innerHTML = "<span>..."`, and nothing here parses HTML.
+    // Recording appends is what makes a built row REACHABLE -- without it a
+    // history row could never be clicked from a check, and "clicking selects
+    // but posts nothing" is the whole claim this file has to be able to make.
+    get children() { return appended.length ? appended : (kids || (kids = [mk(), mk(), mk()])); },
     addEventListener(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); },
     removeEventListener() {},
     dispatch(ev, arg) { (listeners[ev] || []).forEach((fn) => fn(arg || { target: el })); },
@@ -40,7 +61,9 @@ function mk(id) {
     removeAttribute(k) { delete this.attrs[k]; },
     querySelector() { return mk(); },
     querySelectorAll() { return []; },
-    append() {}, prepend() {}, insertAdjacentHTML() {},
+    append(...n) { appended.push(...n); },
+    prepend(...n) { appended.unshift(...n); },
+    insertAdjacentHTML() {},
     setSelectionRange() {}, focus() {}, click() { if (el.onclick) el.onclick({}); },
     showModal() {}, close() {}, load() {},
     play() { el.paused = false; el.dispatch("play"); return Promise.resolve(); },
@@ -115,10 +138,15 @@ const fakeGl = new Proxy(glBase, { get: (t, k) => (k in t ? t[k] : k) });
 // ---- fetch -------------------------------------------------------------------
 
 const fetched = [];
+// What was SENT, not just where. A check about "delete this row" has to be able
+// to see the row's extent in the body -- the URL alone cannot say it.
+const bodies = [];
 let routes = {};
 
 globalThis.fetch = async (url, opts) => {
   fetched.push(url);
+  try { bodies.push(opts && opts.body ? JSON.parse(opts.body) : null); }
+  catch { bodies.push(null); }
   const path = String(url).split("?")[0];
   // Whole URL first, so a check can answer one layer's cube differently from
   // the rest; path otherwise.
@@ -441,6 +469,60 @@ const layer = (region) => ({ region, spec: { ...SPEC } });
   await $("bannerGet").onclick();
   ok($("uploading").hidden === true, "a failed download does not leave the bar up");
   ok($("bannerGet").hidden === false, "and the offer comes back so it can be retried");
+
+  // ---- the history browses instead of destroying --------------------------
+  // The defect: every row's only handler was post("/api/revert", {index}), and
+  // revert_to TRUNCATES -- so clicking a row to read it threw away every step
+  // after it, with no redo, because undo is itself a pop.
+  const OPS = [{ op: "warmth", dir: "up", amount: "moderate", target: "", text: "warmed it up" }];
+  const IN = { strength: "full", ops: OPS };
+  // Two prompts, with a run of TWEAKS after each -- a slider drag, an item
+  // switched off, the balance toggle. Each is a real, undoable step; none of
+  // them is a thing anybody asked for, so the list must show two rows and not
+  // "warmer, adjusted, adjusted, moodier, adjusted".
+  const STEPS = [
+    { index: 0, label: "warmer", rationale: "Warmed it up.", current: false, tweak: false, intent: IN },
+    { index: 1, label: "adjusted", rationale: "", current: false, tweak: true, intent: IN },
+    { index: 2, label: "balance off", rationale: "", current: false, tweak: true, intent: IN },
+    { index: 3, label: "moodier", rationale: "Darkened it.", current: false, tweak: false, intent: IN },
+    { index: 4, label: "adjusted", rationale: "", current: true, tweak: true, intent: IN },
+  ];
+  render(reset({ steps: STEPS, history_depth: 2, version: 30 }));
+  ok($("pair").hidden === false, "the history and the detail column are on screen");
+
+  const rows = $("hist").children;
+  ok(rows.length === 3,
+     `one row per PROMPT plus the original, got ${rows.length} for 5 steps`);
+  ok(rows[1].children[1].textContent === "warmer" &&
+     rows[2].children[1].textContent === "moodier",
+     "the rows are the prompts, not the adjustments folded into them");
+  ok(rows[2].classList.contains("now"),
+     "a prompt is current when any of its own tweaks is");
+
+  fetched.length = 0;
+  rows[1].onclick();                       // row 1 is the first prompt, after the original
+  ok(fetched.length === 0, `clicking a history row posted ${JSON.stringify(fetched)}`);
+  ok(!fetched.some((u) => String(u).startsWith("/api/revert")),
+     "and above all it does not revert, which is what used to destroy the rest");
+  ok($("stepActs").hidden === false, "selecting an older step offers restore and delete");
+  ok($("didHead").textContent.includes("warmer"),
+     `the column names the prompt it is showing, got ${$("didHead").textContent}`);
+
+  fetched.length = 0;
+  bodies.length = 0;
+  globalThis.confirm = () => true;
+  await $("delBtn").onclick();
+  ok(bodies.some((b) => b && b.index === 0 && b.count === 3),
+     `deleting a row deletes the prompt AND its tweaks, sent ${JSON.stringify(bodies)}`);
+
+  fetched.length = 0;
+  await $("restoreBtn").onclick();
+  ok(fetched.some((u) => String(u) === "/api/restore"),
+     "restoring is its own button, and it is the only thing that changes the grade");
+
+  render(reset({ steps: STEPS, history_depth: 2, version: 31 }));
+  ok($("stepActs").hidden === true,
+     "with nothing selected the column is the current step, as it always was");
 
   console.log(`page harness ok (${checked} checks)`);
   process.exit(0);

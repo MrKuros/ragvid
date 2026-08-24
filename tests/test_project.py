@@ -668,6 +668,139 @@ def test_undo_takes_the_layers_with_it(project):
     assert len(project.session.layers) == len(project.session.specs) == 1
 
 
+# ---- browsing the history instead of destroying it -------------------------
+#
+# `revert_to` truncates, so using it to LOOK at an old step threw away every
+# step after it, with no redo -- undo is `session.pop`, so a truncation has
+# nothing to undo it with. `restore` appends instead. These pin the difference.
+
+
+def test_restoring_an_old_step_deletes_nothing(project):
+    """The whole point. Three steps, go back to the first, and end with FOUR --
+    the first one's grade is now also the last one's, and the two in between
+    are exactly where they were."""
+    from ragvid.intent import Intent, Op
+
+    project.set_intent(Intent(ops=[Op(op="warmth")]), label="warmer")
+    project.set_intent(Intent(ops=[Op(op="contrast")]), label="punchier")
+    project.set_intent(Intent(ops=[Op(op="grain")]), label="grainier")
+
+    project.restore(0)
+
+    labels = [s["label"] for s in project.steps]
+    assert len(labels) == 4, labels
+    assert labels[:3] == ["warmer", "punchier", "grainier"], "an earlier step went missing"
+    assert labels[3] == "back to: warmer"
+    # ...and the grade really is the old one, not merely a row saying so.
+    assert project.spec == project.history[0]
+    assert project.steps[3]["current"] is True
+
+
+def test_a_restored_step_does_not_share_its_regions_with_the_original(project):
+    """Region is a MUTABLE model. compiler._spare already documents the trap --
+    "two layers sharing one would let an edit to either reach the other" -- and
+    an aliased restore is that bug with the two ends a history apart. It would
+    corrupt silently: nothing raises, the old step just quietly changes."""
+    project.set_intent(_regional())
+    project.set_intent(Intent(ops=[Op(op="contrast")]))
+    before = project.session.layers[0][0].region.extent
+
+    project.restore(0)
+    project.session.layers[-1][0].region.extent = 0.123
+
+    assert project.session.layers[0][0].region.extent == before, \
+        "editing the restored step reached back into the original"
+
+
+def test_deleting_a_step_removes_only_that_step(project):
+    from ragvid.intent import Intent, Op
+
+    for label in ("one", "two", "three"):
+        project.set_intent(Intent(ops=[Op(op="warmth")]), label=label)
+
+    assert project.delete_step(1) is True
+
+    assert [s["label"] for s in project.steps] == ["one", "three"]
+    # The four parallel arrays are the invariant this project keeps by
+    # convention rather than by construction, so a new mutator has to be held
+    # to it the same way revert and reset are, just below.
+    n = len(project.session.specs)
+    assert len(project.session.labels) == n
+    assert len(project.session.intents) == n
+    assert len(project.session.layers) == n
+    assert project.delete_step(9) is False and project.delete_step(-1) is False
+
+
+def test_deleting_the_current_step_lands_on_the_one_before_it(project):
+    from ragvid.intent import Intent, Op
+
+    project.set_intent(Intent(ops=[Op(op="warmth")]), label="one")
+    project.set_intent(Intent(ops=[Op(op="contrast")]), label="two")
+    was = project.history[0]
+
+    project.delete_step(1)
+
+    assert project.spec == was
+    assert [s["label"] for s in project.steps] == ["one"]
+
+
+def test_every_step_carries_its_own_verbs_so_a_reader_need_not_restore_it(project):
+    """A UI showing "what did step 2 do?" had nothing to answer with: `steps`
+    carried only a label and a rationale, and `intent` was the CURRENT step's
+    alone."""
+    from ragvid.intent import Intent, Op
+
+    project.set_intent(Intent(ops=[Op(op="warmth")]))
+    project.set_intent(Intent(ops=[Op(op="contrast"), Op(op="grain")]))
+
+    steps = project.steps
+    assert [o["op"] for o in steps[0]["intent"]["ops"]] == ["warmth"]
+    assert [o["op"] for o in steps[1]["intent"]["ops"]] == ["contrast", "grain"]
+    # ...and every op carries the English the row is labelled with.
+    assert all(o["text"] for s in steps for o in s["intent"]["ops"])
+    # A grade nobody compiled from verbs reports None, exactly as the current
+    # one does -- one branch handles both.
+    project.set_spec(GradeSpec(contrast=0.4))
+    assert project.steps[-1]["intent"] is None
+
+
+def test_a_tweak_says_it_is_one_so_the_history_can_fold_it_away(project):
+    """A slider drag, an item switched off and the balance toggle each push a
+    real step -- that is what makes them undoable -- but they are adjustments OF
+    the prompt above them. Without a flag saying so, four words somebody typed
+    end up buried under "adjusted, adjusted, adjusted".
+
+    Asserts the BEHAVIOUR of each path rather than the TWEAK_LABELS tuple, so a
+    default label that changes without the tuple is caught here.
+    """
+    from ragvid.intent import Intent, Op
+
+    project.set_intent(Intent(ops=[Op(op="warmth")]), label="cold but colorful")
+    project.set_intent(Intent(ops=[Op(op="warmth", amount="strong")]))   # a slider
+    project.set_spec(GradeSpec(contrast=0.2))                            # the direct slider
+    project.set_auto_balance(not project.auto_balance)                   # the balance row
+
+    flags = [(s["label"], s["tweak"]) for s in project.steps]
+    assert flags[0] == ("cold but colorful", False), flags
+    assert all(t for _, t in flags[1:]), f"a tweak is being listed as a prompt: {flags}"
+
+
+def test_deleting_a_row_takes_the_tweaks_folded_into_it(project):
+    """One row is one prompt plus its run of tweaks, so deleting the row deletes
+    the run -- in one call, so it is one save rather than a race of N."""
+    from ragvid.intent import Intent, Op
+
+    project.set_intent(Intent(ops=[Op(op="warmth")]), label="first")
+    project.set_intent(Intent(ops=[Op(op="warmth", amount="strong")]))   # tweak of it
+    project.set_intent(Intent(ops=[Op(op="contrast")]), label="second")
+
+    assert project.delete_step(0, 2) is True
+
+    assert [s["label"] for s in project.steps] == ["second"]
+    n = len(project.session.specs)
+    assert len(project.session.labels) == len(project.session.intents) == n
+
+
 def test_revert_and_reset_keep_the_parallel_lists_in_step(project):
     from ragvid.intent import Intent, Op
 

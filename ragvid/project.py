@@ -101,6 +101,15 @@ def intent_view(intent: Intent | None) -> dict | None:
     }
 
 
+# The labels a TWEAK lands under: a per-item slider (set_intent), a hand-edited
+# spec (set_spec), and the balance switch. Every one of them is an adjustment OF
+# the prompt above it rather than a new thing anybody asked for, which is why
+# the history groups them into that prompt instead of listing them. They are the
+# defaults on those methods, and a test pins that each of those paths really
+# does report `tweak` -- checking the behaviour rather than this tuple, so the
+# two cannot quietly drift apart.
+TWEAK_LABELS = ("adjusted", "manual adjustment", "balance on", "balance off")
+
 CUBE_NAME = "current.cube"
 PREVIEW_NAME = "preview.png"
 SOURCE_PREVIEW_NAME = "source.png"
@@ -236,15 +245,103 @@ class Project:
             {"index": i,
              "label": self.session.labels[i] if i < len(self.session.labels) else "",
              "rationale": spec.rationale,
+             # The step's OWN verbs, so a UI can show what any entry did without
+             # having to restore it first to find out. `intent` is None for
+             # grades nobody compiled from verbs (a photo match, a hand-edited
+             # spec), which is the same None `Project.intent` reports for the
+             # current one -- a reader handles both with one branch.
+             "intent": intent_view(self.session.intents[i]
+                                   if i < len(self.session.intents) else None),
+             # Is this an adjustment of the step before it, rather than
+             # something new that was asked for? The UI shows one row per
+             # PROMPT and folds the tweaks into it.
+             "tweak": (self.session.labels[i] if i < len(self.session.labels) else "")
+                      in TWEAK_LABELS,
              "current": i == len(self.session.specs) - 1}
             for i, spec in enumerate(self.session.specs)
         ]
 
+    def restore(self, index: int, intent: Intent | None = None) -> GradeSpec:
+        """Put step `index` back at the END of the history. DELETES NOTHING.
+
+        The opposite of `revert_to` below, and the reason both exist: reverting
+        truncates, so using it to LOOK at an old step threw away everything
+        after it, with no redo (undo is `session.pop`, so there is nothing to
+        undo a truncation with). Restoring appends instead -- `git revert`
+        rather than `git reset`.
+
+        Appending rather than moving a cursor is what keeps this cheap. There is
+        no cursor anywhere in this codebase: `current` is `i == len(specs) - 1`
+        and `Session.spec`/`intent`/`region_layers` are all `[-1]`. A pointer
+        would also have a question at its centre that has no good answer -- with
+        the pointer at step 3, typing a new prompt either kills step 4 (the very
+        thing this replaces) or branches the history into a tree.
+
+        `intent` restores that step WITH an edit already applied, which is what
+        dragging a slider on an old step does. One call and one entry, rather
+        than a restore followed by an edit, which would leave a moment where the
+        grade is restored and the edit is not -- and two rows for one gesture.
+        """
+        if index < -1 or index >= len(self.session.specs):
+            raise InputError("<index>", f"no step {index} to go back to")
+        if intent is not None:
+            return self.set_intent(intent)
+        if index == -1:
+            # "the original" is a grade that does nothing, not the absence of
+            # one -- an append-only history has no way to push "no step". An
+            # empty Intent compiles to identity bit-for-bit. Note it goes
+            # through set_intent, so auto-balance applies if it is on: the
+            # honest reading of "back to the original" is what a fresh grade of
+            # this clip would be, and the balance row is right there to turn off.
+            return self.set_intent(Intent(), label="back to: the original")
+
+        label = self.session.labels[index] if index < len(self.session.labels) else ""
+        # deepcopy, and it is not defensive programming: Region is a mutable
+        # model, and compiler._spare already documents what sharing one costs --
+        # "two layers sharing one would let an edit to either reach the other".
+        # An aliased restore would let an edit to the new step reach the old.
+        layers = [l.model_copy(deep=True)
+                  for l in (self.session.layers[index]
+                            if index < len(self.session.layers) else [])]
+        return self._push(
+            self.session.specs[index].model_copy(deep=True),
+            label=f"back to: {label}" if label else "back to an earlier step",
+            intent=self.session.intents[index] if index < len(self.session.intents) else None,
+            layers=layers,
+        )
+
+    def delete_step(self, index: int, count: int = 1) -> bool:
+        """Remove `count` entries starting at `index`. The rest keep their order.
+
+        `count` exists because the history list shows one row per PROMPT, with
+        that prompt's tweaks folded into it -- so "delete this row" means the
+        whole run, and doing it in one call keeps it one save and one undo-able
+        moment rather than a race of N requests.
+
+        The only destructive operation a person can now reach from the history
+        list, and it is reached by asking for it rather than by clicking a row.
+        Deleting the current step lands on the one before it, which is exactly
+        what undo does -- undo IS delete_step(last), and is left as its own verb
+        because that is the word for it.
+
+        Each spec is a whole grade rather than a diff, so removing one from the
+        middle leaves every other entry as valid as it was.
+        """
+        if index < 0 or index >= len(self.session.specs) or count < 1:
+            return False
+        for arr in (self.session.specs, self.session.labels,
+                    self.session.intents, self.session.layers):
+            del arr[index:index + count]
+        self.save()
+        return True
+
     def revert_to(self, index: int) -> bool:
         """Drop every step after `index`. -1 goes back to the ungraded clip.
 
-        This is what clicking an entry in the history does; undo is just
-        revert_to(len - 2).
+        DESTRUCTIVE, and no longer what clicking an entry in the history does --
+        see `restore` above for why that changed. Kept because it is a
+        documented part of the HTTP surface (`POST /api/revert`) and is the
+        honest primitive for "throw away everything after here".
         """
         if index < -1 or index >= len(self.session.specs):
             return False

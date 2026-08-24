@@ -40,7 +40,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
                       "text":"warmed it up"}]},
   "auto_balance": true,
   "balance": "neutralised a green cast, set the black point",
-  "api_version": 11,
+  "api_version": 12,
   "version": 8,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "temperature": 0, "tint": 0,
@@ -179,7 +179,13 @@ Two more consequences of the wider spec, both easy to get wrong:
   contrast, every hue band and every effect to identity. Send the `spec` you
   got from `/api/state` with your one field changed. Unknown keys are ignored
   rather than rejected, so a typo'd field name silently does nothing.
-- ****B3 added `contrast_balance` and did NOT move `api_version`, deliberately.**
+- **`steps[]` entries carry `index`, `label`, `rationale`, `current`, plus **`intent`**
+(that step's own verbs, so a UI can show what any entry did without restoring it
+first) and **`tweak`** (true when the entry is an adjustment OF the one before it
+— a slider drag, an item switched off, the balance toggle — rather than
+something that was asked for).
+
+**B3 added `contrast_balance` and did NOT move `api_version`, deliberately.**
 The gate exists so a stale page announces itself instead of silently dropping
 fields — and nothing is dropped here: the page enumerates no spec fields, and
 its one spec write (`POST /api/spec` from the Strength slider) spreads the
@@ -207,6 +213,8 @@ All return the same state object as `GET /api/state`.
 | `POST` | `/api/balance` | `{"on": true}` | Turns auto-balance on or off. Re-compiles the current grade when there is an `intent` behind it, so the switch is something you see; a spec from anywhere else is left alone, because a balance already baked into 44 numbers cannot be decomposed back out. |
 | `POST` | `/api/undo` | — | Steps back one, *including* undoing the first grade back to the ungraded clip. `409` only when there is nothing left. |
 | `POST` | `/api/close` | — | Drops the project; back to the empty state. |
+| `POST` | `/api/restore` | `{"index": 2}` or `{"index": 2, "intent": {...}}` | Puts an earlier step back at the END of the history. **Deletes nothing** — this is what clicking a history entry does now. The optional `intent` restores that step with an edit already applied, which is one call and one history row for one gesture (dragging a slider on a step that is not the current one). |
+| `POST` | `/api/step/delete` | `{"index": 2}` or `{"index": 2, "count": 3}` | Removes `count` entries starting at `index`, leaving the rest in order. The built-in UI shows one row per PROMPT with that prompt's tweaks folded into it, so deleting a row deletes the run. |
 | `POST` | `/api/revert` | `{"index": 0}` | Jump back to any step. `-1` is the ungraded clip. Undo is `revert` to the previous index. |
 | `POST` | `/api/reset` | — | Discards every grade, keeps the clip open. The "start over" button — distinct from undo (one step) and close (drops the clip). |
 
