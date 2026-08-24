@@ -7,7 +7,7 @@ actually matters here — how much of a JSON schema the endpoint will enforce.
 STRUCTURED OUTPUT IS NOT UNIFORM, AND THE DIFFERENCE IS REAL.
 
     "json_schema"  the endpoint constrains decoding to GradeSpec's schema. All
-                   43 numbers come back, every time, by construction. Groq,
+                   44 numbers come back, every time, by construction. Groq,
                    OpenAI, xAI, Mistral.
     "json_object"  the endpoint guarantees syntactically valid JSON and nothing
                    more. The schema goes in the prompt as a request, so the

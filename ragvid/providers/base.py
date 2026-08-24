@@ -61,7 +61,7 @@ def load_env(path: Path = ENV_PATH) -> None:
 class Provider(Protocol):
     """What ragvid needs from an endpoint. Two calls, one capability flag.
 
-    `plan` is the original path: 43 numbers in, a GradeSpec out.
+    `plan` is the original path: 44 numbers in, a GradeSpec out.
 
     `plan_json` is the intent path (roadmap A1) and returns a plain dict against
     a caller-supplied schema, because Intent is not a GradeSpec and the protocol
@@ -96,7 +96,7 @@ class ProviderInfo:
     `structured` is the strongest response_format the endpoint honours:
 
         "json_schema"  constrained decoding against GradeSpec's schema. Every
-                       one of the 43 numbers comes back by construction.
+                       one of the 44 numbers comes back by construction.
         "json_object"  valid JSON guaranteed, the schema itself only requested
                        in the prompt. Fields can go missing; ragvid checks and
                        raises rather than defaulting them.

@@ -3,7 +3,7 @@
 TWO PATHS LIVE HERE AND plan_vibe PICKS BETWEEN THEM. The default is intent ->
 compiler (roadmap A1): the model emits typed verbs from a closed vocabulary and
 compiler.py turns them into numbers by reading the clip. The older path, where
-the model authors all 43 numbers itself, stays as the fallback for endpoints
+the model authors all 44 numbers itself, stays as the fallback for endpoints
 that cannot constrain decoding to the Intent schema.
 
 WHY THAT WAY ROUND, measured rather than argued (scripts/bakeoff_intent.py,
@@ -81,6 +81,15 @@ TONE — brightness and contrast. This is where most looks live.
    brightness. RAISE it to let the curve darken the image, LOWER it to lighten
    (measured: contrast +0.5 on a mid-grey clip gives mean luma 0.557 at pivot 0.25
    and 0.483 at pivot 0.65). With negative contrast the effect reverses.
+7b. contrast_balance [-1..1] — WHICH END of the tone scale `contrast` acts on. 0 is the
+   even S-curve and the right answer almost always. NEGATIVE puts the contrast in the
+   shadows: a crushed toe with the highlights left where they were. POSITIVE puts it in
+   the highlights. It scales `contrast` and does nothing on its own, so setting it with
+   contrast at 0 changes no pixel. Use it for a sentence that wants one end and not the
+   other — "crush the blacks but keep the highlights soft" is contrast positive with
+   balance negative (measured: contrast 0.44 alone takes the black at 0.08 down to
+   0.0539 but drags the white at 0.95 up to 0.9692; with balance -1 the black reaches
+   0.0326 and the white stays at 0.9517).
 
 COLOUR — global cast and intensity.
 8. temperature [-2500..2500] — blue/orange axis, in Kelvin-like units. NEGATIVE = cooler
@@ -239,7 +248,7 @@ def plan_vibe(vibe: str, stats: "ClipStats", provider=None,
 
 
 def plan_direct(vibe: str, stats: "ClipStats", provider=None) -> GradeSpec:
-    """The model authors all 43 numbers itself. Was the only path; now the
+    """The model authors all 44 numbers itself. Was the only path; now the
     fallback, and still what refine.py builds on."""
     if provider is None:
         from ragvid.providers import get_provider
@@ -324,7 +333,17 @@ VERBS — TONE. Most looks live here.
   contrast    up = punchier: deeper blacks and brighter whites. down = flatter, softer.
   midtones    up = brighter mids, down = darker mids, without moving black or white.
   shadows     up = lifted, faded, milky, filmic blacks. down = crushed, deep, inky blacks.
+              On down, the amount decides how far it goes: subtle and moderate deepen
+              the shadows and keep their detail, strong is a real crush that puts the
+              darkest part of the picture on black. Ask for strong only when the
+              sentence does — "really crush them", "pure black", "inky".
   highlights  up = brighter whites. down = pulled back, recovered, protected highlights.
+  shoulder    up = the whites roll off gently instead of hitting a wall — soft, filmic,
+              creamy highlights, "keep the highlights soft", "don't let it clip",
+              "protect the sky". down = the opposite: the whites arrive hard and
+              contrasty. This is about the SHAPE of the top end, not its level; reach
+              for highlights instead when the sentence wants the bright half brighter
+              or darker.
 
 VERBS — COLOUR.
   warmth      up = warmer, oranger, golden, sunlit. down = cooler, bluer, icier.
@@ -487,7 +506,7 @@ def plan_intent(vibe: str, stats: "ClipStats", provider=None,
 
     BOTH come back, because the Intent is not an implementation detail of the
     spec. It is the only human-readable record of what was asked for, and it
-    cannot be recovered afterwards: 43 floats do not say which four words made
+    cannot be recovered afterwards: 44 floats do not say which four words made
     them. Roadmap C3/C4 renders it as a list of sentences with a strength
     control each, and re-compiles through this same compiler when one moves.
     """

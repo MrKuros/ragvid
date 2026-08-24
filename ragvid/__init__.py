@@ -12,7 +12,7 @@ derived from them. Build a UI against this, not against the modules underneath.
 
 Everything below `Project` is a pure layer with no I/O policy of its own:
 
-    spec      GradeSpec -- the 43 numbers, and the math that applies them
+    spec      GradeSpec -- the 44 numbers, and the math that applies them
     probe     clip -> ClipStats (sampled frames, median statistics)
     match     (source, reference) -> GradeSpec, closed form, no model
     vibe      words -> GradeSpec, via a provider

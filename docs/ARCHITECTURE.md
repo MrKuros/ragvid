@@ -29,7 +29,7 @@ Read this before building a front end.
                                  │
         ┌────────────────────────┼────────────────────────┐
         ▼                        ▼                        ▼
-  37 colour numbers        6 spatial effects        0..n regions
+  38 colour numbers        6 spatial effects        0..n regions
         │                        │                        │
         ▼                        ▼                        ▼
   lut.bake_cube            render.py filtergraph    region.mask() → PNG
@@ -58,7 +58,7 @@ Three rules hold the whole thing together:
 
    *This rule used to read "`GradeSpec` is the only currency", and it stopped
    fitting the day a grade could apply to part of a frame (roadmap B1).* A
-   `GradeSpec` is a per-pixel colour map: 43 numbers that answer WHAT to do to
+   `GradeSpec` is a per-pixel colour map: 44 numbers that answer WHAT to do to
    a colour, with no place to answer WHICH PIXELS. "Darken the top of the
    frame" is not a missing field, it is a missing dimension — and widening
    `GradeSpec` to hold a mask would have made every flat grade, which is almost
@@ -140,7 +140,7 @@ p.export("out.mp4", progress=lambda f: bar.set(f))     # the slow one
 | Open / create a project | `Project.open(root)` · `Project.create(video, root)` · `Project.exists(root)` |
 | Render current state | `project.to_dict()` — JSON-serializable, everything a view needs |
 | Undo stack | `project.history` (oldest first) · `project.can_undo` · `project.undo()` |
-| Sliders and numeric fields | `project.set_spec(spec)` — pushes to history, so undo covers slider drags too. A spec arriving this way is a FLAT grade: 43 numbers describe the whole frame, so any regional layers are dropped. `project.set_intent(intent)` is the path that keeps them |
+| Sliders and numeric fields | `project.set_spec(spec)` — pushes to history, so undo covers slider drags too. A spec arriving this way is a FLAT grade: 44 numbers describe the whole frame, so any regional layers are dropped. `project.set_intent(intent)` is the path that keeps them |
 | Regions on the current grade | `project.stack` (base + layers) · `project.layers` · `to_dict()["layers"]`. A preview that ignores them shows a look the export will not produce |
 | Semantic masks ("the sky") | `segment.is_ready()` before offering them · `segment.download_model(progress=fn)` once the user consents · `region.needs_frame` / `stack.needs_frame` to know whether a frame is required |
 | Live preview | `project.preview()` — one ffmpeg call, independent of clip length |
@@ -201,7 +201,7 @@ that is the entire reason the refine loop is sub-second rather than seconds.
 
 ## The `.cube` is colour-only — a seam you can see from outside
 
-`GradeSpec.apply()`, and therefore the baked LUT, implements 37 of the 43
+`GradeSpec.apply()`, and therefore the baked LUT, implements 38 of the 44
 numbers. The six `effects` fields are spatial. A 3D LUT maps one RGB triple to
 one RGB triple with no knowledge of the neighbouring pixel, so blur, grain,
 vignette, glow and chromatic fringing cannot be expressed in one at all — not
@@ -242,6 +242,16 @@ LUTs will notice.
   → 5 hue qualifiers → 6 tonal split → 7 highlight rolloff → 8 contrast
   → 9 look_mix → 10 clip to [0,1]
   ```
+
+  Step 8 takes `contrast_balance` as a PARAMETER, not as a step of its own,
+  and three separate constraints force that. The asymmetry is defined in the
+  pivot-warped coordinate, which only exists inside `_s_curve` — a standalone
+  toe step would need a second implementation of the pivot semantics, free to
+  drift, so moving `pivot` would silently retarget the toe. It consumes
+  `_smoothstep`, so it must sit after the soft clip. And it cannot sit after 8,
+  because the clip that destroys highlights is the one inside step 8. The
+  coupling is multiplicative, so `contrast == 0` skips it and the identity grid
+  stays bit-for-bit with no new guard.
 
   `lut.py` bakes by calling `spec.apply()` rather than reimplementing it, and a
   test asserts every other permutation differs materially. Three of those
@@ -332,6 +342,19 @@ LUTs will notice.
   each layer in turn. So a layer holds ONE correction on top of the look rather
   than a copy of the base with one field changed, and two overlapping regions
   are a continuous lerp with the later one winning in proportion to its mask.
+- **Negative contrast is reconstructed badly at 33³ and 65³ does not fix it.**
+  `_inv_smoothstep(u) ~ sqrt(u/3)` near 0, so its derivative is unbounded at
+  both ends. Measured against exact `_s_curve` over 3×10⁵ random points, in
+  8-bit code values: `+1.00` → 0.21 / 0.05, `-0.22` → 1.52 / 1.08, `-0.44` →
+  3.04 / 2.15, `-1.00` → 6.91 / 4.89. Pre-existing and unfixed; it is a roadmap
+  line of its own. It is also why `contrast_balance` is coupled multiplicatively
+  — an additive form reaches `lo > 0 > hi`, which parks the inverse leg at an
+  endpoint and inherits the error for ~10% of midtone slope.
+- **A tone curve does NOT need the 65³ escalation.** Unlike a hue qualifier it
+  is separable and smooth in RGB, so trilinear reconstruction reduces to 1-D
+  interpolation on the grid axis. Measured worst case 0.24 code values against
+  today's 0.21 for the same grade without it — which is why `bake_cube` still
+  keys size off `has_hue_qualifiers()` alone.
 - **`.cube` varies RED fastest.** Reversing it produces a plausible-looking file
   that grades channels wrongly.
 - **Statistics are display-space, not linear.** `spec.apply()`, the LUT and

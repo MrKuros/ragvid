@@ -1,6 +1,6 @@
 """The grade spec — the contract every other module codes against.
 
-A GradeSpec is 43 numbers describing a color grade. It is the *only* thing an
+A GradeSpec is 44 numbers describing a color grade. It is the *only* thing an
 LLM ever produces in this project; no pixels leave the machine (see
 docs/ARCHITECTURE.md rule 2). The .cube
 LUT is a derived artifact baked from a spec, which is why refinement ("make it
@@ -38,7 +38,8 @@ EVALUATION ORDER IS LOAD-BEARING. Reviewers and reimplementations must match:
     6. tonal split shadow/highlight masks; tints are luma-stripped so tint and
                    lift are exactly independent axes
     7. rolloff     soft highlight shoulder (extended Reinhard)
-    8. contrast    S-curve around `pivot`
+    8. contrast    S-curve around `pivot`, aimed at one end of the tone
+                   scale by `contrast_balance` (0 = the symmetric curve)
     9. look_mix    out = clip(src,0,1) + (out - clip(src,0,1)) * look_mix
    10. clip to [0, 1]
 
@@ -54,6 +55,16 @@ before contrast.
     is the one inside the contrast step; a shoulder only at the final return
     would leave it untouched. It is also after saturation, because saturation
     > 1 can itself drive a channel above 1.
+  - `contrast_balance` is a PARAMETER of step 8, not a step of its own, and
+    three independent constraints force that. (a) The asymmetry is defined in
+    `u`, the pivot-warped coordinate, which only exists inside _s_curve; a
+    standalone toe step would need its own warp -- a second implementation of
+    the pivot semantics, free to drift, so moving `pivot` would silently
+    retarget the toe. That is exactly what SPLIT_CROSSOVER is a separate
+    constant to avoid, one axis over. (b) It consumes _smoothstep, so it must
+    receive the clipped input, which only exists after the soft clip at 7.
+    (c) It cannot sit after 8, because the clip that actually destroys
+    highlights is the one INSIDE step 8.
   - Hue qualifiers come BEFORE the tonal split. A qualifier reads a hue angle,
     so if the split injected its tint first, "teal shadows" would make the cyan
     qualifier fire on every shadow in the frame.
@@ -175,6 +186,7 @@ class GradeSpec(BaseModel):
     tint: float = Field(0.0, description="Green/magenta axis. Negative = greener, positive = magenta. Typical range -1..1.")
     contrast: float = Field(0.0, description="S-curve strength, -1..1. 0 = unchanged, positive = more contrast.")
     pivot: float = Field(0.435, description="Tonal pivot the contrast S-curve rotates around.")
+    contrast_balance: float = Field(0.0, description="Which end of the tone scale `contrast` acts on, -1..1. 0 = evenly, the symmetric S-curve. Negative puts it in the shadows (a crushed toe, highlights left alone), positive in the highlights. Does nothing on its own -- it scales `contrast`.")
 
     exposure: float = Field(0.0, description="Photographic stops applied before the CDL. 0.0 = unchanged, +1 = twice as bright.")
     look_mix: float = Field(1.0, description="0..1 blend of the whole graded result back toward the source. 1.0 = full look.")
@@ -217,6 +229,7 @@ class GradeSpec(BaseModel):
             and abs(self.tint) < tol
             and abs(self.contrast) < tol
             and abs(self.pivot - i.pivot) < tol
+            and abs(self.contrast_balance) < tol
             and abs(self.exposure) < tol
             and abs(self.look_mix - 1.0) < tol
             and abs(self.highlight_rolloff) < tol
@@ -308,8 +321,15 @@ class GradeSpec(BaseModel):
         # 8. Contrast S-curve around the pivot. Its np.clip is now effectively
         #    only the floor guard when rolloff is on, but it is NOT removable:
         #    _s_curve is non-monotonic on out-of-range input.
+        # `contrast_balance` needs NO guard of its own, and that is the whole
+        # reason it is coupled multiplicatively rather than additively: it only
+        # ever scales `contrast`, so contrast == 0 already skips it and the
+        # identity grid stays bit-for-bit. An additive balance would be a
+        # second thing that can move the picture with contrast at 0, and would
+        # need its own guard and its own row in the bitwise-no-op test.
         if abs(self.contrast) > 1e-9:
-            x = _s_curve(np.clip(x, 0.0, 1.0), self.contrast, self.pivot)
+            x = _s_curve(np.clip(x, 0.0, 1.0), self.contrast, self.pivot,
+                         self.contrast_balance)
 
         # 9. Mix the whole look back toward the source. Outermost by design.
         #    Guarded: src + (x - src) * 1.0 is not a bitwise identity.
@@ -392,7 +412,7 @@ class GradeSpec(BaseModel):
         props = {
             "slope": rgb, "offset": rgb, "power": rgb,
             "saturation": num, "temperature": num, "tint": num,
-            "contrast": num, "pivot": num,
+            "contrast": num, "pivot": num, "contrast_balance": num,
             "exposure": num, "look_mix": num, "highlight_rolloff": num,
             "shadow_tint": rgb, "highlight_tint": rgb,
             "shadow_lift": num, "highlight_lift": num,
@@ -423,6 +443,7 @@ class GradeSpec(BaseModel):
         d["tint"] = float(np.clip(d["tint"], -2.0, 2.0))
         d["contrast"] = float(np.clip(d["contrast"], -1.0, 1.0))
         d["pivot"] = float(np.clip(d["pivot"], 0.05, 0.95))
+        d["contrast_balance"] = float(np.clip(d["contrast_balance"], -1.0, 1.0))
 
         d["exposure"] = float(np.clip(d["exposure"], -4.0, 4.0))
         d["look_mix"] = float(np.clip(d["look_mix"], 0.0, 1.0))
@@ -572,17 +593,53 @@ def _inv_smoothstep(u: np.ndarray) -> np.ndarray:
     return 0.5 - np.sin(np.arcsin(np.clip(1.0 - 2.0 * u, -1.0, 1.0)) / 3.0)
 
 
-def _s_curve(x: np.ndarray, contrast: float, pivot: float) -> np.ndarray:
-    """Monotonic S-curve fixing 0, 1 and `pivot`.
+def _s_curve(x: np.ndarray, contrast: float, pivot: float,
+             balance: float = 0.0) -> np.ndarray:
+    """Monotonic S-curve fixing 0, 1 and `pivot`, optionally aimed at one end.
 
     Blends identity toward smoothstep (contrast > 0) or its inverse
     (contrast < 0), in a space warped so the pivot sits at 0.5.
+
+    `balance` sweeps the blend WEIGHT across that warped scale: -1 puts the
+    whole S in the shadows (a crushed toe, the shoulder left alone), +1 in the
+    highlights, 0 is the symmetric curve this function has always been. It is
+    the answer to "crush the blacks but keep the highlights soft", which one
+    symmetric knob cannot express -- measured at pivot 0.435 on a 20001-step
+    ramp, contrast 0.44 moves y(0.08) 0.0800 -> 0.0539 but drags y(0.95)
+    0.9500 -> 0.9692 with it, where balance -1 reaches y(0.08) 0.0326 and
+    leaves y(0.95) at 0.9517.
+
+    MULTIPLICATIVE, not additive, for three separate reasons:
+
+      * `sign(s) == sign(contrast)` everywhere, so the smoothstep /
+        inv-smoothstep choice stays a SCALAR branch. A strength that crossed
+        zero mid-curve would switch targets per element and put a C0 kink in
+        the transfer function.
+      * balance alone cannot move a pixel, so `apply()`'s existing
+        `abs(contrast) > 1e-9` guard still covers this step exactly and the
+        identity grid stays bit-for-bit. An additive balance needs a second
+        guard and a second row in the bitwise-no-op test.
+      * it never parks `_inv_smoothstep` at an endpoint. That matters: the
+        inverse goes as sqrt(u/3) near 0, so its derivative is unbounded and
+        33^3 reconstruction of NEGATIVE contrast is already poor -- measured
+        6.91 code values at contrast -1.0, and 65^3 only gets it to 4.89. An
+        additive form reaches lo > 0 > hi, which buys ~10% of midtone slope
+        and costs 20x the LUT error.
+
+    Monotone over the whole clamped space: swept in _self_check, 0
+    non-monotone of 8405 (contrast x balance on 41x41, five pivots).
     """
     u = _pivot_warp(np.clip(x, 0.0, 1.0), pivot)
     c = float(np.clip(contrast, -1.0, 1.0))
+    b = float(np.clip(balance, -1.0, 1.0))
     target = _smoothstep(u) if c > 0 else _inv_smoothstep(u)
-    u2 = u + (target - u) * abs(c)
-    return _pivot_unwarp(u2, pivot)
+    if b == 0.0:
+        # Bit-for-bit the curve this was before balance existed. `abs(c) *
+        # np.ones_like(u)` is not the same array as `abs(c)` in the last ulp,
+        # so the scalar path is a guard, not a shortcut.
+        return _pivot_unwarp(u + (target - u) * abs(c), pivot)
+    s = np.clip(c * (1.0 + b * (2.0 * u - 1.0)), -1.0, 1.0)
+    return _pivot_unwarp(u + (target - u) * np.abs(s), pivot)
 
 
 # ---- self-check -----------------------------------------------------------
@@ -638,6 +695,24 @@ def _self_check() -> None:
     only_lift = _apply_tonal_split(x, np.zeros(3), 0.07, np.zeros(3), -0.03) - x
     assert np.abs(only_lift - (only_lift @ LUMA)[:, None]).max() < 1e-15
 
+    # A non-monotone CURVE inverts tone in the baked .cube just as a
+    # non-monotone shoulder would. The asymmetric strength makes the derivative
+    # argument non-obvious, so it is swept rather than argued.
+    sweep = np.linspace(0.0, 1.0, 40001)
+    worst = 0.0
+    for c in np.linspace(-1.0, 1.0, 41):
+        for b in np.linspace(-1.0, 1.0, 41):
+            for pv in (0.05, 0.25, 0.435, 0.65, 0.95):
+                worst = min(worst, float(np.diff(_s_curve(sweep, c, pv, b)).min()))
+    assert worst >= -1e-15, f"the contrast curve is non-monotone somewhere: {worst}"
+
+    # ...and balance 0 must be BIT-for-bit the curve from before it existed, or
+    # every saved grade shifted underneath the people who saved them.
+    z = np.random.default_rng(0).random(200000)
+    for c in (-1.0, -0.6, -0.22, 0.22, 0.5, 1.0):
+        for pv in (0.25, 0.435, 0.65):
+            assert np.array_equal(_s_curve(z, c, pv), _s_curve(z, c, pv, 0.0)), (c, pv)
+
     # A non-monotone shoulder would INVERT highlights in the baked .cube.
     ramp = np.linspace(0.0, 4.0, 400001)
     for r, expect in ((0.1, 0.976), (0.3, 0.928), (0.6, 0.856), (1.0, 0.760)):
@@ -648,7 +723,8 @@ def _self_check() -> None:
     # Nothing non-finite may reach the LUT, at any sanitized setting.
     hot = GradeSpec(
         slope=RGB(r=9e9, g=-3.0, b=float("nan")), offset=RGB.of(-5.0), power=RGB.of(0.0),
-        saturation=float("inf"), exposure=99.0, contrast=-2.0, highlight_rolloff=5.0,
+        saturation=float("inf"), exposure=99.0, contrast=-2.0, contrast_balance=9.0,
+        highlight_rolloff=5.0,
         look_mix=-1.0, shadow_tint=RGB.of(9.0), highlight_lift=float("-inf"),
         hue_red=HueBand(sat=-4.0, lum=7.0), effects=EffectSpec(glow=float("nan")),
     ).sanitize()

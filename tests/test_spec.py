@@ -95,11 +95,83 @@ def test_identity_lut_is_bit_for_bit_the_baseline():
     {"hue_red": HueBand(sat=0.8)},
     {"hue_magenta": HueBand(lum=0.02)},
     {"effects": EffectSpec(grain=0.4)},
+    {"contrast_balance": 0.4},
 ])
 def test_is_identity_covers_every_new_field(kwargs):
     """A field missing from is_identity() makes test_match.py assert nothing."""
     assert GradeSpec.identity().is_identity()
     assert not GradeSpec(**kwargs).is_identity()
+
+
+def test_the_curve_can_crush_the_toe_without_touching_the_shoulder():
+    """The one thing `contrast` alone cannot do, and the whole reason B3 spent a
+    field. `contrast` is ONE symmetric knob, so deepening the blacks with it
+    drags the whites up too. Measured at pivot 0.435 on a 20001-step ramp:
+
+        contrast .44 balance  0  ->  y(.08) 0.0539,  y(.95) 0.9692   (whites UP)
+        contrast .44 balance -1  ->  y(.08) 0.0326,  y(.95) 0.9517   (whites held)
+
+    Pre-change this fails NUMERICALLY rather than with a TypeError: pydantic
+    ignores an unknown kwarg, so `crushed` came back byte-identical to `plain`
+    at 0.0539 and the first assertion is the one that goes red.
+    """
+    x = np.linspace(0.0, 1.0, 20001)
+    ramp = np.stack([x, x, x], -1)
+    plain = GradeSpec(contrast=0.44).apply(ramp)[:, 0]
+    crushed = GradeSpec(contrast=0.44, contrast_balance=-1.0).apply(ramp)[:, 0]
+
+    assert crushed[1600] < plain[1600] - 0.015, "the toe is not deeper"
+    assert abs(crushed[19000] - 0.95) < 0.005, "the highlights did not stay put"
+    assert plain[19000] > 0.95 + 0.008, "...which plain contrast cannot manage"
+    # A non-monotone curve INVERTS tone in the baked .cube, permanently.
+    assert np.diff(crushed).min() >= 0.0
+    # And it bends the toe rather than welding it: only x == 0 maps to 0.
+    assert int((crushed <= 1e-12).sum()) == 1
+
+
+def test_the_toe_preserves_shadow_code_values_a_flat_lift_destroys():
+    """What "does not weld" means in the unit the export actually ships in.
+
+    A .cube is consumed in 8 bits. Run the darkest source code values through
+    both mechanisms at settings that reach comparable depth:
+
+        in                     0  1  2  3  4  5  6  7  8
+        toe (contrast .132)    0  1  1  2  3  4  5  5  6
+        flat lift (-0.015)     0  0  0  0  0  1  2  3  4
+
+    The flat lift collapses FOUR distinct shadow levels onto black and nothing
+    downstream can get them back. The toe is strictly monotone above zero: the
+    only input that maps to 0 is 0 itself, which is the fixed point the curve
+    is built around.
+    """
+    codes = np.arange(0, 9) / 255.0
+    ramp = np.stack([codes] * 3, -1)
+
+    toe = np.round(GradeSpec(contrast=0.132, contrast_balance=-1.0).apply(ramp)[:, 0] * 255)
+    flat = np.round(GradeSpec(shadow_lift=-0.015).apply(ramp)[:, 0] * 255)
+
+    assert int((toe[1:] == 0).sum()) == 0, f"the toe welded: {list(toe)}"
+    assert int((flat[1:] == 0).sum()) == 4, f"the flat lift changed: {list(flat)}"
+    # ...and it survives the bake, which is what actually reaches the export.
+    # Measured max error against apply() over these codes: 0.04 at 33^3.
+    from ragvid.lut import bake_cube, read_cube
+    import tempfile, os
+
+    path = bake_cube(GradeSpec(contrast=0.132, contrast_balance=-1.0),
+                     os.path.join(tempfile.mkdtemp(), "toe.cube"))
+    n, table = read_cube(path)
+    assert n == 33, "a tone curve must not trigger the 65^3 escalation"
+    diag = np.array([table.reshape(n, n, n, 3)[i, i, i, 0] for i in range(n)])
+    baked = np.round(np.interp(codes, np.linspace(0, 1, n), diag) * 255)
+    assert int((baked[1:] == 0).sum()) == 0, f"the baked cube welded: {list(baked)}"
+
+
+def test_the_balance_is_inert_without_contrast_to_scale():
+    """It scales `contrast`; with none there is nothing to aim. This is what
+    lets apply() keep one guard for the whole of step 8."""
+    grid = _grid(17)
+    for b in (-1.0, -0.3, 0.5, 1.0):
+        assert np.array_equal(GradeSpec(contrast_balance=b).apply(grid), grid)
 
 
 def test_every_new_step_is_guarded_bitwise():
@@ -113,6 +185,12 @@ def test_every_new_step_is_guarded_bitwise():
         {"shadow_tint": RGB.of(0.0), "highlight_tint": RGB.of(0.0)},
         {"shadow_lift": 0.0, "highlight_lift": 0.0},
         {f: HueBand(sat=1.0, lum=0.0) for f in HUE_FIELDS},
+        # Balance with no contrast to scale. This row passes TRIVIALLY and that
+        # is the point of having it: it pins the claim that coupling the
+        # balance multiplicatively means it inserts no code of its own, so
+        # apply()'s existing `abs(contrast) > 1e-9` guard still covers step 8
+        # exactly. An additive balance would fail here.
+        {"contrast": 0.0, "contrast_balance": 0.7},
     ):
         out = GradeSpec(**kwargs).apply(grid)
         assert np.array_equal(out, grid), f"{kwargs} is not bitwise a no-op"

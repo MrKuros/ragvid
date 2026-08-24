@@ -29,6 +29,14 @@ a comment next to the mapping:
   * "pull the highlights down" on already-blown footage -> `highlight_rolloff`
     (step 7) before `highlight_lift`, because a uniform negative lift moves
     welded-white pixels down together and they stay welded.
+  * "crush the blacks" -> the TOE of the contrast curve (step 8, via
+    `contrast_balance`), not a negative `shadow_lift`. That is the bullet above
+    turned around and pointed at the other rail, where it had never been
+    applied: measured on a 20001-step ramp, shadow_lift -0.10 welds 9.12% of
+    the range onto pure black, while the toe reaches a deeper y(0.08) -- 0.0326
+    against 0.0800 -- and welds nothing. It is also the only crush that does
+    not brighten the highlights on its way (plain contrast 0.44 moves y(0.95)
+    to 0.9692; tilted it stays at 0.9517).
   * auto-balance -> `slope`/`offset`, i.e. the CDL at step 2. A technical
     correction goes where the industry standard already puts one, and it is the
     only field pair an ASC CDL export can carry off the machine. `_balance` has
@@ -77,6 +85,23 @@ STEP_EXPOSURE = 0.35      # stops
 STEP_CONTRAST = 0.22      # S-curve strength
 STEP_MIDTONES = 0.18      # gamma exponent delta
 STEP_SHADOWS = 0.05       # absolute lift, display space
+STEP_CRUSH = 0.22         # contrast spent on the toe by "shadows down"
+STEP_WELD = 0.09          # black point "shadows down strong" is allowed to spend
+STEP_SHOULDER = 0.30      # highlight_rolloff per unit; "strong" lands on MAX_SHOULDER
+STEP_HARDEN = 0.11        # ...and the other way, as negative contrast. Half of
+                          # STEP_SHOULDER on purpose: negative contrast is the
+                          # case that costs LUT accuracy (measured 3.04 code
+                          # values at 33^3 for contrast -0.44 against 0.21 for
+                          # +1.0), so "strong" stays inside the envelope the
+                          # contrast verb already ships.
+# The ceiling this verb may reach, and it is vibe.py's number, not a new one:
+# the direct-path prompt declares highlight_rolloff [0..0.6] sane, and the step
+# sizes above are chosen so "strong" lands INSIDE the declared ranges. Without
+# this the `1 + clipped` boost took a strong shoulder on heavily clipped
+# footage to 1.000, which pulls legal white down to 0.760 (spec._rolloff
+# measures f(1) at each setting) -- a loss nobody asked for from one word.
+MAX_SHOULDER = 0.6
+
 STEP_HIGHLIGHTS = 0.05
 STEP_WARMTH = 800.0       # Kelvin-ish, TEMP_FULL is 3000
 STEP_TINT = 0.12          # green/magenta axis
@@ -227,6 +252,27 @@ def _exposure(d: dict, k: float, item: Op, m: _Measured) -> None:
     d["exposure"] += stops
 
 
+def _tilt_contrast(d: dict, c: float, tilt: float) -> None:
+    """Add `c` of contrast asking for `tilt` of balance, composed as a
+    CONTRAST-WEIGHTED MEAN.
+
+    Three verbs write the one S-curve now, so they need a composition rule. A
+    plain `+=` on the balance would let "crush the blacks and add contrast"
+    drag the contrast verb's own move down into the shadows with it -- the
+    second verb asked for an EVEN curve and would silently get a tilted one.
+    Weighting each verb's tilt by how much contrast it brought splits the
+    curve in proportion to what was actually asked for, and it is
+    order-independent, which two verbs in one sentence are.
+    """
+    total = d["contrast"] + c
+    # No contrast left to tilt: a balance with contrast 0 moves nothing
+    # (spec._s_curve is multiplicative), so leaving it where it is is correct
+    # and writing to it would be a number nobody can see.
+    if abs(total) > 1e-9:
+        d["contrast_balance"] = (d["contrast"] * d["contrast_balance"] + c * tilt) / total
+    d["contrast"] = total
+
+
 def _contrast(d: dict, k: float, item: Op, m: _Measured) -> None:
     c = k * STEP_CONTRAST
     # frame_variance IS the measurement of how contrasty the clip already is.
@@ -236,7 +282,9 @@ def _contrast(d: dict, k: float, item: Op, m: _Measured) -> None:
         c *= 1.5   # flat: it can take more than usual
     elif m.var > 0.09:
         c *= 0.5   # already contrasty (or the clip spans a cut)
-    d["contrast"] += c
+    # tilt 0 -- this verb asks for the symmetric curve, and says so, so that a
+    # "crush" alongside it gets its share of the balance and no more.
+    _tilt_contrast(d, c, 0.0)
 
     # `pivot` has no verb, and this is why: the right pivot is measurable. Put
     # the S-curve's fixed point on the clip's own median luma so that adding
@@ -257,16 +305,52 @@ def _midtones(d: dict, k: float, item: Op, m: _Measured) -> None:
 
 
 def _shadows(d: dict, k: float, item: Op, m: _Measured) -> None:
-    u = k * STEP_SHADOWS
-    if k > 0:
-        # Blacks that already sit at 0.08 go milky fast; blacks on the rail have
-        # the full move available.
-        u *= float(np.clip(1.0 - m.floor / 0.10, 0.4, 1.0))
-    else:
-        # Nothing left to crush.
-        u *= float(np.clip(1.0 - 2.0 * m.crushed, 0.3, 1.0))
+    if k < 0:
+        # DOWN IS A CRUSH, AND A CRUSH IS THE TOE OF THE CURVE, not a negative
+        # lift. A uniform negative lift welds: it moves the darkest pixels down
+        # together onto 0 and they stay welded, which is precisely the argument
+        # `_highlights` already makes at the other rail and which nobody had
+        # applied at this one. Measured on a 20001-step ramp, shadow_lift -0.10
+        # puts 9.12% of the range on pure black, where contrast 0.44 with the
+        # balance in the shadows reaches y(0.08) 0.0326 against 0.0800 with
+        # 0.00% welded. Detail welded into the .cube is gone for good; a toe is
+        # reversible.
+        #
+        # It also does what no flat lift can: plain contrast 0.44 drags y(0.95)
+        # from 0.9500 to 0.9692, so a crush used to brighten the highlights.
+        # Tilted into the shadows it leaves them at 0.9517, which is the whole
+        # of "crush the blacks BUT KEEP THE HIGHLIGHTS SOFT".
+        #
+        # `crushed_low` for the reason the lift branch below consults it:
+        # pixels already on the rail are welded, and bending the toe under them
+        # buys nothing. Same 0.3 floor `_exposure` uses at the same rail.
+        damp = float(np.clip(1.0 - 2.0 * m.crushed, 0.3, 1.0))
+        _tilt_contrast(d, abs(k) * STEP_CRUSH * damp, -1.0)
+        # The toe is defined relative to `pivot`, so put the pivot on the clip's
+        # own median luma -- the same line `_contrast` uses, for the same
+        # reason. Without it the same balance bends a different part of a night
+        # exterior (p50 0.25) than of a bright one (p50 0.55), and the verb
+        # stops being footage-dependent, which is the whole point of this file.
+        if m.luma_p50 > 0.0:
+            d["pivot"] = float(np.clip(m.luma_p50, 0.25, 0.65))
+        # ...and ONLY "strong" is allowed to spend the black point as well.
+        # This is the one verb whose `amount` switches MECHANISM rather than
+        # only magnitude, and that is a deliberate answer to the ambiguity in
+        # the word rather than an accident: a "subtle crush" must not destroy
+        # shadow detail the export can never get back, but somebody saying
+        # "really crush it" is asking for exactly that. Total depth stays
+        # monotone across subtle < moderate < strong either way, so the ladder
+        # every other verb is held to still holds here.
+        excess = max(0.0, abs(k) - UNIT["moderate"])   # 0 until strong, 1.0 at strong
+        if excess:
+            d["shadow_lift"] -= STEP_WELD * excess * float(
+                np.clip(1.0 - 2.0 * m.crushed, 0.0, 1.0))
+        return
 
-    if k > 0 and m.headroom > 0.1:
+    # UP is a lift, and a lift is a black-point move -- unchanged. Blacks that
+    # already sit at 0.08 go milky fast; blacks on the rail have the full move.
+    u = k * STEP_SHADOWS * float(np.clip(1.0 - m.floor / 0.10, 0.4, 1.0))
+    if m.headroom > 0.1:
         # Room at the top: `offset` is the honest filmic fade — it lifts the
         # whole curve inside the CDL (step 2), and it is the field an ASC CDL
         # export can actually carry off the machine.
@@ -290,6 +374,42 @@ def _highlights(d: dict, k: float, item: Op, m: _Measured) -> None:
     elif k > 0:
         u *= float(np.clip(m.headroom / 0.25, 0.3, 1.0))  # same headroom rule as exposure
     d["highlight_lift"] += u
+
+
+def _shoulder(d: dict, k: float, item: Op, m: _Measured) -> None:
+    """How the top end APPROACHES white -- its shape, not its level.
+
+    `highlights` moves the bright half up or down; this bends it. The two are
+    different requests and the prompt says so, because "keep the highlights
+    soft" is not asking for them to be darker.
+    """
+    if k > 0:
+        u = k * STEP_SHOULDER
+        # A shoulder only does something where there ARE highlights: the knee
+        # sits at 1 - rolloff/2, so on a night exterior whose p99 is 0.45 there
+        # is nothing above it and rolling would spend legal white (spec._rolloff
+        # measures f(1) = 0.928 at rolloff 0.3) for no visible gain. This is the
+        # only measurement that separates "soft highlights" on a beach from the
+        # same three words indoors at night.
+        u *= float(np.clip(m.p99.max() / 0.8, 0.3, 1.0))
+        # ...and footage already welded to white gets MORE, because a shoulder
+        # is the only tool that turns a weld back into a gradient. `_highlights`
+        # already makes this argument; this is the same one.
+        u *= 1.0 + m.clipped
+        # max(), the same composition `_protect_highlights` uses below: a
+        # shoulder the grade NEEDS and a shoulder the user ASKED FOR are one
+        # knob and the larger wins. Both are exactly 0 at identity.
+        d["highlight_rolloff"] = min(MAX_SHOULDER, max(d["highlight_rolloff"], u))
+        return
+    # DOWN hardens the top. `highlight_rolloff` has no negative side -- there is
+    # no such thing as less shoulder than none -- so this is the curve instead:
+    # negative contrast tilted into the highlights steepens the approach to
+    # white.
+    u = abs(k) * STEP_HARDEN
+    # Already welded: hardening only welds more, the same damping shape
+    # `_exposure` and `_shadows` use at their own rails.
+    u *= float(np.clip(1.0 - 2.0 * m.clipped, 0.3, 1.0))
+    _tilt_contrast(d, -u, 1.0)
 
 
 def _warmth(d: dict, k: float, item: Op, m: _Measured) -> None:
@@ -359,6 +479,7 @@ _COMPILERS = {
     "midtones": _midtones,
     "shadows": _shadows,
     "highlights": _highlights,
+    "shoulder": _shoulder,
     "warmth": _warmth,
     "tint": _tint,
     "saturation": _saturation,

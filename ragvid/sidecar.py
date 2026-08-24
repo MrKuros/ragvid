@@ -1,7 +1,7 @@
 """Sidecars written next to an export: the lossless record and the portable one.
 
 A `.cube` is a per-pixel colour map, so `EffectSpec` (denoise, glow, softness,
-grain, vignette, fringe) cannot be in it — 6 of the spec's 43 numbers are
+grain, vignette, fringe) cannot be in it — 6 of the spec's 44 numbers are
 spatial and live only in render.py's filter chain. Nor can a REGION: a lookup
 table indexed by colour has nowhere to put an address, so a per-region grade
 (roadmap B1) is the same category of loss one step larger. Hand someone the
@@ -37,7 +37,7 @@ LOOK_FORMAT = "ragvid-look"
 LOOK_VERSION = 2
 
 CUBE_NOTE = (
-    "Lossless record of the grade. The accompanying .cube carries the 37 colour "
+    "Lossless record of the grade. The accompanying .cube carries the 38 colour "
     "fields of the BASE grade only; `effects` (denoise, glow, softness, grain, "
     "vignette, fringe) and `layers` (per-region grades) are spatial and cannot "
     "exist in a 3D LUT, so they are applied as an ffmpeg filter chain at render "

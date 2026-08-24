@@ -146,7 +146,7 @@ Two things a client must not get wrong:
 
 ### The spec object
 
-23 keys: 43 numbers and a `rationale` string. Every value shown above **is** the
+24 keys: 44 numbers and a `rationale` string. Every value shown above **is** the
 identity value, so a client can render "is this field moved?" by comparing
 against the literal defaults rather than tracking a baseline.
 
@@ -179,7 +179,15 @@ Two more consequences of the wider spec, both easy to get wrong:
   contrast, every hue band and every effect to identity. Send the `spec` you
   got from `/api/state` with your one field changed. Unknown keys are ignored
   rather than rejected, so a typo'd field name silently does nothing.
-- **`api_version` moves whenever this shape moves.** The spec grew from 8 keys
+- ****B3 added `contrast_balance` and did NOT move `api_version`, deliberately.**
+The gate exists so a stale page announces itself instead of silently dropping
+fields — and nothing is dropped here: the page enumerates no spec fields, and
+its one spec write (`POST /api/spec` from the Strength slider) spreads the
+server's own object, so a new key round-trips through an old page byte for
+byte. Bumping would have blanked every open tab for a change no client can
+observe. Bump it when a client could be wrong, not when the object grew.
+
+`api_version` moves whenever this shape moves.** The spec grew from 8 keys
   to 23, so a client written against the older contract will render a grade it
   cannot fully represent and will round-trip identity into every new field the
   moment it posts. Check `api_version` before trusting `spec`.
@@ -195,8 +203,8 @@ All return the same state object as `GET /api/state`.
 | `POST` | `/api/reference` | multipart `file`, or `{"path": "..."}` | Offline, no key, fast. |
 | `POST` | `/api/refine` | `{"instruction": "less blue"}` | Requires `planned`. Slow (network). |
 | `POST` | `/api/intent` | `{"intent": {"ops":[...], "strength":"full"}}` | The per-item strength path. Re-**compiles** the grade from the verbs against the cached stats — fast, no network. Send back the `intent` from `/api/state` with one `amount` changed, or with an op dropped to remove that move. A verb outside the vocabulary is a `400`. |
-| `POST` | `/api/spec` | `{"spec": {...}}` | The raw-spec path: the only way to reach a field no verb covers (`pivot`, per-band `lum`). Fast, no network. Full spec object — omitted keys reset to identity, this is not a patch. **Drops the intent**, since 43 numbers are not described by any verb list; `/api/state` then returns `"intent": null`. |
-| `POST` | `/api/balance` | `{"on": true}` | Turns auto-balance on or off. Re-compiles the current grade when there is an `intent` behind it, so the switch is something you see; a spec from anywhere else is left alone, because a balance already baked into 43 numbers cannot be decomposed back out. |
+| `POST` | `/api/spec` | `{"spec": {...}}` | The raw-spec path: the only way to reach a field no verb covers (`pivot`, per-band `lum`). Fast, no network. Full spec object — omitted keys reset to identity, this is not a patch. **Drops the intent**, since 44 numbers are not described by any verb list; `/api/state` then returns `"intent": null`. |
+| `POST` | `/api/balance` | `{"on": true}` | Turns auto-balance on or off. Re-compiles the current grade when there is an `intent` behind it, so the switch is something you see; a spec from anywhere else is left alone, because a balance already baked into 44 numbers cannot be decomposed back out. |
 | `POST` | `/api/undo` | — | Steps back one, *including* undoing the first grade back to the ungraded clip. `409` only when there is nothing left. |
 | `POST` | `/api/close` | — | Drops the project; back to the empty state. |
 | `POST` | `/api/revert` | `{"index": 0}` | Jump back to any step. `-1` is the ungraded clip. Undo is `revert` to the previous index. |

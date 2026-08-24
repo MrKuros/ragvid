@@ -353,7 +353,7 @@ class Region(BaseModel):
 class Layer(BaseModel):
     """One correction and where it lands. `spec` is a whole GradeSpec because a
     region's correction is not a lesser thing than a global one -- it is the
-    same 43 numbers pointed at fewer pixels."""
+    same 44 numbers pointed at fewer pixels."""
 
     region: Region
     spec: GradeSpec

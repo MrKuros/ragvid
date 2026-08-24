@@ -85,7 +85,11 @@ Each is a compiler pass plus a verb or two. **None adds a control to the screen.
 |---|---|---|---|
 | B1 | Regions — a grade that applies to part of the frame | **[have]** | "darken the top of the frame", "warm the left side", "brighten the middle" — geometric only; `GradeStack` now wraps `GradeSpec`, and `docs/ARCHITECTURE.md` rule 1 was revised in the same commit. |
 | B2 | Semantic masks (sky / foliage / person / water / buildings) | **[have]** | "make the sky moody". Local SegFormer-B0/ADE20K, 15.1 MB, behind `pip install ragvid[masks]`. `skin` stays a hue qualifier — ADE20K has no skin class, and a qualifier tracks a face through a cut where a per-frame matte does not. `compiler.py` and `render.py` needed zero changes, which is the proof it is a mask source and not an architecture. |
-| B3 | Curves (master, per-channel, hue-vs-hue, hue-vs-sat, lum-vs-sat) | **[none]** | "crush the blacks but keep the highlights soft" |
+| B3a | Master curve — independent toe and shoulder | **[have]** | "crush the blacks but keep the highlights soft". `contrast_balance` aims the existing S-curve at one end; `shadows down` bends the toe instead of welding it, and `shoulder` is the verb for the top end. Measured on rail-black footage: the old flat lift welded 7.37% of samples onto pure black at "moderate", the toe adds 0.00%. |
+| B3b | Hue-vs-hue | **[none]** | "push the greens toward yellow", "make the skin less orange" — `HueBand` is `(sat, lum)` and has no rotation term. |
+| B3c | Lum-vs-sat | **[none]** | "rich mids but keep the shadows grey" — `saturation` scales chroma by the same factor at every brightness. |
+| ~~B3d~~ | ~~Per-channel curves~~ | **[have]** | The CDL is already per-channel and independent (`power` moves red alone). It is a power law, so it cannot put a kink in one channel — nobody asks a sentence for that. |
+| ~~B3e~~ | ~~Hue-vs-sat, hue-vs-lum~~ | **[have]** | The six hue qualifiers, since before this row was written. `hue_blue.sat` moves a blue pixel and leaves a red one bit-for-bit alone. |
 | B4 | Real HSL qualifier (arbitrary volume, matte finesse, despill) | **[partial]** | "kill the sodium streetlights" — six fixed bands cannot isolate one colour |
 | B5 | Keyframes / change over time | **[none]** | "get darker as he walks into the tunnel" |
 | B6 | Protect / exclude verbs | **[have]** | "darken the top but don't touch the person". A protect is an intersection — it narrows a region, never weakens one. A colour target is refused rather than faked: a once-sampled skin matte would be worse than the `skin` hue qualifier, which follows a face through a cut. |
@@ -149,6 +153,26 @@ CDL the rest of your pipeline already understands.**
 6. **B1 + B2** — regions and semantic masks; the point at which the flat-spec
    rule is deliberately revised.
 7. **B3–B7** — one compiler pass at a time, no new UI for any of them.
+
+## Found while building B3, and not part of it
+
+**Negative contrast is badly reconstructed at 33³, and 65³ does not fix it.**
+`_inv_smoothstep(u) ~ sqrt(u/3)` near 0, so its derivative is unbounded at both
+ends and trilinear reconstruction is only first-order accurate there. Measured
+against exact `_s_curve` over 3e5 random points, in 8-bit code values:
+
+```
+contrast +1.00   33³ 0.21   65³ 0.05
+contrast -0.22   33³ 1.52   65³ 1.08
+contrast -0.44   33³ 3.04   65³ 2.15
+contrast -1.00   33³ 6.91   65³ 4.89
+```
+
+Pre-existing and undocumented — nothing about B3 caused it, and B3's own field
+was chosen partly to avoid inheriting it (`spec._s_curve` explains how). A fix
+is its own Tier A line: either escalate the LUT on `contrast < 0`, or replace
+the inverse-smoothstep leg with a curve whose derivative is bounded. Do not
+bundle it with a feature.
 
 ## The decision to make before B2
 

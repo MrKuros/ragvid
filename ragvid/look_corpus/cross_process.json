@@ -76,6 +76,7 @@
     "tint": 0.0,
     "contrast": 0.0,
     "pivot": 0.435,
+    "contrast_balance": 0.0,
     "exposure": 0.41293263464325936,
     "look_mix": 1.0,
     "highlight_rolloff": 0.15376927593831025,

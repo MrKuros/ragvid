@@ -178,7 +178,7 @@ API keys are the one thing the terminal cannot set — they are entered in the
 Settings panel and nowhere else, so a key can never reach your shell history or
 be read out of the process list by another user on the machine.
 
-A grade is **43 numbers**: 37 colour values baked into a `.cube` LUT, plus 6
+A grade is **44 numbers**: 38 colour values baked into a `.cube` LUT, plus 6
 spatial effects that ffmpeg applies around it. A LUT maps one pixel at a time
 and cannot see its neighbours, so a `.cube` taken into Resolve carries the
 colour and none of the effects.

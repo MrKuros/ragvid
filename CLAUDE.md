@@ -57,7 +57,7 @@ worse than falling back.
 
 | File | Job |
 |---|---|
-| `spec.py` | `GradeSpec` — 43 numbers, and `apply()`. The evaluation order is load-bearing; the docstring explains every position. |
+| `spec.py` | `GradeSpec` — 44 numbers, and `apply()`. The evaluation order is load-bearing; the docstring explains every position. |
 | `region.py` | `Region`, `Layer`, `GradeStack` — the container that lets a grade apply to part of a frame. |
 | `intent.py` | The typed verb vocabulary the model emits, plus `describe()` which renders it as English. |
 | `compiler.py` | `compile_stack` / `compile_intent` — verbs + measurements → numbers. Also auto-balance. |
@@ -67,7 +67,7 @@ worse than falling back.
 | `logspace.py` | S-Log3 / V-Log / C-Log3 / LogC3 / N-Log transfer functions and generated conversion LUTs. |
 | `render.py` | The ffmpeg filter chain: technical LUT → grade → region layers → spatial effects. |
 | `segment.py` | The local segmentation model behind semantic masks. Optional extra; `onnxruntime` is imported lazily. |
-| `refine.py` | "Less blue" — edits the verb list on the intent path, the 43 numbers on the direct one. |
+| `refine.py` | "Less blue" — edits the verb list on the intent path, the 44 numbers on the direct one. |
 | `sidecar.py` | `look.json` (lossless) and `.cdl` (universal) written beside every export. |
 | `vibe.py` | The system prompts and the planning entry points. |
 | `looks.py` | The retrieval corpus, used by the direct path only. |
@@ -160,26 +160,33 @@ by construction.
 
 ## Where it stands
 
-Tier A is complete. Tier C is complete. Tier B is complete except B3 curves,
-B4 a real HSL qualifier and B5 keyframes. Packaged for PyPI as 0.2.0
+Tier A is complete. Tier C is complete. Tier B is complete except B3b
+hue-vs-hue, B3c lum-vs-sat, B4 a real HSL qualifier and B5 keyframes. (B3 was
+five curve types on paper and three of them turned out to be already shipped —
+see the split rows in the roadmap.) Packaged for PyPI as 0.2.0
 (`uv tool install ragvid`) — the wheel is verified from a clean venv, but the
 tag has not been pushed and nothing is published yet.
 
-A sentence can name **what** to do (17 verbs), **how much** (three amounts plus
+A sentence can name **what** to do (18 verbs), **how much** (three amounts plus
 a whole-look strength), **which pixels** — by colour (ten hue families,
 including skin), by place (top/bottom/left/right/center/edges) or by thing
 (sky/foliage/person/water/buildings, via the local segmentation model) — and
 **what to spare** (`protect`). Refine edits that list rather than the numbers,
 so a second sentence no longer destroys the first one's regions.
 
+A sentence can also name **the shape of the tone curve**: `shadows down` bends
+the toe instead of translating it, and `shoulder` is the top end. On rail-black
+footage the old flat lift welded 7.37% of samples onto pure black at
+"moderate"; the toe adds 0.00%. Only `strong` is allowed to spend the black
+point — the one verb whose `amount` switches mechanism rather than magnitude.
+
 Semantic masks are sampled **once**, not per frame: inference is 244 ms, so a
 10-minute clip would cost 58 minutes of segmentation against a 14-minute
 export. The honest consequence — a subject leaving frame keeps its grade — is
 documented in `segment.py`.
 
-Next: **B3 curves** ("crush the blacks but keep the highlights soft") is the
-largest remaining gap in what a sentence can express. After that the honest
-1.0 blocker is not a feature: nobody has yet graded real footage with this,
+Next: **B3b hue-vs-hue** and **B3c lum-vs-sat**, one compiler pass each. After
+that the honest 1.0 blocker is not a feature: nobody has yet graded real footage with this,
 and the CI matrix has only just gained Windows and macOS — whose first run
 already turned up an `os.fchmod` call that made the app unconfigurable there.
 

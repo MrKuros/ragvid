@@ -40,6 +40,49 @@ IMG = np.clip(
     0.06, 0.76,
 )
 
+# IMG tops out at 0.76 and _rolloff's knee sits at 1 - rolloff/2, i.e. never
+# below 0.5, so a shoulder is correctly a NO-OP on it -- there is nothing above
+# the knee to roll. The shoulder verb therefore needs its own footage. 1.28x
+# lands the maximum at 0.973: high enough to have highlights, low enough that
+# nothing touches the rail, which the exact `hold` assertions require.
+BRIGHT_IMG = IMG * 1.28
+
+# ...and the shoulder needs a NARROWER window than BRIGHT to be measured in.
+# BRIGHT is the top tenth, which on this footage spans luma 0.80-0.97, and a
+# shoulder barely touches its lower half -- measured, the top decile's spread
+# moves the WRONG WAY for `dir: down` (-0.0347 against a base of -0.0350)
+# purely because most of those pixels sit below the knee. The top fiftieth
+# spans 0.88-0.97 and separates both directions cleanly. The window is where
+# the verb acts, not a tolerance chosen to make a test pass.
+HIGH = np.argsort(BRIGHT_IMG @ LUMA)[-len(BRIGHT_IMG) // 50:]
+
+# ...and the crush needs footage whose blacks are ON THE RAIL, because that is
+# the only place the welding argument bites. IMG's floor is 0.06 by design, so
+# a flat negative lift has 0.06 of room before it destroys anything and the old
+# and new mechanisms look identical there. Real footage does not have that
+# room: this frame measures crushed_low 0.0677 and 2.67% of its samples are
+# already at zero before any grade runs.
+_drng = np.random.default_rng(1)
+DARK_IMG = np.clip(
+    _drng.uniform(0.0, 0.62, size=(20000, 1)) + _drng.normal(0.0, 0.04, size=(20000, 3)),
+    0.0, 0.80,
+)
+_dark_order = np.argsort(DARK_IMG @ LUMA)
+DARK_LOW = _dark_order[: len(DARK_IMG) // 10]
+
+
+def m_dark_low(o):
+    return float((o[DARK_LOW] @ LUMA).mean())
+
+
+def welded(after, before=DARK_IMG):
+    """Fraction of samples this grade ADDED to pure black.
+
+    Net of what the footage already had, or the measurement reads the source's
+    own crushed pixels as damage the grade did.
+    """
+    return float((after <= 0.0).mean()) - float((before <= 0.0).mean())
+
 # The identity grade's own output, as the oracle for "this changed nothing".
 # NOT IMG itself: apply()'s saturation lerp costs ~1 ulp on arbitrary floats
 # (spec.py's docstring is about exactly this), so `== IMG` would be asserting a
@@ -70,6 +113,21 @@ def stats_of(img: np.ndarray, **override) -> ClipStats:
 
 
 STATS = stats_of(IMG)
+BRIGHT_STATS = stats_of(BRIGHT_IMG)
+DARK_STATS = stats_of(DARK_IMG)
+
+# The acceptance test needs one clip that has both ends: blacks on the rail for
+# the crush half and real highlights for the shoulder half. Neither IMG (floor
+# 0.06, ceiling 0.76) nor DARK_IMG (ceiling 0.80) has both.
+_frng = np.random.default_rng(2)
+FULL_IMG = np.clip(
+    _frng.uniform(0.0, 0.97, size=(20000, 1)) + _frng.normal(0.0, 0.04, size=(20000, 3)),
+    0.0, 0.985,
+)
+FULL_STATS = stats_of(FULL_IMG)
+_full_order = np.argsort(FULL_IMG @ LUMA)
+FULL_LOW = _full_order[: len(FULL_IMG) // 10]
+FULL_HIGH = _full_order[-len(FULL_IMG) // 50:]
 
 
 def clip_stats(**kw) -> ClipStats:
@@ -102,6 +160,16 @@ def m_magenta(o):   return float((o[:, 0].mean() + o[:, 2].mean()) / 2 - o[:, 1]
 def m_dark(o):      return float((o[DARK] @ LUMA).mean())
 def m_mid(o):       return float((o[MID] @ LUMA).mean())
 def m_bright(o):    return float((o[BRIGHT] @ LUMA).mean())
+def m_soft(o):
+    """NEGATED spread of the brightest fiftieth, so "up" means "softer".
+
+    A shoulder COMPRESSES the top end -- it does not move it. Measuring the
+    mean would read a roll-off and a darkening as the same thing, which is
+    exactly the distinction this verb exists to make against `highlights`.
+    """
+    return -float((o[HIGH] @ LUMA).std())
+
+
 def m_dark_teal(o): return float((o[DARK, 2] - o[DARK, 0]).mean())
 def m_bright_teal(o): return float((o[BRIGHT, 2] - o[BRIGHT, 0]).mean())
 
@@ -125,6 +193,11 @@ CASES: dict[str, dict] = {
     # whose mask is exactly 0 above luma 0.5.
     "shadows": dict(moment=m_dark, hold=(m_bright, 1e-12), stats=stats_of(IMG, p99=RGB.of(0.97))),
     "highlights": dict(moment=m_bright, hold=(m_dark, 1e-12)),
+    # The shoulder bends the top end without moving the bottom AT ALL:
+    # spec._rolloff is `np.where(x <= knee, x, ...)`, so below the knee it
+    # returns its input bitwise. 1e-12 is an exact claim and it can hold.
+    "shoulder": dict(moment=m_soft, hold=(m_dark, 1e-12),
+                     img=BRIGHT_IMG, stats=BRIGHT_STATS),
     "warmth": dict(moment=m_rb, hold=(m_luma, 0.005)),
     "tint": dict(moment=m_magenta, hold=(m_luma, 0.01)),
     # The saturation lerp is exactly luma-preserving until something clips.
@@ -182,8 +255,8 @@ def test_the_rationale_is_the_sentences_and_nothing_else():
 def test_each_verb_moves_its_own_moment_and_leaves_the_others_alone(op):
     case = CASES[op]
     st = case.get("stats", STATS)
-    before = IMG
-    after = out(one(op, **case.get("kw", {})), st)
+    before = case.get("img", IMG)
+    after = out(one(op, **case.get("kw", {})), st, before)
 
     moved = case["moment"](after) - case["moment"](before)
     assert moved > 1e-4, f"{op}: measured no effect ({moved:.2e})"
@@ -205,9 +278,10 @@ def test_down_is_the_opposite_of_up(op):
     case = CASES[op]
     st = case.get("stats", STATS)
     kw = case.get("kw", {})
-    base = case["moment"](IMG)
-    assert case["moment"](out(one(op, dir="down", **kw), st)) < base < \
-           case["moment"](out(one(op, dir="up", **kw), st))
+    img = case.get("img", IMG)
+    base = case["moment"](img)
+    assert case["moment"](out(one(op, dir="down", **kw), st, img)) < base < \
+           case["moment"](out(one(op, dir="up", **kw), st, img))
 
 
 @pytest.mark.parametrize("op,field", sorted(EFFECT_CASES.items()))
@@ -219,6 +293,153 @@ def test_texture_verbs_reach_their_effect(op, field):
     assert np.array_equal(spec.apply(IMG), IDENTITY_OUT)
 
 
+# ---- B3: the curve ---------------------------------------------------------
+
+
+def test_a_gentle_crush_adds_no_welded_black():
+    """The defect this rewrite exists for, measured where it actually bites.
+
+    "Crush the blacks" used to compile to a negative `shadow_lift` -- the
+    WELDING mechanism `_highlights` already refuses at the other rail. It moves
+    the darkest pixels down together onto 0 and they stay there, and detail
+    welded into the .cube is gone for good.
+
+    Measured on DARK_IMG, whose blacks are on the rail (crushed_low 0.0677):
+
+        amount     old welded   new welded
+        subtle          4.30%        2.67%   <- the footage's own, untouched
+        moderate        7.37%        2.67%
+
+    So this FAILS pre-change on both amounts. IMG would not have caught it: its
+    floor is 0.06, so a flat lift has room to spare there and the two
+    mechanisms look identical.
+    """
+    for amount in ("subtle", "moderate"):
+        after = out(one("shadows", amount, dir="down"), DARK_STATS, DARK_IMG)
+        assert welded(after) == 0.0, f"{amount} welded {welded(after):.2%} onto black"
+        assert m_dark_low(after) < m_dark_low(DARK_IMG), f"{amount} did not deepen"
+
+
+def test_only_a_strong_crush_is_allowed_to_spend_the_black_point():
+    """`amount` switches MECHANISM on this one verb, which no other verb does.
+
+    A "subtle crush" must not destroy shadow detail the export can never get
+    back; "really crush it" is asking for exactly that. Deliberate -- pinned
+    here so it cannot be quietly undone, along with the property it must not
+    cost: depth is still monotone across the ladder.
+    """
+    added, depth = [], []
+    for amount in AMOUNTS:
+        after = out(one("shadows", amount, dir="down"), DARK_STATS, DARK_IMG)
+        added.append(welded(after))
+        depth.append(m_dark_low(DARK_IMG) - m_dark_low(after))
+
+    assert added[0] == 0.0 and added[1] == 0.0, "a gentle crush welded something"
+    assert added[2] > 0.0, "a strong crush never reached the black point"
+    assert depth[0] < depth[1] < depth[2], dict(zip(AMOUNTS, depth))
+
+
+def test_the_crush_reaches_its_depth_more_cheaply_than_a_flat_lift():
+    """The claim in one version, with no HEAD to compare against.
+
+    Bend the toe and translate it to the SAME measured depth, then count what
+    each destroyed. A flat `shadow_lift` is what this verb used to compile to,
+    so pre-change the two sides of this test are the same grade and it ties
+    rather than passes.
+    """
+    after = out(one("shadows", "strong", dir="down"), DARK_STATS, DARK_IMG)
+    target = m_dark_low(DARK_IMG) - m_dark_low(after)
+
+    # The flat lift that reaches the same depth, found by bisection so the
+    # comparison is at equal effect rather than at equal setting.
+    lo, hi = 0.0, 0.5
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        flat = GradeSpec(shadow_lift=-mid).apply(DARK_IMG)
+        if m_dark_low(DARK_IMG) - m_dark_low(flat) < target:
+            lo = mid
+        else:
+            hi = mid
+    flat = GradeSpec(shadow_lift=-hi).apply(DARK_IMG)
+
+    assert abs((m_dark_low(DARK_IMG) - m_dark_low(flat)) - target) < 1e-4
+    assert welded(after) < welded(flat), (
+        f"the toe welded {welded(after):.2%} against the flat lift's {welded(flat):.2%} "
+        "at the same depth")
+
+
+def test_a_crush_is_damped_when_the_blacks_are_already_gone():
+    """Pixels already on the rail are welded; bending the toe under them buys
+    nothing. Same argument -- and the same 0.3 floor -- `_exposure` uses."""
+    clean = compile_intent(one("shadows", dir="down"), clip_stats(crushed_low=0.0))
+    gone = compile_intent(one("shadows", dir="down"), clip_stats(crushed_low=0.3))
+    assert clean.contrast > 2.0 * gone.contrast > 0.0
+
+
+def test_a_shoulder_is_scaled_by_whether_the_clip_HAS_highlights():
+    """The knee sits at 1 - rolloff/2, so on a night exterior whose p99 is 0.45
+    there is nothing above it and rolling only spends legal white for no
+    visible gain. p99 is the only field that separates the two."""
+    beach = compile_intent(one("shoulder"), clip_stats(p99=RGB.of(0.98), clipped_high=0.05))
+    dusk = compile_intent(one("shoulder"), clip_stats(p99=RGB.of(0.45)))
+    night = compile_intent(one("shoulder"), clip_stats(p99=RGB.of(0.30)))
+    # Measured: 0.3150 / 0.1687 / 0.1125 at p99 0.98 / 0.45 / 0.30. Damped, not
+    # refused -- the verb still has to do something it was asked to do.
+    assert beach.highlight_rolloff > 2.0 * night.highlight_rolloff > 0.0
+    assert beach.highlight_rolloff > dusk.highlight_rolloff > night.highlight_rolloff
+
+
+def test_a_shoulder_stays_inside_the_range_the_project_calls_sane():
+    """compiler.py's step sizes are chosen so "strong" lands inside the ranges
+    vibe.py declares to the direct-path model, and highlight_rolloff's is
+    [0..0.6]. The `1 + clipped_high` boost broke that on heavily clipped
+    footage -- it reached 1.000, which pulls legal white to 0.760. A verb may
+    be damped by the measurement, never amplified out of range by it."""
+    for st in (clip_stats(p99=RGB.of(0.98)),
+               clip_stats(p99=RGB.of(1.0), clipped_high=0.30),
+               clip_stats(p99=RGB.of(1.0), clipped_high=0.89)):
+        for amount in AMOUNTS:
+            got = compile_intent(one("shoulder", amount), st).highlight_rolloff
+            assert 0.0 < got <= 0.6, f"{amount} on {st.clipped_high}: {got}"
+
+
+def test_the_shoulder_composes_with_the_one_the_grade_derives_for_itself():
+    """`_protect_highlights` adds a shoulder when a grade would blow the
+    whites, and this verb asks for one directly. They are one knob and the
+    larger wins -- max(), not +=, or the two would stack into a shoulder
+    nobody asked for."""
+    st = clip_stats(p99=RGB.of(0.98))
+    asked = compile_intent(one("shoulder", "strong"), st).highlight_rolloff
+    both = compile_intent(Intent(ops=[Op(op="shoulder", amount="strong"),
+                                      Op(op="exposure", amount="strong")]), st)
+    derived = compile_intent(one("exposure", "strong"), st).highlight_rolloff
+    assert both.highlight_rolloff == max(asked, derived)
+
+
+def test_the_sentence_b3_exists_for():
+    """docs/ROADMAP.md B3: "crush the blacks but keep the highlights soft".
+
+    Four clauses, so four assertions. Pre-change TWO of them were unreachable:
+    `shadows down` welded its depth onto the black rail instead of bending the
+    toe, and no verb reached `highlight_rolloff` at all, so the second half of
+    the sentence moved literally nothing.
+
+    "Crush" here is `moderate`, which is what the sentence says -- it is not
+    "really crush it", and only `strong` is allowed to spend the black point.
+    """
+    before = FULL_IMG
+    after = out(Intent(ops=[Op(op="shadows", dir="down"),
+                            Op(op="shoulder", dir="up")]), FULL_STATS, before)
+
+    def low(o):  return float((o[FULL_LOW] @ LUMA).mean())
+    def high(o): return float((o[FULL_HIGH] @ LUMA).std())
+
+    assert low(after) < low(before) - 0.004, "the blacks are not crushed"
+    assert welded(after, before) == 0.0, "it welded shadow detail onto black"
+    assert high(after) < high(before) * 0.9, "the highlights are not softer"
+    assert float((after >= 1.0).mean()) == 0.0, "it blew the highlights out"
+
+
 # ---- monotonic magnitudes -------------------------------------------------
 
 
@@ -226,8 +447,10 @@ def test_texture_verbs_reach_their_effect(op, field):
 def test_subtle_is_less_than_moderate_is_less_than_strong(op):
     case = CASES[op]
     st = case.get("stats", STATS)
-    base = case["moment"](IMG)
-    got = [case["moment"](out(one(op, a, **case.get("kw", {})), st)) - base for a in AMOUNTS]
+    img = case.get("img", IMG)
+    base = case["moment"](img)
+    got = [case["moment"](out(one(op, a, **case.get("kw", {})), st, img)) - base
+           for a in AMOUNTS]
     assert got[0] < got[1] < got[2], dict(zip(AMOUNTS, got))
     assert got[0] > 0.0
 

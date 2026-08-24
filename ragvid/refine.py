@@ -14,8 +14,8 @@ on the direct path for exactly that reason (vibe.py's docstring has the numbers)
 
 `refine_spec` is the fallback, for an endpoint that cannot constrain decoding to
 the Intent schema and for a grade that has no Intent behind it at all (a photo
-match, a hand-edited spec). It hands the model all 43 numbers and takes 43 back,
-so it FLATTENS: 43 numbers can only describe the whole frame, and any regional
+match, a hand-edited spec). It hands the model all 44 numbers and takes 44 back,
+so it FLATTENS: 44 numbers can only describe the whole frame, and any regional
 layer is dropped. That is the defect the intent path exists to fix, and it stays
 here because on those endpoints the alternative is no refinement at all.
 
@@ -23,7 +23,7 @@ MEASURED, not argued (one two-turn run of scripts/bakeoff_intent.py --refine,
 gpt-oss-120b, six sentences on test_files/test.mp4, every second-turn grade
 applied to real frames and re-measured): the verb list took 15/16 checks and 5/6
 sentences clean at 4116 tokens a sentence; the 43-number path took 13/16 and 4/6
-at 8332. The two it alone got right are the two a fresh set of 43 numbers cannot
+at 8332. The two it alone got right are the two a fresh set of 44 numbers cannot
 express, both of them relative:
 
   * "a bit less warm" moved the direct path's measured warmth by -0.0040 -- it
@@ -62,7 +62,7 @@ YOU ARE NOW REFINING AN EXISTING GRADE, NOT CREATING ONE.
 You will be given the current spec as JSON plus a short adjustment request. Return the
 FULL spec — every field — not a diff and not a patch.
 
-THE COPY RULE, WHICH MATTERS MORE THAN EVERY OTHER RULE HERE. The spec has 43 numbers
+THE COPY RULE, WHICH MATTERS MORE THAN EVERY OTHER RULE HERE. The spec has 44 numbers
 and the request is about one or two of them. Work like this:
 
   1. Transcribe the current spec you were given, verbatim, field for field.
@@ -79,7 +79,7 @@ request, you are copying, not deciding. When in doubt, copy.
 This applies with full force to the fields that are easy to forget because they are
 nested or usually zero: shadow_tint, highlight_tint, shadow_lift, highlight_lift, the
 six hue bands (hue_red, hue_yellow, hue_green, hue_cyan, hue_blue, hue_magenta), every
-key inside effects, exposure, highlight_rolloff, look_mix and pivot. If the current spec
+key inside effects, exposure, highlight_rolloff, look_mix, pivot and contrast_balance. If the current spec
 has effects.grain 0.25 and the user says "cooler", the answer still has grain 0.25.
 
 - Change the fields you do touch by a perceptible but modest amount: roughly one nudge

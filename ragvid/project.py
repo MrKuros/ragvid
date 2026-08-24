@@ -376,8 +376,8 @@ class Project:
         names it. "A stop brighter" and "half strength" are edits to an op's
         amount and to intent.strength, which is roadmap B7.
 
-        Otherwise it falls back to refine_spec, which hands the model 43 numbers
-        and takes 43 back. That FLATTENS: 43 numbers can only describe the whole
+        Otherwise it falls back to refine_spec, which hands the model 44 numbers
+        and takes 44 back. That FLATTENS: 44 numbers can only describe the whole
         frame, so regional layers are dropped exactly as in set_spec. It is what
         a photo match, a hand-edited spec and a non-schema endpoint get, and on
         those the alternative is no refinement at all.
@@ -417,12 +417,12 @@ class Project:
         way in -- glow=50 is a legal float and a gblur sigma that hangs ffmpeg.
         Sanitizing at the caller would leave every sibling caller unguarded.
 
-        No Intent goes with it, ever. A spec that arrived as 43 numbers is not
+        No Intent goes with it, ever. A spec that arrived as 44 numbers is not
         described by any list of verbs, and carrying the previous one forward
         would leave sentences on screen claiming things the numbers no longer
         do. Editing a grade that HAS an Intent goes through set_intent instead.
 
-        No regional layers either, and for the same reason: 43 numbers describe
+        No regional layers either, and for the same reason: 44 numbers describe
         the whole frame, so a spec that arrived this way IS the whole grade.
         Carrying layers forward would keep applying a correction to a corner of
         an image nothing in the incoming spec knows about. set_intent is the
@@ -456,7 +456,7 @@ class Project:
         from, so the toggle is something you SEE rather than a preference that
         takes effect on the next prompt. There is nothing to re-compile for a
         spec that came from anywhere else, and it is left alone -- turning the
-        setting off cannot undo a balance that is already baked into 43 numbers
+        setting off cannot undo a balance that is already baked into 44 numbers
         nobody can decompose.
         """
         if on == self.session.auto_balance:

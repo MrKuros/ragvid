@@ -4,6 +4,34 @@ What changed, described by what it does for you rather than by which files
 moved. Versions follow [semantic versioning](https://semver.org): while ragvid
 is on `0.x`, a middle-number bump can change the shape of a saved grade.
 
+## Unreleased
+
+### Saying what you want
+
+- **"Crush the blacks but keep the highlights soft" now works.** It used to be
+  two requests ragvid could only half-hear. Deepening the blacks meant sliding
+  the dark part of the picture downwards until some of it hit pure black and
+  stayed there — detail gone, and gone for good once the look is rendered. It
+  now bends the bottom of the picture instead of sliding it, so the darkest
+  tones get closer together without landing on top of each other. Counted in
+  the 0–255 levels a finished file is made of, the old way flattened levels
+  1, 2, 3 and 4 all onto 0; the new one leaves every one of them distinct, and
+  reaches a deeper black doing it. Say "really crush them" and it will still
+  spend the black point, because that is what those words mean.
+- **You can ask for the highlights' shape, not just their brightness.** "Keep
+  the highlights soft", "don't let it clip", "let the whites go hard" —
+  previously there was no way to say any of it, and those words moved nothing
+  at all. Now they bend the top end of the picture without making it brighter
+  or darker.
+- **Deepening the blacks no longer brightens the whites behind your back.**
+  Contrast was one knob doing both ends at once, so asking for one gave you the
+  other. On a test ramp, the old way pulled a black at 0.08 down to 0.054 but
+  dragged a white at 0.95 up to 0.969; it now reaches 0.033 and leaves the
+  white at 0.952.
+
+A grade is now 44 numbers rather than 43. Old projects, saved looks and
+`look.json` files all still open — the new one reads as "leave it alone".
+
 ## 0.2.0 — the first one you can install
 
 Until now ragvid existed only as a git checkout. This is the first release on
