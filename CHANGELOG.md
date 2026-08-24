@@ -4,7 +4,14 @@ What changed, described by what it does for you rather than by which files
 moved. Versions follow [semantic versioning](https://semver.org): while ragvid
 is on `0.x`, a middle-number bump can change the shape of a saved grade.
 
-## Unreleased
+## 0.2.0 — the first one you can install
+
+Until now ragvid existed only as a git checkout. This is the first release on
+PyPI: `uv tool install ragvid`, then `ragvid serve`.
+
+Version `0.1.0` was never published. If something on your machine reports it,
+that is an editable install from a checkout, not a release, and the code behind
+it can be anything from the last three days of development.
 
 ### Saying what you want
 
@@ -32,16 +39,26 @@ is on `0.x`, a middle-number bump can change the shape of a saved grade.
 A grade is now 44 numbers rather than 43. Old projects, saved looks and
 `look.json` files all still open — the new one reads as "leave it alone".
 
-## 0.2.0 — the first one you can install
+### Looking back over what you tried
 
-Until now ragvid existed only as a git checkout. This is the first release on
-PyPI: `uv tool install ragvid`, then `ragvid serve`.
+- **Clicking an old prompt no longer throws away the newer ones.** It used to
+  jump straight back and delete everything after it, with no way to return. Now
+  a click just *shows* you that step — what it did, and the settings it used —
+  in the column beside the list. Going back to it is a button you press on
+  purpose, and it keeps everything else.
+- **One row per thing you asked for.** Nudging a slider or switching a move off
+  still counts as a step you can undo, but those adjustments now fold into the
+  prompt they belong to, instead of filling the list with "adjusted, adjusted,
+  adjusted".
+- **A delete button** — the only thing in that list that removes anything. It
+  asks first, and it takes a prompt together with the adjustments you made to it.
 
-Version `0.1.0` was never published. If something on your machine reports it,
-that is an editable install from a checkout, not a release, and the code behind
-it can be anything from the last three days of development.
+### Fixed
 
-### Saying what you want
+- A broken-image icon sat in the corner of the preview whenever the live preview
+  was running.
+
+### How it decides
 
 - **You describe, ragvid decides the numbers.** The AI service no longer invents
   colour values. It picks from a fixed list of 16 things a colourist does —
