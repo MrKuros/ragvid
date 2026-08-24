@@ -567,8 +567,12 @@ def test_awkward_mask_filename_survives_the_filtergraph_parser(tmp_path):
     """Same escaping contract the cube path has: the mask is a file path inside
     a filter option, so a comma or a colon in it must not split the graph."""
     from ragvid.region import for_target
+    from ragvid.platform import is_windows
 
-    d = tmp_path / "wei,rd: dir"
+    # Windows forbids ':' in a filename -- but every path there already carries
+    # one in the drive letter, so the colon half of the contract is exercised
+    # anyway and only the comma has to be spelled out by hand.
+    d = tmp_path / ("wei,rd dir" if is_windows() else "wei,rd: dir")
     layers = [(darken_cube(tmp_path / "c.cube"),
                for_target("top").write_png(d / "ma,sk.png", W, H))]
     out = str(tmp_path / "f.png")

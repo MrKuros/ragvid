@@ -37,10 +37,11 @@ def bake_cube(spec: GradeSpec, out_path: str, size: int | None = None) -> str:
     d = os.path.dirname(out_path)
     if d:
         os.makedirs(d, exist_ok=True)
-    # newline="\n": a .cube is an interchange file. Text mode on Windows would
-    # emit CRLF -- harmless to ffmpeg and to read_cube, but it makes the same
-    # grade a different file on a different host for no reason at all.
-    with open(out_path, "w", newline="\n") as f:
+    # newline="\n" and encoding= for the same reason: a .cube is an interchange
+    # file, and neither its line endings nor its byte encoding may depend on the
+    # host. Text mode on Windows would emit CRLF and encode as cp1252, which
+    # makes the same grade a different file on a different machine.
+    with open(out_path, "w", newline="\n", encoding="utf-8") as f:
         f.write(
             f'TITLE "ragvid"\nLUT_3D_SIZE {size}\nDOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\n'
         )
@@ -51,7 +52,13 @@ def bake_cube(spec: GradeSpec, out_path: str, size: int | None = None) -> str:
 def read_cube(path: str) -> tuple[int, np.ndarray]:
     size = None
     rows = []
-    with open(path) as f:
+    # A vendor .cube is not ours and its TITLE can hold anything -- an em dash,
+    # an accented camera name. Text mode defaults to cp1252 on Windows, where a
+    # byte outside it aborts the whole read with UnicodeDecodeError before the
+    # header is even skipped. errors="replace" because only the DATA lines are
+    # parsed and those are ASCII digits: a mangled title costs nothing, a
+    # refused file costs the user their log conversion.
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.split("#")[0].strip()
             if not line:

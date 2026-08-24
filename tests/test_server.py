@@ -12,6 +12,7 @@ resets them and points the work dir at tmp_path — a test must never write into
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 import time
@@ -866,9 +867,12 @@ def test_a_key_can_be_set_and_cleared_from_the_ui(api, tmp_path):
     groq = [p for p in r.json["providers"] if p["name"] == "groq"][0]
     assert groq["configured"] is True and groq["hint"] == "…6789"
 
-    # It really landed on disk, and only its owner can read it.
+    # It really landed on disk, and only its owner can read it. The mode half
+    # is POSIX-only for the reason conftest.posix_modes gives; the rest of this
+    # test is the endpoint's contract and runs everywhere.
     assert settings.key("groq", "GROQ_API_KEY") == SENTINEL
-    assert stat.S_IMODE(settings.path().stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(settings.path().stat().st_mode) == 0o600
 
     # Clearing removes it from the file rather than blanking it.
     api.post("/api/key", {"provider": "groq", "key": None})
@@ -980,7 +984,7 @@ def test_the_page_and_the_server_agree_on_the_api_version():
     is the check that makes the two move together."""
     import re
 
-    page = server.INDEX.read_text()
+    page = server.INDEX.read_text(encoding="utf-8")
     found = re.search(r"const EXPECTED_API = (\d+);", page)
     assert found, "index.html no longer declares EXPECTED_API"
     assert int(found.group(1)) == server.API_VERSION
@@ -988,7 +992,7 @@ def test_the_page_and_the_server_agree_on_the_api_version():
 
 def test_the_settings_panel_never_puts_a_key_into_its_input():
     """The one UI rule that cannot be checked from the Python side at runtime."""
-    page = server.INDEX.read_text()
+    page = server.INDEX.read_text(encoding="utf-8")
     assert 'id="keyInput"' in page and 'type="password"' in page
     assert '$("keyInput").value = "";' in page
 
@@ -1064,7 +1068,7 @@ def test_the_page_offers_every_format_the_module_implements(api):
     the check that stops the list drifting from logspace.NAMES."""
     from ragvid import logspace
 
-    page = server.INDEX.read_text()
+    page = server.INDEX.read_text(encoding="utf-8")
     for name in logspace.NAMES:
         assert f'<option value="{name}">' in page, f"{name} is not offered in the UI"
 
@@ -1224,7 +1228,7 @@ def test_the_page_renders_the_intent_and_no_longer_ships_the_slider_panel():
     """C4 replaced the 43-slider panel outright. Keeping both surfaces is the
     complexity this tool exists to avoid, so the old one must be gone -- not
     merely collapsed behind a disclosure."""
-    page = server.INDEX.read_text()
+    page = server.INDEX.read_text(encoding="utf-8")
     assert 'id="did"' in page and "/api/intent" in page
     # The balance switch lives in that same list, not as a checkbox elsewhere.
     assert "/api/balance" in page and 'type="checkbox"' not in page

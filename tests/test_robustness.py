@@ -11,6 +11,7 @@ from PIL import Image
 from ragvid import cli, render
 from ragvid.errors import ProviderNotConfigured, RateLimited
 from ragvid.lut import bake_cube
+from ragvid.platform import is_windows
 from ragvid.providers.groq import GroqProvider, parse_reset
 from ragvid.session import SESSION_DIR
 from ragvid.spec import GradeSpec
@@ -32,7 +33,17 @@ HOSTILE = [
 def test_hostile_cube_paths_reach_lut3d_intact(tmp_path, name):
     """The LUT must actually apply -- not be dropped, mis-parsed, or shell-expanded."""
     cube = tmp_path / name
-    bake_cube(GradeSpec(saturation=0.0), str(cube))  # greyscale: visible in the output
+    try:
+        bake_cube(GradeSpec(saturation=0.0), str(cube))  # greyscale: visible in output
+    except OSError as exc:
+        # Windows cannot spell all four: a single character followed by ':' is a
+        # DRIVE, not a filename. What these pin is ffmpeg's filtergraph parser,
+        # which is the same on every host, so the Linux and macOS runners carry
+        # the ones this filesystem refuses. Never skipped elsewhere -- a POSIX
+        # host that cannot create one of these has a real failure to report.
+        if not is_windows():
+            raise
+        pytest.skip(f"this filesystem cannot name {name!r}: {exc}")
     out = tmp_path / "sheet.png"
 
     render.render_preview(SAMPLE, str(cube), str(out), n_frames=2)

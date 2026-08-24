@@ -97,3 +97,16 @@ def _isolate_settings(tmp_path, monkeypatch):
                 "RAGVID_API_KEY", "RAGVID_BASE_URL", "RAGVID_PROVIDER",
                 "RAGVID_MODEL"):
         monkeypatch.delenv(var, raising=False)
+
+
+# A file mode assertion is a POSIX assertion. Windows has no mode bits at all:
+# stat() there synthesises S_IWRITE from the read-only attribute, so S_IMODE
+# reports 0o666 for every writable file and 0o444 for every read-only one, and
+# `== 0o600` can never hold. settings.save() already documents the platform's
+# own answer to the same question -- the per-user ACL %APPDATA% inherits -- and
+# skips the fchmod there, so the code under test is behaving correctly and only
+# the assertion is unportable. Skipped rather than relaxed: an assertion that
+# passes on 0o666 is not an assertion about a private file.
+posix_modes = pytest.mark.skipif(
+    os.name == "nt", reason="Windows has no POSIX mode bits; see settings.save()"
+)

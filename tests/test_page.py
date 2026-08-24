@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from ragvid import server
+from ragvid import render, server
 
 HARNESS = Path(__file__).parent / "page_harness.js"
 MARKER = "// PAGE_SOURCE_HERE"
@@ -42,8 +42,14 @@ def _run_harness(page: str, tmp_path: Path) -> subprocess.CompletedProcess:
     harness = HARNESS.read_text(encoding="utf-8")
     assert MARKER in harness
     js = tmp_path / "harness.js"
-    js.write_text(harness.replace(MARKER, _script(page)))
-    return subprocess.run(["node", str(js)], capture_output=True, text=True, timeout=60)
+    # encoding= on both, and neither is optional on Windows: the page carries
+    # emoji, Python's text mode there defaults to cp1252, and the failure is a
+    # UnicodeEncodeError on the write and a UnicodeDecodeError inside
+    # subprocess's reader THREAD -- which surfaces as `proc.stdout is None`
+    # rather than as an exception this call can catch.
+    js.write_text(harness.replace(MARKER, _script(page)), encoding="utf-8")
+    return subprocess.run(["node", str(js)], capture_output=True, text=True,
+                          encoding="utf-8", timeout=60)
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +69,8 @@ def test_the_harness_fails_against_the_previous_page(tmp_path):
     change, so the same harness must reject the page that came before it --
     otherwise it is asserting nothing about what was added."""
     git = subprocess.run(["git", "show", "HEAD:ragvid/web/index.html"],
-                         capture_output=True, text=True, cwd=Path(__file__).parent.parent)
+                         capture_output=True, text=True, encoding="utf-8",
+                         cwd=Path(__file__).parent.parent)
     if git.returncode != 0:
         pytest.skip("no committed index.html to compare against")
     # The marker is the newest thing the harness asserts about, not the oldest:
@@ -191,7 +198,11 @@ def _frame_rgb(video, at, cube=None, vf=None):
     """
     import numpy as np
 
-    chain = vf if vf else (f"lut3d=file={cube}" if cube else None)
+    # render._lut_filter, not a second spelling of it: a Windows cube path is
+    # `C:\...`, and an unescaped drive colon separates filter OPTIONS -- ffmpeg
+    # rejects the whole -vf with EINVAL. Reusing the library's escaping is also
+    # the point, since what this test compares against is the library's output.
+    chain = vf if vf else (render._lut_filter(str(cube)) if cube else None)
     proc = subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
          "-ss", str(at), "-i", str(video), *(["-vf", chain] if chain else []),

@@ -14,6 +14,7 @@ import pytest
 
 from ragvid import settings
 from ragvid.platform import data_dir
+from tests.conftest import posix_modes
 
 SENTINEL = "gsk_SENTINEL_never_leak_me_0123456789"
 
@@ -47,12 +48,14 @@ def test_a_damaged_file_reads_as_no_settings():
 # ---- the security properties ----------------------------------------------
 
 
+@posix_modes
 def test_the_key_file_is_owner_only_and_so_is_its_directory():
     settings.set_key("groq", SENTINEL)
     assert stat.S_IMODE(settings.path().stat().st_mode) == 0o600
     assert stat.S_IMODE(settings.path().parent.stat().st_mode) == 0o700
 
 
+@posix_modes
 def test_the_mode_is_right_even_under_a_permissive_umask():
     """0600 must come from the open() flags, not from luck with the umask.
 
@@ -67,6 +70,7 @@ def test_the_mode_is_right_even_under_a_permissive_umask():
     assert stat.S_IMODE(settings.path().stat().st_mode) == 0o600
 
 
+@posix_modes
 def test_a_rewrite_over_a_loose_file_tightens_it(store):
     """A settings.json left behind at 0644 (an older ragvid, a stray editor) must
     not stay that way once a key goes into it: O_CREAT does not change the mode

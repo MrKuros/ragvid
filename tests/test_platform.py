@@ -110,12 +110,16 @@ def test_the_escaped_form_round_trips_through_a_real_ffmpeg(tmp_path):
 
 
 def _fake_exe(path: Path) -> Path:
-    """A do-nothing executable, on whatever OS is running the suite.
+    """A do-nothing executable, for whatever OS is in force AT THE CALL.
 
     Windows resolves executables through PATHEXT and has no shebang, so an
     extensionless /bin/sh script is not an executable there at all -- shutil.which
     returns None and the override tests fail for a reason that has nothing to do
     with the code under test.
+
+    `plat.is_windows()` reads sys.platform, which `as_host` patches, so a caller
+    that fakes a host must do it BEFORE calling this -- shutil.which reads the
+    same value to decide whether PATHEXT applies, and the two have to agree.
     """
     if plat.is_windows():
         path = path.with_suffix(".cmd")
@@ -162,11 +166,17 @@ def test_missing_ffmpeg_is_typed_and_names_the_install_command(host, fragment, a
 def test_macos_falls_back_to_the_homebrew_prefix(tmp_path, as_host, monkeypatch):
     """A macOS app launched from Finder has a PATH that never saw a shell
     profile, so /opt/homebrew/bin is invisible and ffmpeg 'is not installed'."""
+    # as_host FIRST, and that ordering is the whole of this test on Windows.
+    # _fake_exe branches on plat.is_windows() -- i.e. on the host being faked --
+    # and shutil.which reads the same sys.platform to decide whether PATHEXT
+    # applies. Building the binary before the fake left a real Windows runner
+    # writing ffmpeg.cmd and then looking it up down the POSIX branch, which
+    # asks for the bare name and does not find it.
+    as_host(MACOS)
     _fake_exe(tmp_path / "ffmpeg")
     monkeypatch.setenv("PATH", "")
     monkeypatch.delenv("RAGVID_FFMPEG", raising=False)
     monkeypatch.setattr(plat, "_MAC_EXTRA", (str(tmp_path),))
-    as_host(MACOS)
     assert plat.ffmpeg() == str(tmp_path / "ffmpeg")
     as_host(LINUX)  # ...and only on macOS
     with pytest.raises(FFmpegNotFound):

@@ -28,7 +28,10 @@ jobs:
           - os: macos-latest
             python-version: "3.13"
     steps:
-      - uses: actions/checkout@v4
+      # checkout v5 and setup-uv v7 are the first releases of each that run
+      # on Node 24. Anything older is now force-migrated by the runner and
+      # annotates every job with a deprecation warning.
+      - uses: actions/checkout@v5
 
       # ffmpeg is on no runner image, and half this suite renders real pixels.
       # Each line is the same command the README gives that platform's users,
@@ -49,7 +52,7 @@ jobs:
       - name: ffmpeg is really there
         run: ffmpeg -version
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true

@@ -42,8 +42,12 @@ def load_env(path: Path = ENV_PATH) -> None:
     no export/multiline/interpolation. Add the dep if we ever need those.
     """
     try:
-        text = path.read_text()
-    except OSError:
+        # encoding=, and ValueError alongside OSError: a .env is a hand-edited
+        # file that may carry a UTF-8 comment, and text mode defaults to cp1252
+        # on Windows -- where the UnicodeDecodeError is a ValueError, not an
+        # OSError, so it escaped this handler and took the import down with it.
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
         return
     for line in text.splitlines():
         line = line.strip()

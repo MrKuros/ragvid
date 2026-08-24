@@ -271,11 +271,12 @@ def bake_conversion(name: str, out_path: str, size: int = 33) -> str:
     table = np.clip(_rec709_oetf(_shoulder(to_lin(_grid(size)))), 0.0, 1.0)
     if d := os.path.dirname(out_path):
         os.makedirs(d, exist_ok=True)
-    # Same header and float format as lut.bake_cube, and newline="\n" for the
-    # same reason: a .cube is an interchange file and must not depend on the
-    # host's line endings. Not shared with bake_cube because that one takes a
-    # GradeSpec, and a log conversion is not expressible as one.
-    with open(out_path, "w", newline="\n") as f:
+    # Same header and float format as lut.bake_cube, and newline="\n" plus
+    # encoding= for the same reason: a .cube is an interchange file and must
+    # depend on neither the host's line endings nor its default codec. Not
+    # shared with bake_cube because that one takes a GradeSpec, and a log
+    # conversion is not expressible as one.
+    with open(out_path, "w", newline="\n", encoding="utf-8") as f:
         f.write(
             f'TITLE "ragvid {name} to Rec.709"\nLUT_3D_SIZE {size}\n'
             "DOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\n"
