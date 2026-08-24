@@ -74,10 +74,10 @@ def test_the_harness_fails_against_the_previous_page(tmp_path):
     if git.returncode != 0:
         pytest.skip("no committed index.html to compare against")
     # The marker is the newest thing the harness asserts about, not the oldest:
-    # once bannerGet is committed there is nothing older here to fail against
+    # once stepActs is committed there is nothing older here to fail against
     # and the next change has to move this line to its own marker.
-    if "bannerGet" in git.stdout:
-        pytest.skip("the segmentation row is already committed; nothing older to fail against")
+    if "stepActs" in git.stdout:
+        pytest.skip("the history column is already committed; nothing older to fail against")
     proc = _run_harness(git.stdout, tmp_path)
     assert proc.returncode != 0, "the harness passed on the pre-change page — it tests nothing"
 
@@ -91,6 +91,27 @@ def _shader(name: str) -> str:
     assert found, f"{name} is not in index.html"
     # One template substitution, and it is the clipping threshold.
     return found.group(1).replace("${RAIL}", repr(1.5 / 255))
+
+
+def test_a_still_with_no_src_is_never_drawn_as_a_broken_image():
+    """A src-less <img> is not an empty box -- it is the browser's broken-image
+    icon plus its alt text, drawn at the element's top left.
+
+    Both stills ship without a `src` and STAY that way for as long as the live
+    preview is running, because `syncLive()` returning true is precisely the
+    branch that skips `loadFrames()`. The canvas above them covers the picture
+    but `object-fit: contain` letterboxes it, so the icon showed in whichever
+    margin the clip's aspect ratio left uncovered.
+    """
+    page = server.INDEX.read_text(encoding="utf-8")
+    tags = re.findall(r"<img\b[^>]*>", page)
+    assert tags, "the stills are gone from the page"
+    # If a still ever ships WITH a src, this test is guarding a state that can
+    # no longer happen and the rule below is dead -- say so rather than pass.
+    assert all("src=" not in tag for tag in tags), \
+        f"a still now ships with a src: {tags}"
+    assert re.search(r"\.frame img:not\(\[src\]\)\s*{[^}]*display\s*:\s*none", page), \
+        "nothing stops a src-less still rendering as a broken image"
 
 
 @pytest.mark.parametrize("name,suffix", [("GL_VS", ".vert"), ("GL_FS", ".frag")])

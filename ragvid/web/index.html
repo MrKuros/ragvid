@@ -69,6 +69,15 @@
            border:1px solid var(--line); }
   .frame img, .frame canvas { position:absolute; inset:0; width:100%; height:100%;
                object-fit:contain; }
+  /* An <img> with no src is not an empty box, it is a BROKEN-IMAGE ICON plus
+     its alt text, drawn at the top left of the element. Both stills start
+     src-less and stay that way whenever the live preview takes over, because
+     syncLive() returning true is exactly the branch that skips loadFrames().
+     The canvas covers them -- but object-fit:contain letterboxes it, so the
+     icon showed in whichever margin the video's aspect ratio left uncovered.
+     Attribute selector rather than a JS toggle: the condition IS "has no src",
+     so it stops applying by itself the moment loadFrames() sets one. */
+  .frame img:not([src]) { display:none; }
   .frame img.under { opacity:0; }
   /* The <video> is a texture source, never something anyone looks at -- the
      canvas above it is the picture. One pixel rather than display:none, which
@@ -119,12 +128,29 @@
                    min-width:14px; }
   .hist .step .lbl { flex:1; overflow:hidden; text-overflow:ellipsis;
                      white-space:nowrap; }
+  .hist .step.sel { background:#22303233; box-shadow:inset 0 0 0 1px var(--accent); }
   .hist .step.now { color:var(--ink); background:#23272a; }
   .hist .step.now .lbl { font-weight:500; }
   .hist .step.now::after { content:"now"; font-size:11px; color:var(--accent);
                            letter-spacing:.04em; }
   .histhead { font-size:11.5px; letter-spacing:.07em; text-transform:uppercase;
               color:var(--dim); padding:0 2px; }
+
+  /* The pair is the one two-column split in the page. `.controls` is flex:none
+     inside a body that never scrolls, so a taller panel SHRINKS the preview
+     frame rather than growing the page -- which is why both lists keep a pixel
+     max-height and scroll inside themselves. min-width:0 on both columns is
+     what lets a long prompt ellipsize instead of forcing the row wider. */
+  .pair { display:flex; gap:16px; align-items:flex-start; }
+  .pair > div { flex:1; min-width:0; }
+  .pair > #didWrap { flex:1.25; }
+  @media (max-width:760px) { .pair { flex-direction:column; } }
+  .stepacts { display:flex; align-items:center; gap:8px; padding-top:8px; }
+  .stepacts .spacer { margin-left:auto; }
+  /* The only destructive control left in this panel, and the only one that
+     should read as destructive. */
+  button.danger { border-color:#5a2b2b; color:#e88; }
+  button.danger:hover { background:#3a2222; }
 
   /* ---- what it did ---- */
   /* Same shape as .hist right below it -- a capped, scrolling list of rows --
@@ -308,14 +334,40 @@
 
     <p class="said" id="said"></p>
 
-    <!-- What the grade actually does, one line per move, drawn straight from
-         the typed verbs it was compiled from. Hidden on the direct path, where
-         the model authored 44 numbers and there are no verbs to list -- #said
-         above carries the model's own sentence there instead. -->
-    <div id="didWrap" hidden>
-      <div class="histhead">What it did</div>
-      <div class="did" id="did"></div>
+    <!-- The two halves of one answer, side by side: what the person typed,
+         and what the grade made of it. Clicking a row on the left only SELECTS
+         it -- the column on the right then shows that step without restoring
+         it. It used to post /api/revert, which truncates, so looking at an old
+         step destroyed every step after it and undo had nothing to undo. -->
+    <div class="pair" id="pair" hidden>
+      <div id="histWrap">
+        <div class="histhead">What you asked for</div>
+        <div class="hist" id="hist"></div>
+      </div>
+
+      <!-- What the grade does, one line per move, drawn straight from the typed
+           verbs it was compiled from. Hidden on the direct path, where the model
+           authored 44 numbers and there are no verbs to list -- #said above
+           carries the model's own sentence there instead. -->
+      <div id="didWrap">
+        <div class="histhead" id="didHead">What it did</div>
+        <div class="did" id="did"></div>
+        <div class="stepacts" id="stepActs" hidden>
+          <button type="button" id="restoreBtn" class="primary">Restore this</button>
+          <span class="spacer"></span>
+          <button type="button" id="delBtn" class="danger">Delete</button>
+        </div>
+      </div>
     </div>
+
+    <!-- The two halves of one answer, in the order they happen: what the
+         person typed, then what the grade made of it. They used to be split
+         by the log picker and the strength slider, which is two unrelated
+         controls between a question and its reply. Each row is what THEY
+         wrote, not the model's rationale -- that is what someone recognises
+         when scanning back over what they tried -- and clicking one goes back
+         to it, which is all undo is, repeated. -->
+
 
     <!-- Log footage. One control, and the answer is something a person knows
          from the shoot rather than a file they have to go and find: ragvid
@@ -347,11 +399,6 @@
       <input type="range" id="strength" min="0" max="1" step="0.01" value="1"
              aria-label="Strength of the whole look">
       <span class="time" id="strengthOut">100%</span>
-    </div>
-
-    <div id="histWrap" hidden>
-      <div class="histhead">What you asked for</div>
-      <div class="hist" id="hist"></div>
     </div>
 
     <div class="row">
@@ -411,7 +458,7 @@ const $ = (id) => document.getElementById(id);
 // Must match server.py's API_VERSION. The HTML is re-read on every request but
 // the Python is not, so an old `ragvid serve` will happily serve this file and
 // then answer with a contract it does not implement.
-const EXPECTED_API = 11;
+const EXPECTED_API = 12;
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
@@ -605,35 +652,80 @@ function render(state) {
   if (!syncLive()) loadFrames();          // live preview, or the server's still
 }
 
-// Past prompts, in the user's own words. Clicking one goes back to it --
-// which is all undo is, repeated.
+// Past prompts, in the user's own words. Clicking one only SELECTS it: the
+// column beside it then shows what that step did, and going back to it is a
+// separate, named button. It used to post /api/revert on this click, which
+// truncates -- so reading an old row threw away every row after it.
+//
+// `selStep` lives beside S rather than in it because it is a view, not server
+// state; the settings dialog's `selected` is the same idea. null means "the
+// current step", so a page nobody has clicked behaves exactly as before.
+let selStep = null;
+
+// One row per PROMPT. A slider drag, an item switched off and the balance
+// toggle all push a real history step -- that is what makes each of them
+// undoable -- but they are adjustments OF the prompt above them, not things
+// anybody asked for, so listing them buries the four words the person actually
+// typed under "adjusted, adjusted, adjusted". Each group is the prompt plus the
+// contiguous run of tweaks after it, and the row stands for the LAST step in
+// that run, which is the prompt as it currently stands.
+function groups() {
+  const out = [];
+  (S.steps || []).forEach((s) => {
+    if (!s.tweak && out.length) out.push({ head: s, steps: [s] });
+    else if (!out.length) out.push({ head: s, steps: [s] });
+    else out[out.length - 1].steps.push(s);
+  });
+  return out.map((g) => ({
+    label: g.head.label,
+    index: g.head.index,                       // where the run starts, for delete
+    count: g.steps.length,
+    tip: g.steps[g.steps.length - 1],          // the step the row actually shows
+    current: g.steps.some((s) => s.current),
+  }));
+}
+
+function selectedStep() {
+  const gs = groups();
+  if (!gs.length) return null;
+  return (gs.find((g) => g.index === selStep) || gs[gs.length - 1]).tip;
+}
+
+function selectedGroup() {
+  const gs = groups();
+  return gs.find((g) => g.index === selStep) || null;
+}
+
 function buildHistory() {
-  const steps = S.steps || [];
-  $("histWrap").hidden = steps.length === 0;
+  const gs = groups();
+  $("pair").hidden = gs.length === 0;
   const box = $("hist");
   box.innerHTML = "";
-  if (!steps.length) return;
+  if (!gs.length) { selStep = null; return; }
+  // A row the history no longer holds cannot stay selected -- it can be deleted
+  // from under us. Same reconciliation the provider list does.
+  if (selStep !== null && selStep !== -1 && !gs.some((g) => g.index === selStep)) selStep = null;
 
-  steps.forEach((s) => {
+  gs.forEach((g, n) => {
     const b = document.createElement("button");
-    b.className = "step" + (s.current ? " now" : "");
+    b.className = "step" + (g.current ? " now" : "") + (g.index === selStep ? " sel" : "");
     b.type = "button";
     b.innerHTML = `<span class="n"></span><span class="lbl"></span>`;
-    b.children[0].textContent = s.index + 1;
-    b.children[1].textContent = s.label || "manual adjustment";
-    b.title = s.rationale || s.label || "";
-    b.onclick = () => post("/api/revert", { index: s.index });
+    b.children[0].textContent = n + 1;
+    b.children[1].textContent = g.label || "manual adjustment";
+    b.title = g.tip.rationale || g.label || "";
+    b.onclick = () => { selStep = g.index; didFor = null; render(S); };
     box.append(b);
   });
 
   // One more row to get all the way back to the untouched clip.
   const orig = document.createElement("button");
-  orig.className = "step";
+  orig.className = "step" + (selStep === -1 ? " sel" : "");
   orig.type = "button";
   orig.innerHTML = `<span class="n">0</span><span class="lbl">Original (no look)</span>`;
-  orig.onclick = () => post("/api/revert", { index: -1 });
+  orig.onclick = () => { selStep = -1; didFor = null; render(S); };
   box.prepend(orig);
-  box.scrollTop = box.scrollHeight;
+  if (selStep === null) box.scrollTop = box.scrollHeight;
 }
 
 function syncEnabled() {
@@ -648,7 +740,9 @@ function syncEnabled() {
   // History rows get their enabled state HERE, not at build time: post() calls
   // render() (which rebuilds them) while `busy` is still true, so a build-time
   // `disabled = busy` left every row dead until a page reload.
-  for (const b of $("hist").children) b.disabled = busy || b.classList.contains("now");
+  // Every row stays clickable, including the current one: a click now SELECTS
+  // rather than reverts, and "show me the step I am on" is a real thing to ask.
+  for (const b of $("hist").children) b.disabled = busy;
   for (const i of $("did").querySelectorAll("input")) i.disabled = !on;
   $("hint").textContent = S.planned ? "hold to see original" : "no look applied yet";
 }
@@ -1460,35 +1554,79 @@ const STRENGTH_WORDS = ["40%", "65%", "85%", "100%"];
 let didFor = null;
 
 function buildDid(intent) {
-  $("didWrap").hidden = !intent;
-  if (!intent) return;
-  if (didFor === S.version) return;             // don't rebuild mid-drag
-  didFor = S.version;
+  // Which step the column is showing. `selStep === null` is the current one,
+  // which is the editable case and the one this panel has always shown.
+  const step = selectedStep();
+  const past = selStep !== null && step && !step.current;
+  const orig = selStep === -1;
+  const shown = orig ? null : (past ? step.intent : intent);
+
+  $("didWrap").hidden = !shown && !past && !orig;
+  $("stepActs").hidden = !past && !orig;
+  // Named by the PROMPT, not by an index: the row stands for a group, so the
+  // tip's index is not the row number, and "cold but colorful" is what somebody
+  // recognises anyway.
+  const g = selectedGroup();
+  $("didHead").textContent = orig ? "What it did · the original"
+    : past ? `What it did · ${(g && g.label) || "an earlier step"}`
+    : "What it did";
+  if (!shown) { $("did").innerHTML = ""; didFor = null; return; }
+  if (didFor === S.version + ":" + selStep) return;   // don't rebuild mid-drag
+  didFor = S.version + ":" + selStep;
   const box = $("did");
   box.innerHTML = "";
+  // Editing a row of a PAST step restores that step and applies the edit in one
+  // call, so it costs one history row rather than two and there is no moment
+  // where the grade is back but the edit is not.
+  const send = (next) => past
+    ? post("/api/restore", { index: step.index, intent: next })
+    : sendIntent(next);
   // Auto-balance, as a row rather than a checkbox anywhere else. It IS a thing
   // the grade did — it runs before the verbs — so it belongs in the list that
   // says what the grade did, and its off switch then costs no screen a reader
   // was not already looking at. The text is the compiler's own report when it
   // corrected something ("neutralised a green cast, set the black point"), and
   // the setting's name when it is off or found nothing to do.
-  box.append(didRow(S.auto_balance && S.balance ? S.balance : "balanced the colour first",
-                    S.auto_balance ? 1 : 0, ["off", "on"],
-                    (n) => post("/api/balance", { on: n === 1 })));
-  intent.ops.forEach((op, i) => {
+  if (!past) {
+    box.append(didRow(S.auto_balance && S.balance ? S.balance : "balanced the colour first",
+                      S.auto_balance ? 1 : 0, ["off", "on"],
+                      (n) => post("/api/balance", { on: n === 1 })));
+  }
+  shown.ops.forEach((op, i) => {
     box.append(didRow(op.text, AMOUNTS.indexOf(op.amount), AMOUNT_WORDS, (n) => {
       // n === 0 drops the op outright; the compiler starts from identity, so a
       // dropped move leaves no trace of itself in the next spec.
-      const ops = intent.ops
+      const ops = shown.ops
         .map((o, j) => (j === i ? { ...o, amount: AMOUNTS[n] } : o))
         .filter((o, j) => j !== i || n > 0);
-      sendIntent({ ...intent, ops });
+      send({ ...shown, ops });
     }));
   });
-  box.append(didRow("the whole look", STRENGTHS.indexOf(intent.strength), STRENGTH_WORDS,
-                    (n) => sendIntent({ ...intent, strength: STRENGTHS[n] })));
+  box.append(didRow("the whole look", STRENGTHS.indexOf(shown.strength), STRENGTH_WORDS,
+                    (n) => send({ ...shown, strength: STRENGTHS[n] })));
   box.scrollTop = 0;
 }
+
+// Going back to a step without changing anything -- the reason a button exists
+// even though a slider would also restore. Deleting is the one destructive
+// thing left here, so it asks first.
+$("restoreBtn").onclick = () => {
+  const step = selectedStep();
+  const index = selStep === -1 ? -1 : step && step.index;   // read BEFORE clearing
+  if (index === undefined || index === null) return;
+  selStep = null;
+  post("/api/restore", { index });
+};
+$("delBtn").onclick = () => {
+  const g = selectedGroup();
+  if (!g || selStep === null || selStep === -1) return;
+  if (!confirm(`Delete "${g.label || "this step"}"? The rest are kept.`)) return;
+  selStep = null;
+  // The whole run this row stands for -- the prompt and the tweaks folded into
+  // it -- in one call, so it is one save rather than a race of N requests.
+  post("/api/step/delete", { index: g.index, count: g.count });
+};
+
 
 // The page posts back the object it was given, `text` and all -- the server
 // ignores keys Intent does not declare, so there is nothing to strip.

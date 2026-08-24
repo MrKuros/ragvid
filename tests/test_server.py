@@ -738,6 +738,52 @@ def test_refine_without_a_grade_is_409_and_never_calls_the_provider(api):
     assert r.status == 409 and r.error["type"] == "NoGrade"
 
 
+def test_restoring_an_old_step_grows_the_history_instead_of_cutting_it(api):
+    """`/api/revert` truncates; `/api/restore` appends. Clicking a row to look
+    at it used to destroy everything after it, with nothing to undo that with."""
+    api.open_clip()
+    first = api.plan()["spec"]
+    api.post("/api/spec", {"spec": first | {"contrast": 0.6}})
+    api.post("/api/spec", {"spec": first | {"contrast": 0.3}})
+    before = api.get("/api/state").json
+    assert before["history_depth"] == 3
+
+    state = api.post("/api/restore", {"index": 0}).json
+
+    assert state["history_depth"] == 4, "restoring lost a step"
+    assert state["spec"] == first, "it did not actually go back"
+    assert [s["label"] for s in state["steps"]][:3] == \
+        [s["label"] for s in before["steps"]], "an earlier step went missing"
+    assert state["steps"][-1]["current"] is True
+    assert api.post("/api/restore", {"index": 99}).status == 400
+
+
+def test_deleting_a_step_removes_one_row_and_nothing_else(api):
+    api.open_clip()
+    first = api.plan()["spec"]
+    api.post("/api/spec", {"spec": first | {"contrast": 0.6}})
+    assert api.get("/api/state").json["history_depth"] == 2
+
+    state = api.post("/api/step/delete", {"index": 0}).json
+
+    assert state["history_depth"] == 1
+    assert state["spec"]["contrast"] == 0.6, "it deleted the wrong one"
+    assert api.post("/api/step/delete", {"index": 7}).status == 400
+
+
+def test_every_step_carries_its_verbs_so_a_row_can_be_read_without_restoring(api, fake_intent_llm):
+    """The detail column renders a step it has NOT restored, so `steps` has to
+    carry each entry's own verbs -- `intent` alone is the current step's."""
+    api.open_clip()
+    api.post("/api/vibe", {"vibe": "warmer"})
+    state = api.post("/api/vibe", {"vibe": "moodier"}).json
+
+    assert len(state["steps"]) == 2
+    for step in state["steps"]:
+        assert "intent" in step, "a step cannot say what it did"
+        assert all("text" in o and "amount" in o for o in step["intent"]["ops"])
+
+
 def test_undo_walks_back_off_the_first_grade_then_409s(api):
     api.open_clip()
     api.plan()
@@ -1222,6 +1268,22 @@ def test_a_bad_intent_is_a_400_not_a_500(api, fake_intent_llm):
     r = api.post("/api/intent", {"intent": {"ops": [{"op": "bokeh"}], "strength": "full"}})
     assert r.status == 400 and r.error["type"] == "InputError"
     assert api.post("/api/intent", {"nope": 1}).status == 400
+
+
+def test_the_two_halves_of_one_answer_sit_together_in_reading_order():
+    """"What you asked for" then "What it did", both directly under the ask box.
+
+    They used to be split by the log picker and the strength slider -- two
+    unrelated controls between a question and its reply. Order is asserted
+    rather than mere presence, because a reorder is exactly the kind of edit
+    that reads as harmless in a diff.
+    """
+    import re
+
+    page = server.INDEX.read_text(encoding="utf-8")
+    order = [m.group(1) for m in re.finditer(
+        r'id="(askForm|histWrap|didWrap|lutLine|strengthRow)"', page)]
+    assert order == ["askForm", "histWrap", "didWrap", "lutLine", "strengthRow"], order
 
 
 def test_the_page_renders_the_intent_and_no_longer_ships_the_slider_panel():
