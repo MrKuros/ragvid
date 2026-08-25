@@ -191,6 +191,14 @@ class Op(BaseModel):
         # was spared over a grade that went straight through it.
         if self.op in MASK_OPS and self.target not in REGIONS:
             self.target = ""
+        # And the same rule for a COLOUR nobody will read. A verb outside
+        # COLOUR_TARGETED has no per-hue mechanism at all, so a colour on one is
+        # a word the compiler cannot honour -- cleared here rather than left to
+        # reach describe(), for the reason the two rules above are: a sentence
+        # that names a colour over a grade that moved the whole frame is worse
+        # than one that never mentions it.
+        if self.target and self.target not in REGIONS and self.op not in COLOUR_TARGETED:
+            self.target = ""
         return self
 
 
@@ -270,6 +278,18 @@ _PHRASES: dict[str, tuple[str, str]] = {
 
 # Verbs whose `target` selects WHICH PIXELS, rather than naming a colour to add.
 SELECTIVE = ("saturation", "exposure")
+
+# Every verb a COLOUR target means something on: SELECTIVE says which PIXELS
+# move, the two tint verbs say which COLOUR is added. Named once because the
+# validator below, describe() and INTENT_SYSTEM all have to agree about it --
+# and until this existed only the prompt said it ("Every other verb ignores a
+# colour target. Leave it '' on them"), with nothing enforcing it. Measured:
+# 13 of the 18 verbs kept a colour target they never read, so `warmth` with
+# target "green" produced the same GLOBAL temperature push as an untargeted
+# one while describe() said only "warmed it up" -- a grade doing something
+# other than what its own sentence claims, which is the failure this module
+# exists to prevent.
+COLOUR_TARGETED = SELECTIVE + ("shadow_tint", "highlight_tint")
 
 # How each region reads in a sentence. "center" is `the middle` because nobody
 # says "the center of the frame" out loud, and the sentence is the UI.

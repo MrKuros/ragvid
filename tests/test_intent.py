@@ -17,6 +17,7 @@ import pytest
 
 from ragvid.intent import (
     AMOUNTS,
+    COLOUR_TARGETED,
     DIRECTIONS,
     MASK_OPS,
     OPS,
@@ -381,6 +382,41 @@ def test_a_colour_cannot_be_protected_and_does_not_claim_to_be(bad):
     assert op.target == ""
     assert describe(Intent(ops=[op])) == []
     assert describe(Intent(ops=[Op(op="warmth"), op])) == ["warmed it up"]
+
+
+def test_a_colour_target_survives_only_on_the_verbs_that_read_one():
+    """13 of the 18 verbs used to keep a colour target and never read it.
+
+    Measured before this guard: Op(op="warmth", target="green") produced the
+    same GLOBAL +504.8 temperature as an untargeted warmth, while describe()
+    said only "warmed it up" -- a grade doing something other than what its own
+    sentence claims. INTENT_SYSTEM said "leave it '' on them" and nothing
+    enforced it, so a model that disobeyed was silently believed.
+
+    Asserted against COLOUR_TARGETED rather than a hand-listed set, so a verb
+    that LEARNS to read a colour (B3b gives one to `warmth`) needs only that
+    tuple updated, and a verb that does not is caught here.
+    """
+    for op in OPS:
+        if op in MASK_OPS:
+            continue
+        kept = Op(op=op, target="green").target
+        if op in COLOUR_TARGETED:
+            assert kept == "green", f"{op} reads a colour target but dropped it"
+        else:
+            assert kept == "", f"{op} kept a colour target it never reads"
+
+
+def test_clearing_an_unread_colour_target_changes_no_sentence():
+    """The guard is a guard, not a behaviour change: every verb renders exactly
+    what it rendered before, because describe() only ever branched on whether
+    the target was a REGION."""
+    for op in OPS:
+        if op in MASK_OPS or op in COLOUR_TARGETED:
+            continue          # these SHOULD read the colour, and do
+        with_colour = describe(Intent(ops=[Op(op=op, target="green")]))
+        without = describe(Intent(ops=[Op(op=op)]))
+        assert with_colour == without, f"{op} now renders differently: {with_colour}"
 
 
 def test_every_maskable_target_can_be_protected():
