@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -69,6 +70,42 @@ def test_pop_survives_save_load():
 def test_load_without_session_is_friendly():
     with pytest.raises(NoSession, match="run 'ragvid grade' first"):
         Session.load()
+
+
+def test_an_interrupted_write_leaves_the_previous_session_intact(tmp_path, monkeypatch):
+    """`Path.write_text` opens "w", which TRUNCATES before the new bytes land.
+    An interrupted write -- a crash, a full disk -- therefore left a truncated
+    session.json, which `load` can only report as SessionCorrupt. There is no
+    backup and no repair path, so that is somebody's whole grade.
+
+    Simulated faithfully rather than by patching json.dumps: dumps is evaluated
+    BEFORE write_text is called, so a failure there never reaches the file and
+    proves nothing. The failure that matters is a partial write, and the only
+    thing that separates the two versions is WHICH file it lands on -- the
+    session itself, or a temp beside it that os.replace never promotes.
+    """
+    real = Path.write_text
+
+    s = Session.create("clip.mp4", _stats())
+    s.push(GradeSpec(saturation=1.4), "first")
+    s.save(tmp_path)
+    good = Session.path(tmp_path).read_text(encoding="utf-8")
+
+    def half_a_write(self, text, *a, **kw):
+        real(self, text[: len(text) // 2])                 # the bytes that fit
+        raise OSError(28, "No space left on device")        # ...and then the disk
+
+    s.push(GradeSpec(contrast=0.5), "second")
+    monkeypatch.setattr(Path, "write_text", half_a_write)
+    with pytest.raises(OSError):
+        s.save(tmp_path)
+    monkeypatch.setattr(Path, "write_text", real)
+
+    assert Session.path(tmp_path).read_text(encoding="utf-8") == good, \
+        "a half-finished save destroyed the session that was already there"
+    assert len(Session.load(tmp_path).specs) == 1, "and it still loads"
+    left = [f.name for f in Session.dir(tmp_path).iterdir() if ".tmp" in f.name]
+    assert left == [], f"a temp file was left behind: {left}"
 
 
 def test_load_corrupt_session_is_friendly(tmp_path):

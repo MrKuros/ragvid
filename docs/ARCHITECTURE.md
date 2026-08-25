@@ -166,7 +166,7 @@ swallowing a bug. Then branch:
 | `InputError` | reopen the file picker | `path`, `reason` |
 | `SessionNotFound` | offer "new project" | `root` |
 | `NoGrade` | disable Export until something is planned | — |
-| `SessionCorrupt` | offer "reset project" | `path`, `reason` |
+| `SessionCorrupt` | offer "reset project" | `path`, `reason` | — **409** over HTTP. Only reachable since `serve` began reopening sessions; before that the server never loaded one. |
 | `ProviderNotConfigured` | open settings | `env_var` |
 | `RateLimited` | show a countdown, retry | `retry_after` (seconds or None) |
 | `ProviderError` | show the message | `provider` |
@@ -190,9 +190,19 @@ live at `data_dir()/models/segformer-b0-ade-512.onnx` (15 MB, downloaded once,
 shared by every project) because they are neither derived from a clip nor worth
 fetching twice. Deleting them costs one download, not a grade.
 
-`ragvid serve` has no cwd to fall back on, so its default root is the per-user
-data directory: `~/.local/share/ragvid/work` on Linux (XDG), `~/Library/
-Application Support/ragvid/work` on macOS, `%APPDATA%\ragvid\work` on Windows.
+`ragvid serve` has no cwd to fall back on, so it keeps its projects under the
+per-user data directory: `~/.local/share/ragvid/work` on Linux (XDG),
+`~/Library/Application Support/ragvid/work` on macOS, `%APPDATA%\ragvid\work`
+on Windows.
+
+**That directory is the PARENT of the projects, not a project itself.** Each
+clip gets `<work>/<stem>-<hash of its resolved path>/`, so two clips never share
+a session, and reopening a clip finds the history it had. It used to be one
+shared `.ragvid/` for every clip the server ever opened, which meant opening a
+second clip destroyed the first one's session, cube and previews — and since
+nothing on the server side called `Session.load`, a restart made a session on
+disk unreachable from the browser before anything overwrote it. `server._root_for`
+picks the folder; `Project.exists` decides open-or-create.
 That branch, and every other place the three platforms disagree, lives in
 `ragvid/platform.py` — see it before adding a `sys.platform` check anywhere else.
 

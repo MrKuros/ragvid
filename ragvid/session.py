@@ -11,6 +11,7 @@ cwd; a GUI has several projects open at once and must be able to say which.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -122,25 +123,51 @@ class Session:
         return cls.dir(root) / SESSION_FILE
 
     def save(self, root: str | Path | None = None) -> None:
+        """Write the session so a reader sees the old one or the new one, never
+        a half of either.
+
+        ATOMIC, and it was not: `Path.write_text` opens "w", which TRUNCATES the
+        file before json.dumps' result is handed to write(). A crash, a full
+        disk or a serialisation error mid-save therefore left a zero-byte or
+        half-written session.json -- which `load` can only report as
+        SessionCorrupt, with no repair path and no backup. That is somebody's
+        whole grade.
+
+        settings.save has done this correctly since it was written, for the file
+        holding an API KEY. This is the same two steps for the file holding the
+        WORK -- and only those two: settings' 0700/0600 fchmod dance exists
+        because that file is a credential, while a session is a path and some
+        44-number specs.
+
+        os.getpid() in the temp name for settings' own reason: two `ragvid
+        serve` instances on one root, or a serve plus a CLI in one cwd, collide
+        -- and today they do it with no temp file at all, so the loser's write
+        can interleave with the winner's. os.replace is atomic on POSIX and over
+        an existing file on Windows, which the platform.py matrix needs.
+        """
         path = self.path(root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "source": self.source,
-                    "input_lut": self.input_lut,
-                    "input_format": self.input_format,
-                    "stats": json.loads(self.stats.model_dump_json()),
-                    "specs": [json.loads(s.model_dump_json()) for s in self.specs],
-                    "labels": self.labels,
-                    "intents": [i.model_dump() if i else None for i in self.intents],
-                    "layers": [[json.loads(l.model_dump_json()) for l in ls]
-                               for ls in self.layers],
-                    "auto_balance": self.auto_balance,
-                },
-                indent=2,
-            )
-        )
+        tmp = path.with_name(f".{SESSION_FILE}.{os.getpid()}.tmp")
+        body = {
+            "source": self.source,
+            "input_lut": self.input_lut,
+            "input_format": self.input_format,
+            "stats": json.loads(self.stats.model_dump_json()),
+            "specs": [json.loads(s.model_dump_json()) for s in self.specs],
+            "labels": self.labels,
+            "intents": [i.model_dump() if i else None for i in self.intents],
+            "layers": [[json.loads(l.model_dump_json()) for l in ls]
+                       for ls in self.layers],
+            "auto_balance": self.auto_balance,
+        }
+        try:
+            # Serialise BEFORE the file exists, so a ValidationError leaves the
+            # previous session untouched rather than a temp file to clean up.
+            tmp.write_text(json.dumps(body, indent=2))
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     @classmethod
     def create(cls, source: str, stats: "ClipStats", input_lut: str | None = None,

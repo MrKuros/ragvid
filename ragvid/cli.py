@@ -66,7 +66,23 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _cmd_grade(args) -> int:
-    project = Project.create(args.video, root=Path.cwd())
+    """Grade a clip, ADDING to whatever history is already in this directory.
+
+    It used to be Project.create every time, whose first push saves over
+    session.json -- so a second `ragvid grade` in the same folder destroyed the
+    first one's history, and re-probed the clip that the cached ClipStats exists
+    to avoid. Grading twice is a normal thing to do; losing the first one is not.
+    """
+    root = Path.cwd()
+    project = None
+    if Project.exists(root):
+        found = Project.open(root)
+        # Same clip -> keep its history. A different clip in a directory that
+        # already holds a project is a new project, and create() is right.
+        if Path(found.source).resolve() == Path(args.video).expanduser().resolve():
+            project = found
+    if project is None:
+        project = Project.create(args.video, root=root)
     if args.ref:
         project.plan_from_reference(args.ref)
     else:

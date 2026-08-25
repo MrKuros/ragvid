@@ -12,6 +12,7 @@ this is a single-user tool on 127.0.0.1.
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import mimetypes
 import re
@@ -78,6 +79,12 @@ STATUS = {
     "NotFound": 404,
     "SessionNotFound": 404,
     "NoGrade": 409,
+    # Reachable only since r_open started REOPENING sessions -- before that the
+    # server never called Session.load, so a damaged file could not surface
+    # here at all. Without this row it is a 500 for something the user can fix,
+    # and docs/ARCHITECTURE.md already specifies the answer: offer "reset
+    # project". The typed `path` and `reason` ride along via _error_response.
+    "SessionCorrupt": 409,
     "NothingToUndo": 409,
     "ExportBusy": 409,
     "ProviderNotConfigured": 428,
@@ -260,6 +267,25 @@ def _safe_name(name: str) -> str:
     return name if name.strip("._") else "upload"
 
 
+def _root_for(video: Path) -> Path:
+    """The state directory for ONE clip.
+
+    S.root used to be the state dir itself -- one `.ragvid/` shared by every
+    clip the server ever opened -- so opening clip B overwrote clip A's session,
+    cube and previews. It is now the PARENT the per-clip dirs live under.
+
+    The stem so a person can tell the folders apart by looking; a hash of the
+    RESOLVED path so two clips called `render.mp4` in different folders do not
+    collide, and so a name full of characters no filesystem wants still yields a
+    directory that exists everywhere platform.py supports. _safe_name is reused
+    rather than reinvented: it already refuses anything that could climb out of
+    the work dir.
+    """
+    resolved = str(video.resolve())
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:8]
+    return S.root / f"{_safe_name(video.stem)[:40]}-{digest}"
+
+
 def _incoming_file(req, exts: set[str]) -> Path:
     """A multipart upload (saved into the work dir) or {"path": "/abs/path"}."""
     ctype = req.headers.get("Content-Type", "")
@@ -292,10 +318,34 @@ def r_state(req, q):
 
 
 def r_open(req, q):
+    """Open a clip -- REOPENING its session when there is one to reopen.
+
+    This route used to be the only way into the app AND unconditionally
+    destructive: Project.create followed by save(), which truncates. Together
+    with one shared root that meant opening any clip destroyed the last one's
+    history, and restarting the server destroyed it too, because nothing on the
+    server side has ever called Session.load -- a session on disk was
+    unreachable from the browser before anything overwrote it.
+
+    Project.exists was written for exactly this ("so a UI can decide between
+    'open' and 'new' without catching an exception") and had no caller in either
+    front end until now.
+    """
     path = _incoming_file(req, VIDEO_EXT)
     with LOCK:
-        project = Project.create(path, root=S.root)
-        project.save()
+        root = _root_for(path)
+        project = None
+        if Project.exists(root):
+            project = Project.open(root)
+            # A stale folder must never serve a different clip's grade. The hash
+            # makes this nearly impossible, but "nearly" is doing no work here:
+            # a clip replaced at the same path is the same folder and a genuinely
+            # different picture, so compare what the session says it holds.
+            if Path(project.source).resolve() != path.resolve():
+                project = None
+        if project is None:
+            project = Project.create(path, root=root)
+            project.save()
         S.project = project
         return _mutated()
 

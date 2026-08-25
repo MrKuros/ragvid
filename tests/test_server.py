@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import threading
 import time
@@ -736,6 +737,80 @@ def test_refine_without_a_grade_is_409_and_never_calls_the_provider(api):
     r = api.post("/api/refine", {"instruction": "less blue"})
     # The autouse guard would turn any provider construction into a 500.
     assert r.status == 409 and r.error["type"] == "NoGrade"
+
+
+# ---- the work survives -----------------------------------------------------
+#
+# Opening a clip used to be unconditionally destructive AND the only way in:
+# Project.create + save(), against ONE shared root, with nothing on the server
+# side ever calling Session.load. So a second clip destroyed the first, and a
+# server restart destroyed everything, because the session on disk had no reader.
+
+
+def test_reopening_the_same_clip_brings_its_history_back(api):
+    api.open_clip()
+    first = api.plan()["spec"]
+    api.post("/api/spec", {"spec": first | {"contrast": 0.6}})
+    assert api.get("/api/state").json["history_depth"] == 2
+
+    state = api.open_clip()          # the same clip again, as after a restart
+
+    assert state["history_depth"] == 2, "reopening the clip threw its history away"
+    assert state["spec"]["contrast"] == 0.6, "and it is not the grade we left on"
+
+
+def test_opening_a_second_clip_leaves_the_first_ones_history_alone(api, tmp_path):
+    api.open_clip()
+    first = api.plan()["spec"]
+    api.post("/api/spec", {"spec": first | {"contrast": 0.6}})
+
+    other = tmp_path / "other.mp4"
+    shutil.copy(SAMPLE.resolve(), other)
+    api.post("/api/project", {"path": str(other)})
+    assert api.get("/api/state").json["history_depth"] == 0, "the new clip is not fresh"
+
+    back = api.open_clip()
+
+    assert back["history_depth"] == 2, "the other clip's session was overwritten"
+    assert back["spec"]["contrast"] == 0.6
+
+
+def test_two_clips_get_two_state_directories(api, tmp_path):
+    api.open_clip()
+    api.plan()
+    a = Path(api.get("/api/state").json["source"])
+
+    other = tmp_path / "other.mp4"
+    shutil.copy(SAMPLE.resolve(), other)
+    api.post("/api/project", {"path": str(other)})
+    api.post("/api/reference", {"path": str(REF.resolve())})
+
+    from ragvid import server as srv
+
+    ra, rb = srv._root_for(a), srv._root_for(other)
+    assert ra != rb, "two clips share one state directory"
+    assert (ra / ".ragvid" / "session.json").is_file()
+    assert (rb / ".ragvid" / "session.json").is_file()
+    # Neither inside the other, or deleting one project takes the other with it.
+    assert ra not in rb.parents and rb not in ra.parents
+
+
+def test_a_damaged_session_is_a_409_the_user_can_act_on(api, tmp_path):
+    """SessionCorrupt only became reachable when the server started REOPENING
+    sessions. Unmapped it is a 500 for something the user can fix, and
+    docs/ARCHITECTURE.md already says the answer is to offer a reset."""
+    from ragvid import server as srv
+
+    api.open_clip()
+    api.plan()
+    api.post("/api/close")
+    srv._root_for(SAMPLE.resolve()).joinpath(".ragvid", "session.json").write_text("{not json")
+
+    r = api.post("/api/project", {"path": str(SAMPLE.resolve())})
+
+    assert r.status == 409, f"got {r.status}: {r.body[:120]}"
+    assert r.json["error"]["type"] == "SessionCorrupt"
+    assert r.json["error"]["path"] and r.json["error"]["reason"]
 
 
 def test_restoring_an_old_step_grows_the_history_instead_of_cutting_it(api):

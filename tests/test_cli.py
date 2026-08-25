@@ -13,6 +13,16 @@ from pathlib import Path
 import pytest
 
 from ragvid import cli
+# Imported for its SIDE EFFECT, before any monkeypatching below. compiler.py
+# does `from ragvid.match import match_reference` at module level, so whichever
+# object that name holds at import time is the one it keeps. If compiler were
+# first imported DURING a test that has patched `ragvid.match.match_reference`,
+# it would bind the fake and keep it for the rest of the session -- monkeypatch
+# restores the module attribute it was given, and knows nothing about the copy.
+# Measured before this line existed: auto-balance then reported "" instead of
+# "neutralised a cyan cast" in tests/test_server.py, but only when a CLI test
+# ran first. Same family as the default-args-bind-at-def-time trap in CLAUDE.md.
+import ragvid.compiler  # noqa: F401
 from ragvid.probe import ClipStats
 from ragvid.session import Session
 from ragvid.spec import RGB, GradeSpec
@@ -85,6 +95,24 @@ def test_grade_vibe(calls, capsys):
 
     out = capsys.readouterr().out
     assert "gloomy" in out and _art("preview.png") in out
+
+
+def test_grading_twice_in_one_directory_keeps_the_first_grade(calls):
+    """`ragvid grade` was always Project.create, whose first push saves over
+    session.json -- so a second grade in the same folder destroyed the first
+    one's history, and re-probed the clip the cached ClipStats exists to avoid.
+    Grading twice is a normal thing to do."""
+    assert cli.main(["grade", "clip.mp4", "--vibe", "gloomy"]) == 0
+    assert cli.main(["grade", "clip.mp4", "--vibe", "warmer"]) == 0
+
+    s = Session.load()
+    assert len(s.specs) == 2, f"the first grade was lost: {s.labels}"
+    assert s.labels == ["gloomy", "warmer"], s.labels
+    # Reopening also means the cached ClipStats is reused rather than the clip
+    # being re-probed, which is implied by there being one session here at all:
+    # a re-probe only happens on Project.create, and a create would have left
+    # exactly one spec.
+    assert s.stats == STATS
 
 
 def test_grade_ref_never_calls_llm(calls):

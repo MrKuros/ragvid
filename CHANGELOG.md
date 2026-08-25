@@ -4,6 +4,26 @@ What changed, described by what it does for you rather than by which files
 moved. Versions follow [semantic versioning](https://semver.org): while ragvid
 is on `0.x`, a middle-number bump can change the shape of a saved grade.
 
+## Unreleased
+
+### Your work stays put
+
+- **Opening a clip you have graded before brings its grades back.** Every clip
+  now keeps its own folder, so opening a second clip cannot touch the first
+  one's history, and restarting ragvid no longer loses what you had. Before
+  this, every clip shared one folder and opening anything replaced whatever was
+  in it — and there was no way to get an old session back at all, because the
+  app never read one.
+- **Grading the same clip twice from the terminal adds to its history** instead
+  of replacing it.
+- **A half-finished save can no longer damage a session.** The file is written
+  beside the old one and swapped in only once it is complete, so a crash or a
+  full disk leaves the last good version rather than a truncated one.
+- **A damaged session says so plainly** instead of failing as an internal error.
+
+If you had a project open in a previous version, it lived in a shared folder
+that is no longer read. Open the clip again and grade it; nothing else moved.
+
 ## 0.2.0 — the first one you can install
 
 Until now ragvid existed only as a git checkout. This is the first release on

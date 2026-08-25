@@ -204,7 +204,7 @@ All return the same state object as `GET /api/state`.
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| `POST` | `/api/project` | multipart `file`, or `{"path": "/abs/path"}` | Opens a clip. Uploads land in the work dir. Replaces any open project. |
+| `POST` | `/api/project` | multipart `file`, or `{"path": "/abs/path"}` | Opens a clip, **reopening its session when there is one**. Each clip has its own state directory under the work dir, so opening a second clip does not touch the first one's history, and reopening a clip (or restarting the server) brings its grades back. A damaged session answers **409 `SessionCorrupt`** with `path` and `reason`. Uploads land in the work dir. |
 | `POST` | `/api/vibe` | `{"vibe": "gloomy"}` | Needs a provider key. Slow (network). |
 | `POST` | `/api/reference` | multipart `file`, or `{"path": "..."}` | Offline, no key, fast. |
 | `POST` | `/api/refine` | `{"instruction": "less blue"}` | Requires `planned`. Slow (network). |
