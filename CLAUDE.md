@@ -163,8 +163,8 @@ by construction.
 
 ## Where it stands
 
-Tier A is complete. Tier C is complete. Tier B is complete except B3b
-hue-vs-hue, B3c lum-vs-sat, B4 a real HSL qualifier and B5 keyframes. (B3 was
+Tier A is complete. Tier C is complete. Tier B is complete except B3c
+lum-vs-sat, B4 a real HSL qualifier and B5 keyframes. (B3 was
 five curve types on paper and three of them turned out to be already shipped —
 see the split rows in the roadmap.) Packaged for PyPI as 0.2.0
 (`uv tool install ragvid`) — the wheel is verified from a clean venv, but the
@@ -177,6 +177,14 @@ including skin), by place (top/bottom/left/right/center/edges) or by thing
 **what to spare** (`protect`). Refine edits that list rather than the numbers,
 so a second sentence no longer destroys the first one's regions.
 
+A sentence can also name **which way a colour should lean**: "warm up the
+greens" rotates that hue band instead of white-balancing the whole frame, and
+the vocabulary did not grow to say it — `warmth` joined `saturation` and
+`exposure` as a verb whose colour target selects pixels, so the three of them
+map one-to-one onto a hue band's three fields. The rotation axis is normalised
+Rec.709 luma; about (1,1,1) — the axis that looks obvious — a 25° turn moves
+luma by up to 42.4 code values.
+
 A sentence can also name **the shape of the tone curve**: `shadows down` bends
 the toe instead of translating it, and `shoulder` is the top end. On rail-black
 footage the old flat lift welded 7.37% of samples onto pure black at
@@ -188,7 +196,7 @@ Semantic masks are sampled **once**, not per frame: inference is 244 ms, so a
 export. The honest consequence — a subject leaving frame keeps its grade — is
 documented in `segment.py`.
 
-Next: **B3b hue-vs-hue** and **B3c lum-vs-sat**, one compiler pass each. After
+Next: **B3c lum-vs-sat**, one compiler pass. After
 that the honest 1.0 blocker is not a feature: nobody has yet graded real footage with this,
 and the CI matrix has only just gained Windows and macOS — whose first run
 already turned up an `os.fchmod` call that made the app unconfigurable there.

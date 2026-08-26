@@ -6,6 +6,19 @@ is on `0.x`, a middle-number bump can change the shape of a saved grade.
 
 ## Unreleased
 
+### Saying what you want
+
+- **"Warm up the greens" now warms the greens.** It used to warm the whole
+  picture — a white-balance move, aimed at everything, while the list of what it
+  did said only "warmed it up". A colour named on "warmer" or "cooler" now turns
+  that colour and leaves the rest of the frame untouched, down to the last
+  digit: "push the greens toward yellow", "make the skin less orange". The turn
+  cannot change how bright a colour is, which is not free — turning a colour
+  around the axis that looks obvious would have shifted brightness by up to 42
+  of the 256 levels a finished file is made of.
+- **It costs nothing to say.** No new word, no new control: the sentence could
+  already name a colour, and there is now somewhere for it to land.
+
 ### Your work stays put
 
 - **Opening a clip you have graded before brings its grades back.** Every clip

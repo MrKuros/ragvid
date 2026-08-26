@@ -26,6 +26,7 @@ import pytest
 from ragvid.lut import _grid
 from ragvid.spec import (
     HUE_CENTERS,
+    _apply_hue_bands,
     HUE_CHROMA_GATE,
     HUE_HALFWIDTH,
     HUE_FIELDS,
@@ -312,6 +313,83 @@ def test_hue_band_lum_moves_brightness_only():
     assert np.abs(d - d[0]).max() < 1e-15                  # equal on all channels
     assert np.abs(chroma(out[2]) - chroma(wheel[2])) < 1e-15   # saturation untouched
     assert np.abs(out[[0, 1, 3, 4, 5]] - wheel[[0, 1, 3, 4, 5]]).max() < 1e-15
+
+
+def test_hue_band_rot_turns_its_own_band_and_leaves_the_others_alone():
+    """The hue-vs-hue move: green turns toward yellow without the other five
+    hues moving at all. Sign convention is HSV's -- POSITIVE rot raises the hue
+    angle, so green (120) goes toward cyan (180) and negative goes to yellow.
+    compiler._BAND_WARM_SIGN is the table that turns "warmer" into that sign,
+    and it is only correct if this one is."""
+    wheel = HUE_WHEEL * 0.5 + 0.25   # inside the gamut, so nothing clips
+    out = GradeSpec(hue_green=HueBand(rot=-30.0)).apply(wheel)
+    before, after = wheel[2], out[2]
+    assert after[0] > before[0] + 0.05      # toward yellow: red rises
+    assert after[2] <= before[2] + 1e-12    # ...and blue does not
+    # Saturation is untouched, measured as the LENGTH of the chroma vector.
+    # Not max-minus-min: that is hue-dependent at constant chroma magnitude, so
+    # a pure rotation legitimately changes it (0.500 -> 0.590 here).
+    mag = lambda px: float(np.linalg.norm(px - luma(px)))
+    assert mag(after) == pytest.approx(mag(before), abs=1e-12)
+    # the other five pure hues sit at weight 0 for the green band
+    assert np.abs(out[[0, 1, 3, 4, 5]] - wheel[[0, 1, 3, 4, 5]]).max() < 1e-15
+    # ...and the other way turns the other way
+    assert GradeSpec(hue_green=HueBand(rot=30.0)).apply(wheel)[2][2] > before[2] + 0.05
+
+
+def test_a_hue_rotation_does_not_change_brightness():
+    """The axis is Rec.709 luma, NOT (1,1,1), and the difference is not
+    academic. Rodrigues about (1,1,1) preserves r+g+b; measured over 2e5 random
+    points at 25 degrees it moves Rec.709 luma by up to 0.1664 -- 42.4 code
+    values of unrequested brightness wherever a colour was turned. This
+    function's own docstring promises luma-preserving and nothing downstream
+    re-checks it."""
+    x = np.random.default_rng(11).random((200_000, 3))
+    ones, zeros = np.ones(len(HUE_CENTERS)), np.zeros(len(HUE_CENTERS))
+    out = _apply_hue_bands(x, ones, zeros, np.full(len(HUE_CENTERS), 25.0))
+    assert np.abs(luma(out) - luma(x)).max() < 1e-12
+
+    # The comparison, so the number in the docstring is not folklore: the same
+    # rotation about (1,1,1), which is the axis that looks obvious and is wrong.
+    n = np.ones(3) / np.sqrt(3.0)
+    v, t = x - luma(x)[:, None], np.radians(25.0)
+    wrong = v * np.cos(t) + np.cross(n, v) * np.sin(t) + n * (v @ n)[:, None] * (1 - np.cos(t))
+    assert np.abs(luma(luma(x)[:, None] + wrong) - luma(x)).max() > 0.16
+
+    # apply() clips to gamut afterwards and a clip CANNOT preserve luma, so the
+    # promise is about the rotation, not about a saturated pixel turned out of
+    # the cube. Measured: up to 0.074 on uniform random RGB.
+
+
+def test_a_rotation_alone_counts_as_a_hue_qualifier():
+    """has_hue_qualifiers gates BOTH the apply() skip and lut.py's escalation
+    to 65^3. A rot missing from it would make a rotation-only grade silently do
+    nothing AND bake at the small size."""
+    spec = GradeSpec(hue_blue=HueBand(rot=10.0))
+    assert spec.has_hue_qualifiers()
+    assert not spec.is_identity()
+    x = HUE_WHEEL * 0.8 + 0.1
+    assert not np.array_equal(spec.apply(x), GradeSpec().apply(x))
+
+
+def test_sanitize_keeps_rot_and_clamps_it_to_one_band_width():
+    d = GradeSpec(hue_red=HueBand(rot=400.0), hue_blue=HueBand(rot=-400.0)).sanitize()
+    assert d.hue_red.rot == HUE_HALFWIDTH
+    assert d.hue_blue.rot == -HUE_HALFWIDTH
+    # and a legal one survives: sanitize rebuilds the band dict key by key, so
+    # a forgotten key here would silently reset every rotation to 0.
+    assert GradeSpec(hue_green=HueBand(rot=17.5)).sanitize().hue_green.rot == 17.5
+
+
+def test_the_direct_schema_deliberately_cannot_author_a_rotation():
+    """rot is intent-path only. The direct path already asks a 20B model for 43
+    numbers and holds ~40 at identity; six more it has no words for is exactly
+    the collapse docs/ROADMAP.md says A1 exists to avoid. Absent from the
+    schema, pydantic defaults it to 0, so the direct path keeps working and
+    simply cannot reach this capability."""
+    import json
+    assert "rot" not in json.dumps(GradeSpec.llm_json_schema())
+    assert GradeSpec(**{"hue_red": {"sat": 1.2, "lum": 0.0}}).hue_red.rot == 0.0
 
 
 def test_chroma_gate_protects_the_neutral_axis():

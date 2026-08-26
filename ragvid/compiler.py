@@ -67,7 +67,7 @@ from ragvid.intent import (
 )
 from ragvid.match import match_reference
 from ragvid.region import GradeStack, Layer, Region, for_target, outside
-from ragvid.spec import LUMA, RGB, GradeSpec
+from ragvid.spec import HUE_CENTERS, HUE_FIELDS, HUE_HALFWIDTH, LUMA, RGB, GradeSpec
 
 if TYPE_CHECKING:  # probe imports nothing from us; keeps the dependency one-way
     from ragvid.probe import ClipStats
@@ -102,6 +102,19 @@ STEP_HARDEN = 0.11        # ...and the other way, as negative contrast. Half of
 # measures f(1) at each setting) -- a loss nobody asked for from one word.
 MAX_SHOULDER = 0.6
 
+# Half a band width, and the bound is a COLOUR argument rather than a LUT-error
+# one. The six bands are a partition of unity HUE_HALFWIDTH apart, so a rotation
+# of a full half-width carries a hue onto its neighbour's centre: rotate green
+# by 60 and green pixels land where yellow started, which means the band the
+# user named is no longer the band their pixels are in. Past ~30 degrees it also
+# stops reading as "that colour, warmer" and starts reading as a different
+# colour, which is not what any sentence here asks for. Derived from an existing
+# constant on purpose, the way MAX_SHOULDER's own bound was.
+MAX_BAND_ROT = HUE_HALFWIDTH / 2.0
+
+# The warm end of the wheel, the same 30 degrees warm_bias already uses.
+_WARM_HUE = 30.0
+
 STEP_HIGHLIGHTS = 0.05
 STEP_WARMTH = 800.0       # Kelvin-ish, TEMP_FULL is 3000
 STEP_TINT = 0.12          # green/magenta axis
@@ -109,6 +122,7 @@ STEP_SATURATION = 0.30    # fractional, applied multiplicatively
 STEP_SPLIT_TINT = 0.06    # tonal-split tint vector length
 STEP_BAND_SAT = 0.35      # hue qualifier saturation, fractional
 STEP_BAND_LUM = 0.05      # hue qualifier luma offset
+STEP_BAND_ROT = 12.0      # hue qualifier rotation, DEGREES; "strong" lands on 24
 STEP_EFFECT = 0.25        # every EffectSpec knob except fringe
 STEP_FRINGE = 0.15        # narrower: fringe reads as a defect twice as fast
 
@@ -125,6 +139,19 @@ _HUE_CONF_SPAN = 0.15
 # it. Bounded on purpose: the measurement scales the request, it never overrides
 # it, and a verb must never come out at zero or reversed.
 _BIAS_GAIN = 0.4
+
+
+def _short(a: float, b: float) -> float:
+    """Signed shortest angle from a to b, degrees, in (-180, 180]."""
+    return ((b - a + 180.0) % 360.0) - 180.0
+
+
+# Which way each band has to turn to get warmer, in HUE_CENTERS order. This is
+# geometry, not taste: red and the two cool bands reach 30 degrees by rotating
+# UP through magenta, yellow/green/cyan by rotating DOWN. Without it "warm the
+# blues" and "warm the greens" would turn the same way and one of them would be
+# moving away from warm.
+_BAND_WARM_SIGN = np.sign([_short(c, _WARM_HUE) for c in HUE_CENTERS])
 
 
 @dataclass(frozen=True)
@@ -146,6 +173,7 @@ class _Measured:
     sat: float
     warm_bias: float     # -1..1, +1 = this clip is ALREADY orange
     magenta_bias: float  # -1..1, +1 = this clip is ALREADY magenta
+    band_bias: np.ndarray  # (6,) -1..1, +1 = that band ALREADY leans warm
 
 
 def _measure(stats: "ClipStats") -> _Measured:
@@ -172,9 +200,36 @@ def _measure(stats: "ClipStats") -> _Measured:
         var=stats.frame_variance,
         sat=stats.saturation,
         # 30 deg is orange (the warm end of the wheel), 300 deg is magenta.
-        warm_bias=conf * math.cos(h - math.radians(30.0)),
+        warm_bias=conf * math.cos(h - math.radians(_WARM_HUE)),
         magenta_bias=conf * math.cos(h - math.radians(300.0)),
+        band_bias=_band_bias(stats),
     )
+
+
+def _band_bias(stats: "ClipStats") -> np.ndarray:
+    """Per band: how far its pixels already lean the way a warming rotation
+    would take them, -1..1, scaled by how much of the frame's chroma it holds.
+
+    NOT cos(hue - 30) the way warm_bias is. That would be a constant per band --
+    the blue band sits 210 degrees from warm no matter what is in the shot --
+    so it would be a preference wearing a measurement's name. What is actually
+    measured here is the deviation of the band's pixels from the band CENTRE,
+    which is the only part of a band's hue the footage gets to decide.
+
+    Confidence is the band's SHARE of the frame's chroma, which needs no
+    threshold to be invented: the six band weights are a partition of unity, so
+    the shares sum to 1 and a band holding an even sixth earns 0.17 of the bias
+    while a band holding all the colour in the shot earns all of it.
+    """
+    zero = np.zeros(len(HUE_CENTERS))
+    if len(stats.band_hue) != len(HUE_CENTERS) or len(stats.band_strength) != len(HUE_CENTERS):
+        return zero  # a session written before probe.py measured this
+    st = np.asarray(stats.band_strength, dtype=np.float64)
+    total = float(st.sum())
+    if total <= 0.0:
+        return zero  # a monochrome clip has no band hues to lean
+    dev = np.array([_short(c, h) for c, h in zip(HUE_CENTERS, stats.band_hue)])
+    return (st / total) * (dev / HUE_HALFWIDTH) * _BAND_WARM_SIGN
 
 
 # ---- hue qualifier routing -------------------------------------------------
@@ -223,6 +278,24 @@ def _band_sat(d: dict, target: str, k: float) -> None:
 def _band_lum(d: dict, target: str, k: float) -> None:
     for field, w in _BANDS[target]:
         d[field]["lum"] += k * w
+
+
+def _band_rot(d: dict, target: str, k: float, m: _Measured) -> None:
+    """Warmth on one hue family: a rotation of that band, in degrees.
+
+    Clamped rather than accumulated without limit -- see MAX_BAND_ROT. Two
+    "warmer in the greens" ops therefore stop at half a band width instead of
+    walking green out of its own band.
+    """
+    for field, w in _BANDS[target]:
+        i = HUE_FIELDS.index(field)
+        # Same shape as _warmth one level down: the measurement scales the
+        # request toward or away from where the band already sits, never
+        # overrides it.
+        step = k * STEP_BAND_ROT * w * _BAND_WARM_SIGN[i]
+        step *= 1.0 - _BIAS_GAIN * m.band_bias[i] * _sign(k)
+        d[field]["rot"] = float(
+            np.clip(d[field]["rot"] + step, -MAX_BAND_ROT, MAX_BAND_ROT))
 
 
 # ---- the verbs -------------------------------------------------------------
@@ -413,6 +486,13 @@ def _shoulder(d: dict, k: float, item: Op, m: _Measured) -> None:
 
 
 def _warmth(d: dict, k: float, item: Op, m: _Measured) -> None:
+    # With a colour target this is "warm up the greens", which is a rotation of
+    # that band toward the warm end of the wheel -- not a global temperature
+    # move, which would warm every pixel in the frame including the ones the
+    # sentence named as the thing to leave alone.
+    if item.target:
+        return _band_rot(d, item.target, k, m)
+
     # The measurement that matters, and the reason this module exists: a clip
     # already sitting in the orange part of the wheel needs LESS push to read as
     # warmer, and MORE to read as cooler, because cooling it has to cross

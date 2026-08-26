@@ -227,6 +227,18 @@ def test_a_colour_target_still_reads_as_a_colour():
         ["pushed teal into the shadows"]
 
 
+def test_warmth_on_a_colour_says_which_colour_it_warmed():
+    """B3b added a capability and no vocabulary word: warmth joined SELECTIVE,
+    so the sentence already knew how to say it. Before that, the validator
+    stripped the colour off warmth (it read one on no verb) and the list said
+    only "warmed it up" while the grade warmed the whole frame."""
+    assert describe(Intent(ops=[Op(op="warmth", target="green")])) == \
+        ["warmed it up in the greens"]
+    assert describe(Intent(ops=[Op(op="warmth", dir="down", target="skin")])) == \
+        ["cooled it down in the skin tones"]
+    assert Op(op="warmth", target="green").target == "green"
+
+
 def test_a_region_on_a_texture_verb_never_reaches_the_sentence():
     """grain lives in the ffmpeg chain and cannot be masked, so promising it in
     the list would describe a move that did not happen."""

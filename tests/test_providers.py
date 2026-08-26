@@ -213,6 +213,20 @@ def test_refine_prompt_includes_current_spec_and_demands_a_full_spec():
     assert "unchanged" in p.system
 
 
+def test_a_refine_cannot_silently_drop_a_hue_rotation():
+    """`rot` is deliberately absent from GradeSpec.llm_json_schema, so a model
+    on the direct path can neither read one nor write one back. Without the
+    carry-forward, refining a grade that came from the intent path -- possible
+    the moment the provider is swapped for one that cannot constrain decoding --
+    would reset every rotation to 0 while claiming to have adjusted the grade."""
+    from ragvid.spec import HueBand
+
+    turned = CANNED.model_copy(update={"hue_green": HueBand(sat=1.1, rot=-18.0)})
+    out = refine_spec(turned, "warmer", STATS, provider=FakeProvider())
+    assert out.hue_green.rot == -18.0
+    assert "rot" not in json.dumps(GradeSpec.llm_json_schema())
+
+
 def test_refine_system_prompt_extends_the_vibe_one():
     p = FakeProvider()
     refine_spec(CANNED, "warmer", STATS, provider=p)

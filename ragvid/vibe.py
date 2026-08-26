@@ -384,8 +384,12 @@ VERB — LEAVING SOMETHING OUT. This one moves nothing by itself.
 TARGET, in full. It answers WHICH PIXELS, and takes either a colour or a place.
 
 COLOURS: red, orange, yellow, green, cyan, teal, blue, magenta, purple, skin.
-  - on saturation and exposure a colour SELECTS which pixels move, by the colour they
-    already are: "drain the greens", "darken the reds", "keep the skin, kill the rest".
+  - on saturation, exposure and warmth a colour SELECTS which pixels move, by the colour
+    they already are: "drain the greens", "darken the reds", "keep the skin, kill the rest".
+    warmth with a colour SHIFTS THAT COLOUR toward or away from orange without touching
+    the rest of the frame — "push the greens toward yellow" is warmth up on green, "make
+    the skin less orange" is warmth down on skin. Untargeted warmth is still the global
+    white balance, so use a colour only when the sentence names one.
   - on shadow_tint and highlight_tint a colour NAMES THE COLOUR being added.
   Every other verb ignores a colour target. Leave it "" on them.
 

@@ -160,6 +160,7 @@ class HueBand(BaseModel):
 
     sat: float = Field(1.0, description="Saturation multiplier for this hue. 1.0 = unchanged.")
     lum: float = Field(0.0, description="Luma offset for this hue. 0.0 = unchanged.")
+    rot: float = Field(0.0, description="Hue rotation for this hue, in degrees. 0.0 = unchanged.")
 
 
 class EffectSpec(BaseModel):
@@ -262,7 +263,7 @@ class GradeSpec(BaseModel):
         """True if any hue band is off identity. lut.py uses this to pick a
         LUT size; apply() uses it to skip the band pass entirely."""
         return any(
-            abs(b.sat - 1.0) > tol or abs(b.lum) > tol
+            abs(b.sat - 1.0) > tol or abs(b.lum) > tol or abs(b.rot) > tol
             for b in (getattr(self, f) for f in HUE_FIELDS)
         )
 
@@ -301,6 +302,7 @@ class GradeSpec(BaseModel):
                 x,
                 np.array([b.sat for b in bands], dtype=np.float64),
                 np.array([b.lum for b in bands], dtype=np.float64),
+                np.array([b.rot for b in bands], dtype=np.float64),
             )
 
         # 6. Tonal split. Exact even unguarded (x + 0.0 == x); guarded anyway to
@@ -396,6 +398,15 @@ class GradeSpec(BaseModel):
             "required": ["r", "g", "b"],
             "additionalProperties": False,
         }
+        # `rot` is missing on purpose, and this is the one place in the schema
+        # that does not track HueBand's fields. This path already asks a 20B
+        # model to author 43 numbers and hold ~40 of them at identity; six more
+        # it has no vocabulary for is the collapse docs/ROADMAP.md says the
+        # intent path exists to avoid. Absent here, pydantic defaults it to 0,
+        # so the direct path keeps working and simply cannot reach hue-vs-hue —
+        # which is what "the backend gets arbitrarily clever" costs on an
+        # endpoint that cannot constrain decoding. refine.py carries an existing
+        # rotation across a direct-path refine rather than letting it be zeroed.
         hue = {
             "type": "object",
             "properties": {"sat": num, "lum": num},
@@ -460,6 +471,12 @@ class GradeSpec(BaseModel):
             d[f] = {
                 "sat": float(np.clip(d[f]["sat"], 0.0, 4.0)),
                 "lum": float(np.clip(d[f]["lum"], -0.5, 0.5)),
+                # +/- one band half-width, which is twice what the compiler will
+                # ever ask for (MAX_BAND_ROT). Past a half-width a rotation
+                # carries a hue clean past its neighbour's centre, so the band
+                # that was edited is no longer the band the pixels are in --
+                # the setting stops meaning what its name says.
+                "rot": float(np.clip(d[f]["rot"], -HUE_HALFWIDTH, HUE_HALFWIDTH)),
             }
 
         e = d["effects"]
@@ -526,7 +543,9 @@ def _hue_chroma(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.where(c > _TOL, h, 0.0), c
 
 
-def _apply_hue_bands(x: np.ndarray, sats: np.ndarray, lums: np.ndarray) -> np.ndarray:
+def _apply_hue_bands(
+    x: np.ndarray, sats: np.ndarray, lums: np.ndarray, rots: np.ndarray
+) -> np.ndarray:
     """Six smoothstepped triangular hue bands, chroma-gated, luma-preserving."""
     h, c = _hue_chroma(x)
     d = ((h[..., None] - HUE_CENTERS + 180.0) % 360.0) - 180.0
@@ -538,7 +557,26 @@ def _apply_hue_bands(x: np.ndarray, sats: np.ndarray, lums: np.ndarray) -> np.nd
     s = 1.0 + gate * ((w * sats).sum(axis=-1) - 1.0)
     o = gate * (w * lums).sum(axis=-1)
     L = np.sum(x * LUMA, axis=-1, keepdims=True)
-    return L + (x - L) * s[..., None] + o[..., None]
+    v = x - L
+
+    if np.any(rots):
+        # Rotate the chroma vector about the NORMALISED LUMA axis, not about
+        # (1,1,1). Rodrigues about a unit axis n preserves dot(., n), so this
+        # preserves Rec.709 luma exactly; (1,1,1) preserves r+g+b, which is a
+        # different quantity. Measured over 2e5 random points at 25 degrees:
+        # max |delta luma| is 1.11e-16 here against 0.1664 = 42.4 code values
+        # about (1,1,1). This function's docstring says "luma-preserving" and
+        # the caller has no other guard, so the wrong axis would be a silent
+        # brightness shift wherever a colour was rotated.
+        #
+        # v is already perpendicular to n -- dot(x - L*1, LUMA) cancels because
+        # sum(LUMA) == 1 -- so Rodrigues collapses to the two-term form and the
+        # n(n.v)(1-cos) term is dropped rather than approximated.
+        n = LUMA / np.sqrt(np.sum(LUMA * LUMA))
+        t = np.radians(gate * (w * rots).sum(axis=-1))[..., None]
+        v = v * np.cos(t) + np.cross(n, v) * np.sin(t)
+
+    return L + v * s[..., None] + o[..., None]
 
 
 # ---- highlight rolloff ----------------------------------------------------

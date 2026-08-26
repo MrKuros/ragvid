@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING
 
 from ragvid.errors import ProviderError
 from ragvid.intent import Intent
-from ragvid.spec import GradeSpec
+from ragvid.spec import HUE_FIELDS, GradeSpec
 from ragvid.vibe import REFINE_INTENT_SYSTEM, SYSTEM, format_stats
 
 if TYPE_CHECKING:
@@ -111,7 +111,18 @@ def refine_spec(
         f'The user\'s adjustment request: "{instruction}"\n\n'
         "Return the full modified spec."
     )
-    return provider.plan(SYSTEM + REFINE_RULES, user).sanitize()
+    out = provider.plan(SYSTEM + REFINE_RULES, user).sanitize()
+    # Carry the hue rotations across by hand. They are deliberately absent from
+    # GradeSpec.llm_json_schema (the direct path has no words for them, see
+    # spec.llm_json_schema), so a spec that arrived with rotations -- graded on
+    # the intent path, then refined after the provider was swapped for one that
+    # cannot constrain decoding -- would come back with every one of them reset
+    # to 0. A refine is supposed to adjust a grade, never to silently drop a
+    # part of it the model was not asked about.
+    return out.model_copy(update={
+        f: getattr(out, f).model_copy(update={"rot": getattr(current, f).rot})
+        for f in HUE_FIELDS
+    })
 
 
 def refine_intent(

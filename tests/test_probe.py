@@ -406,3 +406,43 @@ def test_16_bit_sampling_beats_8_bit_on_log_footage(tmp_path):
         return len(np.unique(_unit(f) @ np.array([0.2126, 0.7152, 0.0722])))
 
     assert levels(_grab(str(raw), 0.0, cube)) > 10 * levels(grab8(str(raw), 0.0, cube))
+
+
+# --- per-band hue (roadmap B3b) ---------------------------------------------
+
+
+def test_band_hue_says_where_each_band_sits_and_which_bands_are_empty(tmp_path):
+    """One global angle cannot answer "where are this shot's greens?", which is
+    what a band rotation needs. Half pure green (120 deg), half yellow-green
+    (~90): the yellow band must see only the 90s, the green band a mix pulled
+    below 120, and the four bands with nothing in them must report strength 0
+    rather than an angle the compiler would then trust."""
+    arr = np.zeros((20, 20, 3), dtype=np.uint8)
+    arr[:10] = (0, 255, 0)      # 120 deg
+    arr[10:] = (128, 255, 0)    # ~90 deg
+    p = tmp_path / "greens.png"
+    Image.fromarray(arr).save(p)
+    s = probe_image(str(p))
+
+    assert len(s.band_hue) == 6 and len(s.band_strength) == 6
+    assert s.band_hue[1] == pytest.approx(90.0, abs=1.0)       # yellow band
+    assert 100.0 < s.band_hue[2] < 120.0                       # green band, pulled down
+    assert s.band_strength[1] > 0 and s.band_strength[2] > 0
+    for i in (0, 3, 4, 5):
+        assert s.band_strength[i] == 0.0, i                    # red/cyan/blue/magenta
+
+
+def test_band_hue_is_chroma_weighted_so_grey_does_not_land_in_red(tmp_path):
+    """_hue_deg returns 0.0 for a neutral pixel, so an unweighted mean would
+    file every grey in the frame under RED and then let a rotation bias itself
+    on it. A mostly-grey frame with one blue patch must report blue and nothing
+    else."""
+    arr = np.full((20, 20, 3), 128, dtype=np.uint8)
+    arr[:2, :2] = (0, 0, 255)
+    p = tmp_path / "mostly_grey.png"
+    Image.fromarray(arr).save(p)
+    s = probe_image(str(p))
+
+    assert s.band_strength[0] == pytest.approx(0.0, abs=1e-9)  # not red
+    assert s.band_strength[4] > 0.0                            # blue
+    assert s.band_hue[4] == pytest.approx(240.0, abs=1.0)

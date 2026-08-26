@@ -50,7 +50,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from ragvid.platform import ffmpeg, ffprobe
-from ragvid.spec import LUMA, RGB
+from ragvid.spec import HUE_CENTERS, HUE_HALFWIDTH, LUMA, RGB, _smoothstep
 
 # sRGB piecewise transfer function constants (IEC 61966-2-1).
 _A = 0.055
@@ -159,6 +159,16 @@ class ClipStats(BaseModel):
     # hue; equals mean absolute chroma when every pixel agrees on the hue.
     hue_strength: float = 0.0
 
+    # dominant_hue and hue_strength, per hue qualifier band, in HUE_CENTERS
+    # order. Six angles in degrees and the six vector lengths that say how much
+    # to believe them -- a band holding no chroma reports strength 0, and the
+    # compiler must not bias a rotation on an angle nobody measured. Default
+    # empty rather than six zeros: a session written before this existed would
+    # otherwise claim every band sits at red with confidence, which is a
+    # measurement, not a missing one. Consumers check the length.
+    band_hue: list[float] = Field(default_factory=list)
+    band_strength: list[float] = Field(default_factory=list)
+
     # Number of adjacent SAMPLE PAIRS that do not look like the same shot. A
     # lower bound on the cuts in the clip, never a shot list: at n_frames=10
     # the samples are whole seconds apart, so this answers "is this one
@@ -191,6 +201,23 @@ def _frame_stats(rgb: np.ndarray) -> dict:
     h = np.radians(_hue_deg(v, hi, chroma))
     hue_vec = np.array([np.sum(chroma * np.cos(h)), np.sum(chroma * np.sin(h))]) / len(v)
 
+    # The same thing again, once per hue qualifier band. A band rotation needs
+    # to know where THAT band's pixels actually sit -- "warm the greens" on a
+    # shot whose greens are already yellow-green needs less rotation than on one
+    # whose greens are pure -- and one global angle cannot say. The six weights
+    # are spec._apply_hue_bands' own, so a band measured here is exactly the set
+    # of pixels the band setting will move; deriving them separately would let
+    # the two drift apart silently.
+    #
+    # Chroma weighting is not optional: _hue_deg returns 0.0 for a neutral
+    # pixel, so an unweighted mean would file every grey in the frame under RED.
+    d = ((np.degrees(h)[:, None] - HUE_CENTERS + 180.0) % 360.0) - 180.0
+    cw = chroma[:, None] * _smoothstep(np.clip(1.0 - np.abs(d) / HUE_HALFWIDTH, 0.0, 1.0))
+    band_vec = np.stack(
+        [(cw * np.cos(h)[:, None]).sum(axis=0), (cw * np.sin(h)[:, None]).sum(axis=0)],
+        axis=1,
+    ) / len(v)  # (6, 2), vectors for the same reason hue_vec is one
+
     luma = v @ LUMA
     return {
         "mean": v.mean(axis=0),
@@ -202,6 +229,7 @@ def _frame_stats(rgb: np.ndarray) -> dict:
         "clipped_high": float(np.mean(hi >= 1.0 - _RAIL)),
         "crushed_low": float(np.mean(lo <= _RAIL)),
         "hue_vec": hue_vec,
+        "band_vec": band_vec,
         "frame_variance": float(luma.var()),
     }
 
@@ -245,6 +273,9 @@ def _stats_from_frames(
     per = [_frame_stats(f) for f in frames]
     med = {k: np.median([p[k] for p in per], axis=0) for k in per[0]}
     hx, hy = med["hue_vec"]
+    # np.median with axis=0 over a list of (6, 2) is elementwise, and the six
+    # arctan2s are taken AFTER it for the same reason dominant_hue's one is.
+    bx, by = med["band_vec"][:, 0], med["band_vec"][:, 1]
     return ClipStats(
         mean=RGB(r=med["mean"][0], g=med["mean"][1], b=med["mean"][2]),
         std=RGB(r=med["std"][0], g=med["std"][1], b=med["std"][2]),
@@ -261,6 +292,8 @@ def _stats_from_frames(
         dominant_hue=float(np.degrees(np.arctan2(hy, hx)) % 360.0),
         frame_variance=float(med["frame_variance"]),
         hue_strength=float(np.hypot(hx, hy)),
+        band_hue=[float(a) for a in np.degrees(np.arctan2(by, bx)) % 360.0],
+        band_strength=[float(a) for a in np.hypot(bx, by)],
         cuts=int(sum(d > _CUT_TV for d in _cut_distances(frames))),
     )
 

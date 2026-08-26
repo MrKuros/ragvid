@@ -277,7 +277,11 @@ _PHRASES: dict[str, tuple[str, str]] = {
 }
 
 # Verbs whose `target` selects WHICH PIXELS, rather than naming a colour to add.
-SELECTIVE = ("saturation", "exposure")
+# The three of them map one-to-one onto the three fields of a hue qualifier --
+# saturation -> sat, exposure -> lum, warmth -> rot -- which is why hue-vs-hue
+# cost this vocabulary NO new word: "warm up the greens" was already sayable and
+# already had somewhere to land.
+SELECTIVE = ("saturation", "exposure", "warmth")
 
 # Every verb a COLOUR target means something on: SELECTIVE says which PIXELS
 # move, the two tint verbs say which COLOUR is added. Named once because the

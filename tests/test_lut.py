@@ -91,7 +91,7 @@ def test_read_rejects_truncated(tmp_path):
 # RANDOM RGB points: a sweep along a saturated-hue ramp never visits them and
 # would happily report a clean LUT that is visibly wrong in the shot.
 
-from ragvid.spec import HueBand  # noqa: E402
+from ragvid.spec import HUE_FIELDS, HueBand  # noqa: E402
 
 
 def trilinear(table, size, pts):
@@ -164,6 +164,32 @@ def test_thirty_three_would_not_have_been_enough(tmp_path):
     assert e65 < 6.0, f"extreme at 65^3: {e65:.2f}/255"
 
 
+def test_a_hue_rotation_is_cheaper_to_bake_than_what_already_ships():
+    """The bound on MAX_BAND_ROT is a colour argument, so this is the check that
+    it is not ALSO buying a precision problem. Measured over 2e5 random points,
+    max error in 8-bit code values:
+
+                                    33^3    65^3
+        today's QUALIFIED           2.63    1.28
+        worst shipping band sat     3.42    1.52
+        rot 12 (one "warmer")       2.07    1.03
+        rot 30 (MAX_BAND_ROT)       2.20    1.09
+        rot 30 on all six bands     2.06    1.08
+
+    Rotation is the cheapest of the three band fields, and it escalates to 65^3
+    anyway because it is a qualifier -- so B3b costs nothing in LUT accuracy."""
+    from ragvid.compiler import MAX_BAND_ROT
+
+    pts = np.random.default_rng(7).random((200_000, 3))
+
+    def err(spec, n):
+        return np.abs(trilinear(spec.apply(ref_grid(n)), n, pts) - spec.apply(pts)).max() * 255
+
+    turned = GradeSpec(**{f: HueBand(rot=MAX_BAND_ROT) for f in HUE_FIELDS})
+    assert err(turned, 33) < err(QUALIFIED, 33)
+    assert err(turned, 65) < 1.5
+
+
 def test_no_qualifier_grade_is_accurate_at_the_default_size(tmp_path):
     spec = GradeSpec(slope=RGB(r=1.2, g=1.0, b=0.85), saturation=1.3,
                      contrast=0.4, exposure=0.3, highlight_rolloff=0.4,
@@ -179,7 +205,7 @@ def test_size_escalates_only_for_hue_qualifiers(tmp_path):
     assert not plain.has_hue_qualifiers()
 
     for field in ("hue_red", "hue_yellow", "hue_green", "hue_cyan", "hue_blue", "hue_magenta"):
-        for band in (HueBand(sat=1.05), HueBand(lum=0.01)):
+        for band in (HueBand(sat=1.05), HueBand(lum=0.01), HueBand(rot=1.0)):
             spec = GradeSpec(**{field: band})
             assert spec.has_hue_qualifiers(), field
             assert read_cube(bake_cube(spec, str(tmp_path / f"{field}.cube")))[0] == 65

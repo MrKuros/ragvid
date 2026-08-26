@@ -21,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ragvid.compiler import compile_intent
+from ragvid.compiler import MAX_BAND_ROT, compile_intent
 from ragvid.intent import AMOUNTS, MASK_OPS, OPS, Intent, Op
 from ragvid.lut import _grid
 from ragvid.probe import ClipStats, _stats_from_frames
@@ -600,6 +600,61 @@ def test_every_colour_target_reaches_the_grade(target):
     describing a move that never happened."""
     assert not compile_intent(one("saturation", target=target), STATS).is_identity()
     assert not compile_intent(one("shadow_tint", target=target), STATS).is_identity()
+
+
+def test_warmth_with_a_colour_turns_that_hue_and_leaves_the_frame_alone():
+    """B3b, and the sentence it exists for: "push the greens toward yellow".
+    Before rot existed this compiled to a GLOBAL temperature push -- it warmed
+    the reds the user did not name, and describe() said only "warmed it up"."""
+    green, red = hue_patch([0.2, 0.65, 0.2]), hue_patch([0.65, 0.2, 0.2])
+    img = np.vstack([green, red])
+    spec = compile_intent(one("warmth", target="green"), stats_of(img))
+    assert spec.temperature == 0.0            # NOT the global white balance
+    assert spec.hue_green.rot != 0.0
+    o = spec.apply(img)
+    n = len(green)
+    # the greens turned toward yellow: red rises against blue in that patch
+    assert m_rb(o[:n]) > m_rb(green) + 0.02
+    # ...and the reds did not move at all
+    assert np.abs(o[n:] - red).max() < 1e-12
+
+
+def test_warming_a_cool_band_turns_the_opposite_way_from_a_warm_one():
+    """Geometry, not taste: green reaches orange by rotating DOWN through
+    yellow and blue reaches it by rotating UP through magenta. One sign for
+    both would send one of them away from warm."""
+    g = compile_intent(one("warmth", target="green"), STATS).hue_green.rot
+    b = compile_intent(one("warmth", target="blue"), STATS).hue_blue.rot
+    assert g < 0 < b
+
+
+def test_a_band_rotation_is_bounded_at_half_a_band_width():
+    """Past a half-width the rotation carries a hue onto its neighbour's centre
+    -- green pixels land where yellow started -- so the band the sentence named
+    stops being the band its pixels are in."""
+    many = Intent(ops=[Op(op="warmth", amount="strong", target="green")] * 5)
+    assert compile_intent(many, STATS).hue_green.rot == pytest.approx(-MAX_BAND_ROT)
+
+
+def test_a_band_already_leaning_warm_gets_a_smaller_turn():
+    """The house rule, one level down from _warmth's own: the measurement
+    scales the request, it never overrides it. Two clips, same sentence -- one
+    whose greens are already yellow-green, one whose greens are pure."""
+    pure = hue_patch([0.15, 0.65, 0.15])           # ~120 deg
+    leaning = hue_patch([0.40, 0.65, 0.15])        # ~90 deg, already toward yellow
+    rot = lambda img: compile_intent(
+        one("warmth", target="green"), stats_of(img)).hue_green.rot
+    assert abs(rot(leaning)) < abs(rot(pure))
+    assert abs(rot(leaning)) > 0.5 * abs(rot(pure))   # scaled, not cancelled
+
+
+def test_a_session_with_no_band_measurement_still_compiles_a_rotation():
+    """band_hue/band_strength default EMPTY, not six zeros: six zeros would
+    claim every band sits at red with confidence. A session written before
+    probe.py measured this must fall back to the unmodified step, the way an
+    all-zero p99 falls back to full headroom."""
+    old = STATS.model_copy(update={"band_hue": [], "band_strength": []})
+    assert compile_intent(one("warmth", target="green"), old).hue_green.rot < 0
 
 
 def test_a_tint_verb_with_no_colour_uses_the_convention_it_says_it_uses():
