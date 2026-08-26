@@ -2,7 +2,7 @@
 """A1's proof: direct GradeSpec vs intent+compiler, judged on graded PIXELS.
 
 The roadmap says A1 does not ship on taste (docs/ROADMAP.md, "How A1 gets
-proven"), so this script is the only thing allowed to decide it. Ten real
+proven"), so this script is the only thing allowed to decide it. Eleven real
 grading sentences, one real clip, both paths, and two questions per sentence:
 
     did the moment the sentence names actually move, in the right direction?
@@ -27,7 +27,19 @@ bucket rather than politeness. Token usage for BOTH paths is read off the
 provider's own `usage` field — the roadmap's second criterion is that intent
 must be measurably cheaper, and a guess at the cost would not settle it.
 
-Usage:  uv run python scripts/bakeoff_intent.py [--sleep 25] [--prompts 10]
+WHAT IT LAST MEASURED. `out/` is gitignored, so this is the only place the
+numbers survive. Groq, openai/gpt-oss-120b, 11 prompts, 22 live calls:
+
+                checks    prompts clean    tokens/prompt
+    direct      18/25          5/11             5406
+    intent      25/25         11/11             2649
+
+That is the claim CLAUDE.md and CHANGELOG.md quote, and it REPLACES the earlier
+10/10-vs-8/10-at-2.8x: different harness, one more prompt, and one moment
+(`welded`) the older run did not measure at all. Two runs were taken; the only
+difference between them was prompt 1, whose check was wrong (see PROMPTS[1]).
+
+Usage:  uv run python scripts/bakeoff_intent.py [--sleep 25] [--prompts 11]
 """
 
 from __future__ import annotations
@@ -45,7 +57,8 @@ sys.path.insert(0, str(REPO))
 
 from ragvid.compiler import compile_intent, compile_stack  # noqa: E402
 from ragvid.intent import describe  # noqa: E402
-from ragvid.probe import _ANALYSIS_WIDTH, _ffprobe, _grab, _stats_from_frames, _unit  # noqa: E402
+from ragvid.probe import (  # noqa: E402
+    _ANALYSIS_WIDTH, _RAIL, _ffprobe, _grab, _stats_from_frames, _unit)
 from ragvid.providers import get_provider  # noqa: E402
 from ragvid.refine import refine_intent, refine_spec  # noqa: E402
 from ragvid.region import GradeStack  # noqa: E402
@@ -69,9 +82,17 @@ KEEP = 0.020
 # while leaving luma flat, because (r - b) IS most of what chroma is. Judging
 # `sat` at 0.020 would fail every correct answer to "warmer".
 KEEP_SAT = 0.055
+# (move, keep) for the moments whose units are not display levels. MOVE and KEEP
+# are levels -- 0.010 is 2.5 code values -- and a FRACTION OF PIXELS is not that.
+# 2% of the frame welded permanently onto black is not "drift nobody asked for",
+# it is 2% of the picture gone. 0.005 is measured rather than chosen: at the
+# standing 0.020 the pre-B3a `subtle` case (+0.00835) would PASS, and a check
+# that discriminates at one amount and not another is exactly the trap the B3a
+# tests fell into three times. `clipped` keeps the default only because nothing
+# has ever pushed it -- source value 1.36e-05.
+_THRESH = {"sat": (MOVE, KEEP_SAT), "welded": (MOVE, 0.005)}
 
 _EPS = 1e-8
-_RAIL = 1.5 / 255.0
 
 
 # ---- the prompts and what each one promises about the pixels ---------------
@@ -84,8 +105,23 @@ PROMPTS: list[tuple[str, dict]] = [
     ("warmer",
      dict(want={"warm": "up"}, keep=("luma", "sat"))),
     ("cooler, like a cold morning",
-     dict(want={"warm": "down"}, keep=("luma",))),
+     # `luma` used to be in `keep` here and it was asserting a taste, not a
+     # mechanism -- the same mistake as putting `welded` on prompt 2. Measured
+     # across two live runs the model reads "a cold morning" as dimmer AND
+     # cooler, emitting `exposure down` of its own accord both times: luma
+     # -0.1258 then -0.1110. That is stable, not variance, and it is a
+     # defensible reading of the sentence, so the check was forbidding a right
+     # answer. The colour promise is the only one the words actually make.
+     dict(want={"warm": "down"}, keep=())),
     ("crushed blacks",
+     # No `welded` check here, and the live run is why. The model answers this
+     # one "deepened the shadows A LOT" -- `strong` -- which is a defensible
+     # reading of the word "crushed", and `strong` is ALLOWED to spend the black
+     # point (compiler._shadows: the one verb whose amount switches mechanism).
+     # Measured, it welds +0.0490. Asserting no welding here would be asserting
+     # a taste about which amount the model should pick, not the mechanism.
+     # Prompt 10 asks for depth WITHOUT asking for destruction; that is the
+     # sentence the toe exists for, and where the check belongs.
      dict(want={"black": "down"}, keep=("white",))),
     ("moody but keep it natural",
      # "moody" is darker; "keep it natural" is the constraint that it must not
@@ -109,8 +145,20 @@ PROMPTS: list[tuple[str, dict]] = [
      dict(want={"luma": "down", "warm": "down"}, keep=())),
     ("brighter, but don't blow out the highlights",
      # `clipped` is the promise in the second half of the sentence, and it is
-     # the one a naive exposure push breaks.
+     # the one a naive exposure push breaks. Measured live: the model answers
+     # "brightened it; rolled the highlights off" -- it reaches for `shoulder`
+     # unprompted, and clipped moves -0.0000.
      dict(want={"luma": "up"}, keep=("clipped",))),
+    ("deeper blacks, but keep the shadow detail",                            # [10]
+     # THE B3a CHECK. "Crushed blacks" (prompt 2) reads as `strong`, which is
+     # allowed to weld; this asks for depth without asking for destruction,
+     # which is the request the toe exists to answer. It does not depend on the
+     # model choosing well, only on the compiler choosing the right field:
+     # measured on this clip, the flat `shadow_lift` this replaced welds
+     # +0.00907 at subtle and +0.02398 at moderate, and the toe welds +0.00049
+     # and +0.00193. Appended, never inserted -- _report's `weaker_than` indexes
+     # `rows` positionally and index 0 must stay 'warmer'.
+     dict(want={"black": "down"}, keep=("welded", "white"))),
 ]
 
 
@@ -174,6 +222,12 @@ def moments(v: np.ndarray) -> dict[str, float]:
         "black": float(np.percentile(luma, 1)),
         "white": float(np.percentile(luma, 99)),
         "clipped": float(np.mean(hi >= 1.0 - _RAIL)),
+        # The mirror of `clipped`, and the one B3a needs: `black` is a 1st
+        # percentile, a LEVEL, so it cannot tell "welded onto 0" from "the black
+        # point moved down" -- both drop it. That distinction IS B3a. Measured
+        # on this clip at "moderate": the flat lift it replaced welds +0.0228,
+        # the toe welds +0.0018, and both move `black` down.
+        "welded": float(np.mean(lo <= _RAIL)),
         # 0 if the clip has no pixels on one side of the crossover; the split
         # verbs would then be unmeasurable rather than passing by accident.
         "split": float(warm[bright].mean() - warm[dark].mean())
@@ -224,7 +278,7 @@ def judge(before: dict, after: dict, want: dict, keep: tuple) -> list[tuple[str,
         out.append((f"{name} {direction}", d > MOVE if direction == "up" else d < -MOVE, d))
     for name in keep:
         d = after[name] - before[name]
-        out.append((f"{name} steady", abs(d) <= (KEEP_SAT if name == "sat" else KEEP), d))
+        out.append((f"{name} steady", abs(d) <= _THRESH.get(name, (MOVE, KEEP))[1], d))
     return out
 
 
@@ -282,7 +336,13 @@ def _dry_provider():
     from ragvid.vibe import INTENT_SYSTEM
 
     warm = GradeSpec(temperature=700.0, rationale="A warm look.").model_dump_json()
-    intent = Intent(ops=[Op(op="warmth", dir="up")]).model_dump_json()
+    # Two ops, and the second is the newest verb: --dry cannot prove a model
+    # EMITS it, but it does prove one survives decode -> Intent -> compile_stack
+    # -> apply -> moments -> judge -> report -> JSON before a live call is spent.
+    # Still deliberately wrong for most prompts, which is the property this
+    # function exists for -- measured, it goes from 14/22 checks to 13/22.
+    intent = Intent(ops=[Op(op="warmth", dir="up"),
+                         Op(op="shoulder", dir="up")]).model_dump_json()
 
     def create(model, messages, **kwargs):
         # startswith, not ==: REFINE_INTENT_SYSTEM is INTENT_SYSTEM plus a tail.

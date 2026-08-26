@@ -32,16 +32,19 @@ prompt → LLM → Intent (typed verbs, no numbers) → compiler → GradeStack 
                             measured ClipStats from the clip
 ```
 
-The model **never emits a number**. It picks from a closed vocabulary of 17
+The model **never emits a number**. It picks from a closed vocabulary of 18
 verbs with a direction and a coarse amount (`subtle`/`moderate`/`strong`), and
 deterministic code in `compiler.py` decides magnitudes by consulting what was
 actually measured off the footage. `intent.py`'s schema is 834 bytes against
 `GradeSpec`'s 2692.
 
 This is the load-bearing decision in the project. Measured against the older
-path where the model authored all 43 numbers: **10/10 prompts vs 8/10, 2.8×
+path where the model authored all 43 numbers: **11/11 prompts vs 5/11, 2.0×
 cheaper** (`scripts/bakeoff_intent.py`, judged by applying each spec to real
-pixels and re-measuring — not by reading spec fields).
+pixels and re-measuring — not by reading spec fields). That supersedes an
+earlier 10/10-vs-8/10-at-2.8×, which was a different harness: one prompt fewer,
+and it did not measure `welded` — the fraction of the frame welded onto pure
+black — which is the moment the direct path loses three of its checks on.
 
 The reason it matters is growth. Adding regions cost six vocabulary words. On
 the old path it would have cost a schema the model could not fill — at ~200

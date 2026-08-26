@@ -67,7 +67,7 @@ Marks are against the code as of 2026-08-23: **[have] / [partial] / [none]**.
 
 | # | Item | Status | UI cost | Note |
 |---|---|---|---|---|
-| A1 | Intent → compiler architecture | **[have]** | invisible (plus the C3 list) | `intent.py` + `compiler.py`. Measured against the direct path: 23/23 checks vs 21/23, 10/10 prompts vs 8/10, 2.8× cheaper. Default wherever the endpoint can constrain decoding to a schema. |
+| A1 | Intent → compiler architecture | **[have]** | invisible (plus the C3 list) | `intent.py` + `compiler.py`. Measured against the direct path: 25/25 checks vs 18/25, 11/11 prompts vs 5/11, 2.0× cheaper. Default wherever the endpoint can constrain decoding to a schema. |
 | A2 | Float pipeline end to end | **[have]** | invisible | `probe.py` samples raw `rgb48le`. Negligible on ordinary footage; on log through a conversion LUT `crushed_low` was over-reporting 2.0× and `p1` snapped to 1/255 — the two fields a shadow verb reads. |
 | A3 | 10-bit output | **[have]** | invisible | Output matches the source. On an S-Log3 ramp: 635 distinct levels from a 10-bit source against 160 from 8, and 128 against 67 in the bottom third. |
 | A4 | Built-in log transforms (S-Log3, V-Log, C-Log, Log-C, N-Log) | **[have]** | **removed** UI | `logspace.py` generates the conversion. All five land 18% grey on 0.408–0.412 against Rec.709's 0.409, from constant sets spanning 0.343–0.423. Two spans, three links and a file hunt became one `<select>`. |

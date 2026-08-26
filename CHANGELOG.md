@@ -81,12 +81,12 @@ A grade is now 44 numbers rather than 43. Old projects, saved looks and
 ### How it decides
 
 - **You describe, ragvid decides the numbers.** The AI service no longer invents
-  colour values. It picks from a fixed list of 16 things a colourist does —
+  colour values. It picks from a fixed list of 18 things a colourist does —
   warmer, lift the shadows, deepen the blues — with a direction and a coarse
   amount, and ragvid works out the actual magnitudes from what it measured off
-  your footage. On the same ten prompts this got 10 right where the old way got
-  8, for 2.8× less money per prompt, judged by measuring the graded pixels
-  rather than by reading the plan.
+  your footage. On eleven test sentences this got all eleven right where the old
+  way got five, for 2.0× less money per prompt, judged by measuring the graded
+  pixels rather than by reading the plan.
 - **A sentence can say which part of the picture.** By colour ("deepen the
   blues, leave skin alone"), by place ("darken the top of the frame") or by
   thing ("make the sky moody"). Ten colour families, six places, and five
