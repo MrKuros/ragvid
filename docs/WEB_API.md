@@ -43,12 +43,13 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
   "api_version": 12,
   "version": 8,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
-            "saturation": 1.0, "temperature": 0, "tint": 0,
-            "contrast": 0, "pivot": 0.435,
+            "saturation": 1.0, "saturation_balance": 0,
+            "temperature": 0, "tint": 0,
+            "contrast": 0, "pivot": 0.435, "contrast_balance": 0,
             "exposure": 0, "look_mix": 1.0, "highlight_rolloff": 0,
             "shadow_tint": {"r":0,"g":0,"b":0}, "highlight_tint": {...},
             "shadow_lift": 0, "highlight_lift": 0,
-            "hue_red": {"sat":1.0,"lum":0}, "hue_yellow": {...},
+            "hue_red": {"sat":1.0,"lum":0,"rot":0}, "hue_yellow": {...},
             "hue_green": {...}, "hue_cyan": {...}, "hue_blue": {...},
             "hue_magenta": {...},
             "effects": {"denoise":0,"glow":0,"softness":0,
@@ -146,20 +147,20 @@ Two things a client must not get wrong:
 
 ### The spec object
 
-24 keys: 44 numbers and a `rationale` string. Every value shown above **is** the
+25 keys: 51 numbers and a `rationale` string. Every value shown above **is** the
 identity value, so a client can render "is this field moved?" by comparing
 against the literal defaults rather than tracking a baseline.
 
 | Group | Keys | Notes for a UI |
 |---|---|---|
-| CDL core | `slope` `offset` `power` `saturation` `temperature` `tint` `contrast` `pivot` | unchanged since api_version 1 |
+| CDL core | `slope` `offset` `power` `saturation` `saturation_balance` `temperature` `tint` `contrast` `pivot` `contrast_balance` | the two `_balance` keys aim `saturation` and `contrast` at one end of the tone scale; each does nothing on its own, so a UI showing one has to show what it scales |
 | Tone | `exposure` `look_mix` `highlight_rolloff` | `exposure` in stops; `look_mix` 0–1 fades the whole look back to source; `highlight_rolloff` 0 = hard clip |
 | Tonal split | `shadow_tint` `highlight_tint` `shadow_lift` `highlight_lift` | tints are luma-stripped, so a tint slider never changes brightness and a lift slider never changes colour — the two axes are independent by construction, and a UI can show them as such |
-| Hue qualifiers | `hue_red` `hue_yellow` `hue_green` `hue_cyan` `hue_blue` `hue_magenta` | each `{"sat": 1.0, "lum": 0.0}`, centred at 0/60/120/180/240/300° |
+| Hue qualifiers | `hue_red` `hue_yellow` `hue_green` `hue_cyan` `hue_blue` `hue_magenta` | each `{"sat": 1.0, "lum": 0.0, "rot": 0.0}`, centred at 0/60/120/180/240/300°. `rot` turns that hue, in degrees; it is the one field the planning schema does not expose, so only the intent path writes it |
 | Effects | `effects` | six spatial filters — **not** part of the colour transform |
 
 `slope`/`offset`/`power` and both tints are `{"r","g","b"}` objects, and hue
-bands are `{"sat","lum"}` objects, never arrays. That is not style: Groq's
+bands are `{"sat","lum","rot"}` objects, never arrays. That is not style: Groq's
 strict `json_schema` does not enforce array `minItems` during constrained
 generation, models reliably emit 1-element arrays, and the request then fails
 validation. Do not "simplify" them client-side either — `POST /api/spec` feeds
@@ -185,7 +186,7 @@ first) and **`tweak`** (true when the entry is an adjustment OF the one before i
 — a slider drag, an item switched off, the balance toggle — rather than
 something that was asked for).
 
-**B3 added `contrast_balance` and did NOT move `api_version`, deliberately.**
+**B3 added `contrast_balance`, `saturation_balance` and a `rot` on each hue band, and did NOT move `api_version` for any of them, deliberately.**
 The gate exists so a stale page announces itself instead of silently dropping
 fields — and nothing is dropped here: the page enumerates no spec fields, and
 its one spec write (`POST /api/spec` from the Strength slider) spreads the

@@ -1,6 +1,6 @@
 """The grade spec — the contract every other module codes against.
 
-A GradeSpec is 44 numbers describing a color grade. It is the *only* thing an
+A GradeSpec is 45 numbers describing a color grade. It is the *only* thing an
 LLM ever produces in this project; no pixels leave the machine (see
 docs/ARCHITECTURE.md rule 2). The .cube
 LUT is a derived artifact baked from a spec, which is why refinement ("make it
@@ -31,7 +31,10 @@ EVALUATION ORDER IS LOAD-BEARING. Reviewers and reimplementations must match:
                                          scaled by exposure
     2. CDL         x*slope + offset; clip(x, 0, None); x **= clip(power, 1e-6, None)
     3. white bal   temperature/tint applied as per-channel gains
-    4. saturation  luma + (x - luma) * saturation
+    4. saturation  luma + (x - luma) * s, where s is `saturation` aimed at one
+                   end of the tone scale by `saturation_balance` (0 = evenly,
+                   the plain scalar). The composed factor is floored at 0: a
+                   negative one inverts hue rather than draining it.
                    (1-4 also live behind `through_saturation`, so a solver can
                    fit against the exact array step 5 receives)
     5. hue qualifiers  six smoothstep bands, chroma-gated, luma-preserving
@@ -183,6 +186,7 @@ class GradeSpec(BaseModel):
     offset: RGB = Field(default_factory=lambda: RGB.of(0.0), description="Per-channel lift (ASC CDL offset). 0.0 = unchanged. Positive lifts blacks.")
     power: RGB = Field(default_factory=lambda: RGB.of(1.0), description="Per-channel gamma (ASC CDL power). 1.0 = unchanged. Must be > 0.")
     saturation: float = Field(1.0, description="1.0 = unchanged, 0.0 = greyscale, >1 more saturated.")
+    saturation_balance: float = Field(0.0, description="Which end of the tone scale `saturation` acts on, -1..1. 0 = evenly. Negative puts it in the shadows (grey shadows, highlights left alone), positive in the highlights. Does nothing on its own -- it scales `saturation`'s departure from 1.")
     temperature: float = Field(0.0, description="Kelvin shift. Negative = cooler/bluer, positive = warmer/oranger. Typical range -3000..3000.")
     tint: float = Field(0.0, description="Green/magenta axis. Negative = greener, positive = magenta. Typical range -1..1.")
     contrast: float = Field(0.0, description="S-curve strength, -1..1. 0 = unchanged, positive = more contrast.")
@@ -226,6 +230,7 @@ class GradeSpec(BaseModel):
             and np.allclose(self.offset.as_array(), i.offset.as_array(), atol=tol)
             and np.allclose(self.power.as_array(), i.power.as_array(), atol=tol)
             and abs(self.saturation - 1.0) < tol
+            and abs(self.saturation_balance) < tol
             and abs(self.temperature) < tol
             and abs(self.tint) < tol
             and abs(self.contrast) < tol
@@ -372,7 +377,25 @@ class GradeSpec(BaseModel):
 
         # 4. Saturation around Rec.709 luma.
         luma = np.sum(x * LUMA, axis=-1, keepdims=True)
-        return luma + (x - luma) * self.saturation
+        # Guarded, and the guard is the whole reason `saturation_balance` scales
+        # the DEPARTURE from 1 rather than the factor: at balance 0 this takes
+        # the original scalar line untouched, so the identity grid stays
+        # bit-for-bit and `saturation == 1` stays a no-op at every balance.
+        # Scaling the factor instead (saturation * (1 + b(2L-1))) would make a
+        # balance alone drain or boost colour with saturation at 1, which is a
+        # second thing that can move the picture with nothing asked for.
+        if abs(self.saturation_balance) <= _ID_TOL:
+            return luma + (x - luma) * self.saturation
+
+        s = 1.0 + (self.saturation - 1.0) * (
+            1.0 + self.saturation_balance * (2.0 * luma - 1.0))
+        # A negative factor does not desaturate, it INVERTS hue -- red becomes
+        # cyan -- and it is reachable: saturation 0 with balance -1 lands on -1
+        # at black. sanitize() clamps `saturation` and `saturation_balance`
+        # separately and never sees the composed factor, so this is the only
+        # place that can stop it. A hue inversion baked into a .cube is the same
+        # class of harm as a non-monotone tone curve.
+        return luma + (x - luma) * np.maximum(s, 0.0)
 
     def _wb_gains(self) -> np.ndarray:
         t = self.temperature / TEMP_FULL
@@ -422,7 +445,8 @@ class GradeSpec(BaseModel):
         }
         props = {
             "slope": rgb, "offset": rgb, "power": rgb,
-            "saturation": num, "temperature": num, "tint": num,
+            "saturation": num, "saturation_balance": num,
+            "temperature": num, "tint": num,
             "contrast": num, "pivot": num, "contrast_balance": num,
             "exposure": num, "look_mix": num, "highlight_rolloff": num,
             "shadow_tint": rgb, "highlight_tint": rgb,
@@ -450,6 +474,7 @@ class GradeSpec(BaseModel):
         d["slope"] = {k: float(np.clip(v, 0.0, 8.0)) for k, v in d["slope"].items()}
         d["offset"] = {k: float(np.clip(v, -1.0, 1.0)) for k, v in d["offset"].items()}
         d["saturation"] = float(np.clip(d["saturation"], 0.0, 4.0))
+        d["saturation_balance"] = float(np.clip(d["saturation_balance"], -1.0, 1.0))
         d["temperature"] = float(np.clip(d["temperature"], -6000.0, 6000.0))
         d["tint"] = float(np.clip(d["tint"], -2.0, 2.0))
         d["contrast"] = float(np.clip(d["contrast"], -1.0, 1.0))

@@ -18,6 +18,14 @@ is on `0.x`, a middle-number bump can change the shape of a saved grade.
   of the 256 levels a finished file is made of.
 - **It costs nothing to say.** No new word, no new control: the sentence could
   already name a colour, and there is now somewhere for it to land.
+- **"Drain the shadows but keep the sky rich" now works.** Colour used to be one
+  knob for the whole picture: asking for less of it took the same amount out of
+  the brightest part of the frame as out of the darkest. You can now say which
+  end you mean — grey shadows with the highlights untouched, or rich highlights
+  over drained shadows — and "a lot" still means exactly what it meant before,
+  measured at the end you named rather than twice as far. What it cannot do is
+  put the colour in the middle and take it off both ends; that shape is not
+  expressible here, and asking for it will get you one end or the other.
 
 ### Your work stays put
 

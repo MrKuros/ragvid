@@ -315,6 +315,71 @@ def test_hue_band_lum_moves_brightness_only():
     assert np.abs(out[[0, 1, 3, 4, 5]] - wheel[[0, 1, 3, 4, 5]]).max() < 1e-15
 
 
+def test_saturation_balance_aims_the_one_saturation_step_at_one_end():
+    """B3c. The factor is 1 + (saturation - 1) * (1 + balance * (2L - 1)), so a
+    full negative tilt reaches the plain factor at black and EXACTLY 1.0 at
+    white -- the highlights come back untouched while the shadows go grey."""
+    spec = GradeSpec(saturation=0.5, saturation_balance=-1.0)
+    black, white = np.array([[0.10, 0.02, 0.02]]), np.array([[0.98, 0.90, 0.90]])
+    # The factor is the formula evaluated at that pixel's own MEASURED luma --
+    # not "1.0 in the highlights". It reaches exactly 1.0 at luma 1 and only
+    # there, because it is a ramp and not a mask; the white patch below sits at
+    # luma 0.916 and keeps 91.6% of its chroma.
+    for px in (black, white):
+        f = 1.0 + (0.5 - 1.0) * (1.0 + (-1.0) * (2.0 * luma(px)[0] - 1.0))
+        assert chroma(spec.apply(px))[0] == pytest.approx(f * chroma(px)[0], abs=1e-9)
+    # ...and the two ends really are far apart: the dark patch keeps a tenth of
+    # its colour where the bright one keeps nine tenths.
+    assert chroma(spec.apply(black))[0] < 0.2 * chroma(black)[0]
+    assert chroma(spec.apply(white))[0] > 0.8 * chroma(white)[0]
+    # the peak is at an END, never in the middle: the factor is linear in luma,
+    # so B3c cannot reach "rich mids". Monotone in L, measured on a grey ramp.
+    L = np.linspace(0.0, 1.0, 257)[:, None]
+    f = 1.0 + (0.5 - 1.0) * (1.0 + (-1.0) * (2.0 * L - 1.0))
+    assert np.all(np.diff(f[:, 0]) > 0)
+
+
+def test_a_balance_alone_moves_no_pixel():
+    """It scales the DEPARTURE from 1, not the factor. `saturation * (1 + ...)`
+    -- the form that looks right -- would make a balance drain or boost colour
+    with saturation at 1.0, which is a second thing that can move the picture
+    with nothing asked for, and it would need its own identity guard."""
+    x = np.random.default_rng(3).random((5000, 3))
+    for b in (-1.0, -0.4, 0.4, 1.0):
+        assert np.array_equal(GradeSpec(saturation_balance=b).apply(x),
+                              GradeSpec().apply(x))
+
+
+def test_balance_zero_is_the_original_scalar_line_bit_for_bit():
+    """The guard, and the reason the identity LUT hash survived B3c."""
+    x = _grid(17)
+    for sat in (0.4, 1.0, 1.7):
+        assert np.array_equal(
+            GradeSpec(saturation=sat).apply(x),
+            GradeSpec(saturation=sat, saturation_balance=0.0).apply(x))
+    assert np.array_equal(GradeSpec.identity().apply(x), x)
+
+
+def test_a_composed_saturation_factor_can_never_go_negative():
+    """saturation 0 with balance -1 reaches -1 at black, and a NEGATIVE factor
+    does not desaturate -- it inverts hue, red for cyan, baked into the .cube.
+    sanitize() clamps the two fields separately and never sees the composed
+    factor, so apply()'s floor is the only thing that can stop it."""
+    dark = np.array([[0.09, 0.01, 0.01], [0.0, 0.0, 0.02], [0.04, 0.06, 0.0]])
+    out = GradeSpec(saturation=0.0, saturation_balance=-1.0).apply(dark)
+    # every pixel is neutral -- drained to grey, not turned inside out
+    assert np.abs(out.max(axis=-1) - out.min(axis=-1)).max() < 1e-12
+    # the sign of (channel - luma) never flips anywhere on a full ramp
+    x = np.linspace(0.0, 1.0, 129)[:, None] * np.array([[1.0, 0.6, 0.2]])
+    o = GradeSpec(saturation=0.0, saturation_balance=-1.0).apply(x)
+    assert np.all((o - luma(o)[:, None]) * (x - luma(x)[:, None]) >= -1e-15)
+
+
+def test_sanitize_clamps_saturation_balance():
+    assert GradeSpec(saturation_balance=9.0).sanitize().saturation_balance == 1.0
+    assert GradeSpec(saturation_balance=-9.0).sanitize().saturation_balance == -1.0
+
+
 def test_hue_band_rot_turns_its_own_band_and_leaves_the_others_alone():
     """The hue-vs-hue move: green turns toward yellow without the other five
     hues moving at all. Sign convention is HSV's -- POSITIVE rot raises the hue

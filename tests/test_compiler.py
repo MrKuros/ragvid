@@ -170,6 +170,16 @@ def m_soft(o):
     return -float((o[HIGH] @ LUMA).std())
 
 
+# Chroma of the darkest tenth / brightest fiftieth of FULL_IMG. Measured on
+# FULL_IMG and not IMG because the selectivity of a luma RAMP is set by how far
+# apart the two bands sit: IMG spans luma 0.06-0.76, where a full shadow tilt
+# still leaves the bright band at 39% of the dark band's move, which is not
+# evidence of anything. FULL_IMG reaches both rails and the same tilt lands at
+# 3.1%, at every one of the three amounts.
+def m_dark_chroma(o):   return float((o[FULL_LOW].max(-1) - o[FULL_LOW].min(-1)).mean())
+def m_bright_chroma(o): return float((o[FULL_HIGH].max(-1) - o[FULL_HIGH].min(-1)).mean())
+
+
 def m_dark_teal(o): return float((o[DARK, 2] - o[DARK, 0]).mean())
 def m_bright_teal(o): return float((o[BRIGHT, 2] - o[BRIGHT, 0]).mean())
 
@@ -202,6 +212,16 @@ CASES: dict[str, dict] = {
     "tint": dict(moment=m_magenta, hold=(m_luma, 0.01)),
     # The saturation lerp is exactly luma-preserving until something clips.
     "saturation": dict(moment=m_chroma, hold=(m_luma, 1e-12)),
+    # The two ends of the one saturation step. `less` and not `hold`, because
+    # spec.py's factor is 1 + (saturation - 1) * (1 + balance * (2L - 1)) -- a
+    # RAMP in luma, not a masked half. It reaches exactly 1.0 at the far rail
+    # and only there, so DARK and BRIGHT (which are luma bands, not the rails)
+    # both move and the honest claim is that one moves a fraction of the other.
+    # A global `saturation` moves them by the same fraction at every magnitude.
+    "shadow_saturation": dict(moment=m_dark_chroma, less=(m_bright_chroma, 0.25),
+                              img=FULL_IMG, stats=FULL_STATS),
+    "highlight_saturation": dict(moment=m_bright_chroma, less=(m_dark_chroma, 0.25),
+                                 img=FULL_IMG, stats=FULL_STATS),
     "shadow_tint": dict(moment=m_dark_teal, hold=(m_bright_teal, 1e-12), kw=dict(target="teal")),
     "highlight_tint": dict(moment=m_bright_teal, hold=(m_dark_teal, 1e-12), kw=dict(target="teal")),
 }
@@ -655,6 +675,60 @@ def test_a_session_with_no_band_measurement_still_compiles_a_rotation():
     all-zero p99 falls back to full headroom."""
     old = STATS.model_copy(update={"band_hue": [], "band_strength": []})
     assert compile_intent(one("warmth", target="green"), old).hue_green.rot < 0
+
+
+def test_the_amount_names_the_peak_not_the_multiplier():
+    """A tonal saturation verb must reach exactly the chroma the plain verb
+    reaches -- at one end, with the other left alone -- rather than twice as
+    far. spec.py doubles the departure at a full tilt, so the compiler halves
+    it. Measured on FULL_IMG at all three amounts, the peak factor and the
+    plain verb's factor agree to the digit."""
+    for amount in AMOUNTS:
+        tilted = compile_intent(one("highlight_saturation", amount=amount), FULL_STATS)
+        plain = compile_intent(one("saturation", amount=amount), FULL_STATS)
+        peak = 1.0 + (tilted.saturation - 1.0) * (1.0 + abs(tilted.saturation_balance))
+        assert peak == pytest.approx(plain.saturation, abs=1e-9)
+        assert abs(tilted.saturation_balance) == 1.0
+
+
+def test_a_plain_saturation_verb_asks_for_the_even_move_and_says_so():
+    """_tilt_contrast's rule one axis over. Without the declared 0, "drain the
+    shadows and make it punchier" would drag the punch verb's own move into the
+    shadows with it -- the second verb asked for an EVEN change and would
+    silently get a tilted one."""
+    both = Intent(ops=[Op(op="shadow_saturation", dir="down", amount="moderate"),
+                       Op(op="saturation", amount="moderate")])
+    spec = compile_intent(both, FULL_STATS)
+    assert -1.0 < spec.saturation_balance < 0.0    # split, not handed over whole
+
+    # ...and it is order-independent, which two verbs in one sentence are
+    flipped = Intent(ops=list(reversed(both.ops)))
+    assert compile_intent(flipped, FULL_STATS).saturation_balance == \
+        pytest.approx(spec.saturation_balance, abs=1e-12)
+
+
+def test_a_tonal_saturation_boost_costs_no_more_lut_accuracy_than_a_plain_one():
+    """The bound on B3c is not a clamp -- it falls out of the peak rule. It only
+    counts if the shape it produces is no harder to bake, and this grade does
+    NOT escalate to 65^3 (no hue qualifier), so 33^3 is what ships. Measured
+    over 2e5 random points, max error in 8-bit code values:
+
+        plain saturation 1.60 (strong up)     3.10
+        saturation 1.30 balance +1 (same peak) 2.97
+        saturation 1.30 balance -1             2.92
+        the drain at a full tilt               0.01
+    """
+    from tests.test_lut import ref_grid, trilinear
+
+    pts = np.random.default_rng(7).random((200_000, 3))
+
+    def err(spec, n=33):
+        return np.abs(trilinear(spec.apply(ref_grid(n)), n, pts) - spec.apply(pts)).max() * 255
+
+    strong = compile_intent(one("highlight_saturation", amount="strong"), FULL_STATS)
+    plain = compile_intent(one("saturation", amount="strong"), FULL_STATS)
+    assert not strong.has_hue_qualifiers()      # so 33^3 is the size that ships
+    assert err(strong) <= err(plain)
 
 
 def test_a_tint_verb_with_no_colour_uses_the_convention_it_says_it_uses():

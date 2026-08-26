@@ -60,7 +60,7 @@ worse than falling back.
 
 | File | Job |
 |---|---|
-| `spec.py` | `GradeSpec` — 44 numbers, and `apply()`. The evaluation order is load-bearing; the docstring explains every position. |
+| `spec.py` | `GradeSpec` — 45 numbers, and `apply()`. The evaluation order is load-bearing; the docstring explains every position. |
 | `region.py` | `Region`, `Layer`, `GradeStack` — the container that lets a grade apply to part of a frame. |
 | `intent.py` | The typed verb vocabulary the model emits, plus `describe()` which renders it as English. |
 | `compiler.py` | `compile_stack` / `compile_intent` — verbs + measurements → numbers. Also auto-balance. |
@@ -70,7 +70,7 @@ worse than falling back.
 | `logspace.py` | S-Log3 / V-Log / C-Log3 / LogC3 / N-Log transfer functions and generated conversion LUTs. |
 | `render.py` | The ffmpeg filter chain: technical LUT → grade → region layers → spatial effects. |
 | `segment.py` | The local segmentation model behind semantic masks. Optional extra; `onnxruntime` is imported lazily. |
-| `refine.py` | "Less blue" — edits the verb list on the intent path, the 44 numbers on the direct one. |
+| `refine.py` | "Less blue" — edits the verb list on the intent path, the 45 numbers on the direct one. |
 | `sidecar.py` | `look.json` (lossless) and `.cdl` (universal) written beside every export. |
 | `vibe.py` | The system prompts and the planning entry points. |
 | `looks.py` | The retrieval corpus, used by the direct path only. |
@@ -163,19 +163,28 @@ by construction.
 
 ## Where it stands
 
-Tier A is complete. Tier C is complete. Tier B is complete except B3c
-lum-vs-sat, B4 a real HSL qualifier and B5 keyframes. (B3 was
-five curve types on paper and three of them turned out to be already shipped —
-see the split rows in the roadmap.) Packaged for PyPI as 0.2.0
-(`uv tool install ragvid`) — the wheel is verified from a clean venv, but the
-tag has not been pushed and nothing is published yet.
+Tier A is complete. Tier C is complete. **Tier B is complete except B4 a real
+HSL qualifier and B5 keyframes**, both of which are out of scope for 1.0. (B3
+was five curve types on paper and three of them turned out to be already
+shipped — see the split rows in the roadmap.) Packaged for PyPI as 0.2.0
+(`uv tool install ragvid`) — `v0.2.0` is tagged and pushed and the release
+workflow passes every gate but the upload, which needs the PyPI
+pending-publisher form filled in by hand.
 
-A sentence can name **what** to do (18 verbs), **how much** (three amounts plus
+A sentence can name **what** to do (20 verbs), **how much** (three amounts plus
 a whole-look strength), **which pixels** — by colour (ten hue families,
 including skin), by place (top/bottom/left/right/center/edges) or by thing
 (sky/foliage/person/water/buildings, via the local segmentation model) — and
 **what to spare** (`protect`). Refine edits that list rather than the numbers,
 so a second sentence no longer destroys the first one's regions.
+
+A sentence can also name **where in the tone scale the colour should be**:
+"drain the shadows but keep the sky rich". `saturation_balance` aims the one
+saturation step at an end, and the amount names the PEAK rather than the
+multiplier — so "drain the shadows a lot" reaches exactly the chroma "less
+saturated a lot" would have reached, at the shadow end, with the other end left
+alone. It cannot reach "rich mids", and that is arithmetic rather than a gap: a
+factor linear in luma is monotone, so the peak is always at an end.
 
 A sentence can also name **which way a colour should lean**: "warm up the
 greens" rotates that hue band instead of white-balancing the whole frame, and
@@ -196,10 +205,10 @@ Semantic masks are sampled **once**, not per frame: inference is 244 ms, so a
 export. The honest consequence — a subject leaving frame keeps its grade — is
 documented in `segment.py`.
 
-Next: **B3c lum-vs-sat**, one compiler pass. After
-that the honest 1.0 blocker is not a feature: nobody has yet graded real footage with this,
-and the CI matrix has only just gained Windows and macOS — whose first run
-already turned up an `os.fchmod` call that made the app unconfigurable there.
+Next is not a feature. The honest 1.0 blocker is that **nobody has yet graded
+real footage with this**, and the CI matrix has only just gained Windows and
+macOS — whose first run already turned up an `os.fchmod` call that made the app
+unconfigurable there.
 
 ## Things that bit us, so they don't again
 

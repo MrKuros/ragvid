@@ -506,10 +506,12 @@ def _tint(d: dict, k: float, item: Op, m: _Measured) -> None:
     d["tint"] += k * STEP_TINT * (1.0 - _BIAS_GAIN * m.magenta_bias * _sign(k))
 
 
-def _saturation(d: dict, k: float, item: Op, m: _Measured) -> None:
-    if item.target:
-        return _band_sat(d, item.target, k)  # "drain the greens"
+def _sat_factor(k: float, m: _Measured) -> float:
+    """The multiplier `k` asks for, measured against the clip's own chroma.
 
+    Multiplicative in both directions so two "less saturated" ops compose and
+    the result can never go negative.
+    """
     u = abs(k) * STEP_SATURATION
     if k > 0:
         # Measured chroma decides how far a boost is worth taking. Above ~0.35
@@ -520,9 +522,54 @@ def _saturation(d: dict, k: float, item: Op, m: _Measured) -> None:
             u *= 0.5
         elif 0.0 < m.sat < 0.06:
             u *= 1.5
-    # Multiplicative in both directions so two "less saturated" ops compose and
-    # the result can never go negative.
-    d["saturation"] *= (1.0 + u) if k > 0 else 1.0 / (1.0 + u)
+    return (1.0 + u) if k > 0 else 1.0 / (1.0 + u)
+
+
+def _tilt_saturation(d: dict, factor: float, tilt: float) -> None:
+    """Multiply saturation by `factor`, asking for `tilt` of balance, composed
+    as a SATURATION-WEIGHTED MEAN.
+
+    _tilt_contrast's rule one axis over, and it is needed for the same reason:
+    three verbs write the one saturation step now, so "drain the shadows and
+    make it punchier" must not drag the punch verb's own move into the shadows
+    with it. The weight is each verb's DEPARTURE FROM 1, because saturation
+    composes multiplicatively rather than additively -- a factor of 1 asked for
+    nothing and must not get a vote. Order-independent, which two verbs in one
+    sentence are.
+    """
+    w_old, w_new = abs(d["saturation"] - 1.0), abs(factor - 1.0)
+    total = w_old + w_new
+    # Nothing to tilt: spec.py scales the DEPARTURE from 1, so a balance at
+    # saturation 1.0 moves no pixel and writing one would be invisible.
+    if total > 1e-9:
+        d["saturation_balance"] = (w_old * d["saturation_balance"] + w_new * tilt) / total
+    d["saturation"] *= factor
+
+
+def _saturation(d: dict, k: float, item: Op, m: _Measured) -> None:
+    if item.target:
+        return _band_sat(d, item.target, k)  # "drain the greens"
+    # tilt 0 -- this verb asks for the even move, and says so, so that a
+    # "drain the shadows" alongside it gets its share of the balance and no more.
+    _tilt_saturation(d, _sat_factor(k, m), 0.0)
+
+
+def _tonal_saturation(tilt: float):
+    """"drain the colour out of the shadows" / "...out of the highlights"."""
+
+    def apply_it(d: dict, k: float, item: Op, m: _Measured) -> None:
+        # THE AMOUNT NAMES THE PEAK, not the multiplier. spec.py's factor is
+        # 1 + (saturation - 1) * (1 + balance * (2L - 1)), so at a full tilt the
+        # departure doubles at the end being aimed at. Halving it here makes
+        # "drain the shadows a lot" reach exactly the chroma "less saturated a
+        # lot" would have reached -- at the shadow end only, with the highlights
+        # left at 1.0 -- rather than twice as far. It also means this verb can
+        # never buy more boost than the plain verb grants: composed n times the
+        # peak is 1 + 2*(prod(1 + p/2) - 1), which is <= prod(1 + p) for every
+        # p >= 0, with equality at n = 1.
+        _tilt_saturation(d, 1.0 + (_sat_factor(k, m) - 1.0) / 2.0, tilt)
+
+    return apply_it
 
 
 def _split_tint(field: str):
@@ -563,6 +610,9 @@ _COMPILERS = {
     "warmth": _warmth,
     "tint": _tint,
     "saturation": _saturation,
+    # NEGATIVE balance is the shadow end -- spec.py's (2L - 1) is -1 at black.
+    "shadow_saturation": _tonal_saturation(-1.0),
+    "highlight_saturation": _tonal_saturation(1.0),
     "shadow_tint": _split_tint("shadow_tint"),
     "highlight_tint": _split_tint("highlight_tint"),
     "grain": _effect("grain"),
