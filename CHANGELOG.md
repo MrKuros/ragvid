@@ -4,7 +4,16 @@ What changed, described by what it does for you rather than by which files
 moved. Versions follow [semantic versioning](https://semver.org): while ragvid
 is on `0.x`, a middle-number bump can change the shape of a saved grade.
 
-## Unreleased
+## 0.3.0 — which part of the picture you mean
+
+A sentence could already say what to do and how much. It can now say **which
+pixels** — by colour, by place, or by thing — **which end of the brightness
+range**, and **which way a colour should lean**. None of that added a control to
+the screen; the sentence carries all of it.
+
+This is also the first release that is actually on PyPI. `0.2.0` was tagged and
+built, but the upload never completed, so nothing was ever installable.
+
 
 ### Saying what you want
 
@@ -65,10 +74,12 @@ is on `0.x`, a middle-number bump can change the shape of a saved grade.
 If you had a project open in a previous version, it lived in a shared folder
 that is no longer read. Open the clip again and grade it; nothing else moved.
 
-## 0.2.0 — the first one you can install
+## 0.2.0 — packaged, but never uploaded
 
-Until now ragvid existed only as a git checkout. This is the first release on
-PyPI: `uv tool install ragvid`, then `ragvid serve`.
+Until now ragvid existed only as a git checkout. This was meant to be the first
+release on PyPI, and everything for it landed — the packaging, the wheel, the
+release workflow, the tag. The upload itself never ran, so this version was
+never installable from anywhere. `0.3.0` is the one that is.
 
 Version `0.1.0` was never published. If something on your machine reports it,
 that is an editable install from a checkout, not a release, and the code behind

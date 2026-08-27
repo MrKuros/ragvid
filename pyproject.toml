@@ -1,6 +1,6 @@
 [project]
 name = "ragvid"
-version = "0.2.0"
+version = "0.3.0"
 description = "Type a sentence, get a graded clip. Prompt-driven video colour grading, on your own machine."
 readme = "README.md"
 requires-python = ">=3.11"

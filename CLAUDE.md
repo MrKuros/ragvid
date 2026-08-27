@@ -174,10 +174,16 @@ by construction.
 Tier A is complete. Tier C is complete. **Tier B is complete except B4 a real
 HSL qualifier and B5 keyframes**, both of which are out of scope for 1.0. (B3
 was five curve types on paper and three of them turned out to be already
-shipped — see the split rows in the roadmap.) Packaged for PyPI as 0.2.0
-(`uv tool install ragvid`) — `v0.2.0` is tagged and pushed and the release
-workflow passes every gate but the upload, which needs the PyPI
-pending-publisher form filled in by hand.
+shipped — see the split rows in the roadmap.) Cut as **0.3.0**
+(`uv tool install ragvid`).
+
+**Nothing has ever actually reached PyPI** — `pypi.org/pypi/ragvid/json` is a
+404. `v0.2.0` was tagged and its release run passed every gate but the upload,
+and `v0.3.0` will do the same, because the one remaining step is the PyPI
+**pending-publisher** form filled in by hand: project `ragvid`, owner
+`MrKuros`, repo `ragvid`, workflow `release.yml`, environment **blank**
+(`release.yml` explains why blank). Re-running the existing tag's workflow
+publishes it; there is nothing to rebuild.
 
 A sentence can name **what** to do (20 verbs), **how much** (three amounts plus
 a whole-look strength), **which pixels** — by colour (ten hue families,
