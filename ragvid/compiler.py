@@ -525,6 +525,29 @@ def _sat_factor(k: float, m: _Measured) -> float:
     return (1.0 + u) if k > 0 else 1.0 / (1.0 + u)
 
 
+# Below this a factor asked for nothing. Matches spec._ID_TOL's intent: a
+# balance written against saturation 1.0 is invisible, because spec.py scales
+# the DEPARTURE from 1 rather than the factor.
+_TILT_EPS = 1e-9
+
+
+def _picture_tilt(factor: float, balance: float) -> float:
+    """Which end of the tone scale `(factor, balance)` actually aims chroma at.
+
+    +1 means the highlights keep more colour than the shadows, -1 the reverse.
+    It is the PRODUCT of the two signs, not `balance` alone: spec.py's factor is
+    `1 + (factor - 1) * (1 + balance * (2L - 1))`, so flipping either sign flips
+    which end gains. 0 when the factor asked for nothing.
+
+    Its own inverse, which is why _tilt_saturation uses it in both directions:
+    given the composed factor it turns a picture tilt back into a `balance`.
+    """
+    departure = factor - 1.0
+    if abs(departure) <= _TILT_EPS:
+        return 0.0
+    return balance * (1.0 if departure > 0.0 else -1.0)
+
+
 def _tilt_saturation(d: dict, factor: float, tilt: float) -> None:
     """Multiply saturation by `factor`, asking for `tilt` of balance, composed
     as a SATURATION-WEIGHTED MEAN.
@@ -536,13 +559,52 @@ def _tilt_saturation(d: dict, factor: float, tilt: float) -> None:
     composes multiplicatively rather than additively -- a factor of 1 asked for
     nothing and must not get a vote. Order-independent, which two verbs in one
     sentence are.
+
+    THE MEAN IS TAKEN OVER THE PICTURE TILT, NOT OVER `balance`, and that is not
+    a refinement -- averaging `balance` directly is wrong and a live model found
+    it. spec.py's factor is `1 + (saturation - 1) * (1 + balance * (2L - 1))`,
+    so which END of the tone scale actually gains chroma depends on the sign of
+    `balance` AND the sign of `(saturation - 1)` together: the picture tilts
+    towards the highlights exactly when their product is positive. `balance`
+    alone is therefore only half of a direction, and two verbs that mean the
+    same thing can carry opposite halves of it.
+
+    "drain the colour out of the shadows but keep the highlights rich" is that
+    sentence. gpt-oss-120b answered it with `shadow_saturation down` (factor
+    0.8846, balance -1) and `highlight_saturation up` (factor 1.0750,
+    balance +1) -- both of which tilt the picture the same way, towards the
+    highlights. Averaging the two balances cancelled them to -0.2121 and the
+    measured result was tilt +0.0069, against +0.0848 for the first verb alone
+    and +0.0454 for the second: the pair came out weaker than either half of it.
+    Composing the picture tilt instead gives balance -1.0 and tilt +0.0329.
+
+    +0.0329 is still under either verb alone, and that is the representation
+    rather than the composition: the two verbs agree on the TILT and disagree on
+    the LEVEL, so the factors multiply towards 1 (0.8846 * 1.0750 = 0.9510) and
+    a smaller departure carries a smaller tilt. Full balance on a smaller
+    departure is the most the one field pair can give.
+
+    Every single-verb case is bit-identical either way -- one op's own
+    `sign(factor - 1)` is what converts its request back again -- so this only
+    moves the sentences that name both ends at once.
+
+    WHAT IT STILL CANNOT DO, because the representation cannot: drop the shadows
+    AND raise the highlights. The factor is linear in luma, so s(0) < 1 < s(1)
+    needs |balance| > 1. The pair resolves to the tilt the two verbs agree on
+    and leaves the far end at 1.0, which is the closest thing that exists.
     """
     w_old, w_new = abs(d["saturation"] - 1.0), abs(factor - 1.0)
     total = w_old + w_new
     # Nothing to tilt: spec.py scales the DEPARTURE from 1, so a balance at
     # saturation 1.0 moves no pixel and writing one would be invisible.
     if total > 1e-9:
-        d["saturation_balance"] = (w_old * d["saturation_balance"] + w_new * tilt) / total
+        pt = (w_old * _picture_tilt(d["saturation"], d["saturation_balance"])
+              + w_new * _picture_tilt(factor, tilt)) / total
+        d["saturation"] *= factor
+        # ...and back into spec.py's convention, against the COMPOSED factor.
+        # The conversion is its own inverse, so the same helper does both ways.
+        d["saturation_balance"] = _picture_tilt(d["saturation"], pt)
+        return
     d["saturation"] *= factor
 
 

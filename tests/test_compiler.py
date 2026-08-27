@@ -691,20 +691,107 @@ def test_the_amount_names_the_peak_not_the_multiplier():
         assert abs(tilted.saturation_balance) == 1.0
 
 
+def _chroma_tilt(spec) -> float:
+    """How much more chroma the bright half KEPT than the dark half, on pixels.
+
+    The halves are split on the SOURCE luma, so membership is fixed and this
+    measures the grade rather than which pixels moved across a threshold.
+    Positive means the shadows came out relatively less colourful, which is what
+    "drain the shadows" asks for.
+    """
+    out = np.clip(spec.apply(FULL_IMG), 0.0, 1.0)
+    bright = (FULL_IMG @ LUMA) >= np.median(FULL_IMG @ LUMA)
+    chroma = lambda v, s: float((v[s].max(-1) - v[s].min(-1)).mean())  # noqa: E731
+    return (chroma(out, bright) / chroma(FULL_IMG, bright)
+            - chroma(out, ~bright) / chroma(FULL_IMG, ~bright))
+
+
 def test_a_plain_saturation_verb_asks_for_the_even_move_and_says_so():
     """_tilt_contrast's rule one axis over. Without the declared 0, "drain the
     shadows and make it punchier" would drag the punch verb's own move into the
     shadows with it -- the second verb asked for an EVEN change and would
-    silently get a tilted one."""
+    silently get a tilted one.
+
+    JUDGED ON PIXELS, NOT ON THE SIGN OF THE FIELD, and that is the whole point
+    of the rewrite: this test used to assert `-1.0 < saturation_balance < 0.0`
+    and passed while the picture did the OPPOSITE of the sentence. spec.py's
+    factor is `1 + (saturation - 1) * (1 + balance * (2L - 1))`, so which end
+    gains chroma is the sign of `balance` AND of `(saturation - 1)` together.
+    Here the two verbs compose to saturation 1.1500 -- a net BOOST -- and a
+    negative balance on a boost puts the extra colour in the shadows. Measured
+    on FULL_IMG, the old rule scored -0.0331 where the sentence asked for
+    positive; the composed picture tilt scores +0.0435.
+    """
     both = Intent(ops=[Op(op="shadow_saturation", dir="down", amount="moderate"),
                        Op(op="saturation", amount="moderate")])
     spec = compile_intent(both, FULL_STATS)
-    assert -1.0 < spec.saturation_balance < 0.0    # split, not handed over whole
+    assert spec.saturation > 1.0, "the fixture must land on a net boost, or this proves nothing"
+    assert _chroma_tilt(spec) > 0.02, "the punch landed in the shadows the sentence drained"
+
+    # The punch still gets its share: handed the balance whole, this would be
+    # +-1.0 and the plain verb's own even move would have been overruled.
+    assert 0.0 < abs(spec.saturation_balance) < 1.0
 
     # ...and it is order-independent, which two verbs in one sentence are
     flipped = Intent(ops=list(reversed(both.ops)))
     assert compile_intent(flipped, FULL_STATS).saturation_balance == \
         pytest.approx(spec.saturation_balance, abs=1e-12)
+
+
+def test_two_tonal_verbs_that_agree_reinforce_instead_of_cancelling():
+    """"drain the colour out of the shadows but keep the highlights rich" is one
+    sentence and a live model answers it with TWO verbs, one per end.
+
+    Both mean the same thing about the picture -- more colour up top than down
+    low -- but they carry opposite `balance` requests, because `balance` alone is
+    only half a direction. Averaging them cancelled: measured live on
+    test_files/test.mp4, gpt-oss-120b's answer scored a chroma tilt of +0.0069
+    against +0.0848 for the shadow verb alone and +0.0454 for the highlight verb
+    alone. The pair was weaker than either half of it, which is the one thing a
+    composition rule must never be.
+
+    On FULL_IMG the old rule does not merely weaken the pair, it REVERSES it:
+    measured chroma tilt -0.0029 against +0.0166, i.e. it drains the highlights
+    the sentence asked to keep. Every threshold below is set from that gap and
+    from the singles (+0.1103 and +0.1428), not chosen.
+
+    The claim here is only that the pair points the right way. It is NOT that
+    the pair beats each half -- the two verbs agree on the tilt and disagree on
+    the level, so the factors multiply towards 1 (0.8846 * 1.0750) and a smaller
+    departure carries a smaller tilt. That is the representation, and
+    _tilt_saturation's docstring says so.
+
+    Note the composed balance comes out POSITIVE here where the same sentence on
+    test.mp4 gives -1.0. Both are the same picture tilt: this fixture composes to
+    a net boost and test.mp4 to a net drain, and the sign of `balance` follows
+    the sign of `(saturation - 1)`. That is the whole bug, seen from the other
+    side.
+    """
+    shadow = Op(op="shadow_saturation", dir="down", amount="moderate")
+    highlight = Op(op="highlight_saturation", dir="up", amount="moderate")
+    pair = compile_intent(Intent(ops=[shadow, highlight]), FULL_STATS)
+
+    assert abs(pair.saturation_balance) == 1.0, "they agree, so the tilt is not split"
+    assert _chroma_tilt(pair) > 0.01          # +0.0166 measured; the old rule gave -0.0029
+
+    # Each half alone already tilts this way, and the pair must not undo it.
+    for op in (shadow, highlight):
+        assert _chroma_tilt(compile_intent(Intent(ops=[op]), FULL_STATS)) > 0.05
+
+    # The mirror sentence, and it must land on the other side of zero.
+    mirror = compile_intent(Intent(ops=[Op(op="shadow_saturation", dir="up", amount="moderate"),
+                                        Op(op="highlight_saturation", dir="down",
+                                           amount="moderate")]), FULL_STATS)
+    assert _chroma_tilt(mirror) < -0.01       # -0.0155 measured
+
+    # Two verbs that genuinely DISAGREE about the tilt still cancel, which is
+    # correct rather than a missing case: what is left is an even drain.
+    disagree = compile_intent(Intent(ops=[Op(op="shadow_saturation", dir="down",
+                                             amount="moderate"),
+                                          Op(op="highlight_saturation", dir="down",
+                                             amount="moderate")]), FULL_STATS)
+    assert disagree.saturation_balance == pytest.approx(0.0, abs=1e-9)
+    assert abs(_chroma_tilt(disagree)) < 0.005
 
 
 def test_a_tonal_saturation_boost_costs_no_more_lut_accuracy_than_a_plain_one():
