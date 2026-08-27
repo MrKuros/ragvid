@@ -76,7 +76,7 @@ worse than falling back.
 | `looks.py` | The retrieval corpus, used by the direct path only. |
 | `project.py` | Orchestrates probe → plan → bake → preview → export. |
 | `session.py` | Persistence, history, undo. |
-| `server.py` | The local HTTP server. `API_VERSION` currently **12**. |
+| `server.py` | The local HTTP server. `API_VERSION` currently **13**. |
 | `web/index.html` | The whole UI, one file. WebGL preview + the "what it did" list. |
 
 ## Invariants — break these and something silently corrupts

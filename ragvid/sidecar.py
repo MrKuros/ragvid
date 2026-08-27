@@ -9,8 +9,10 @@ cube alone and all of it vanishes with nothing to say it ever existed. That is
 the bug these two files close, from opposite ends:
 
     look.json   the whole GradeStack verbatim — base spec plus every
-                (region, spec) layer. Lossless, ragvid-only, and the only thing
-                that round-trips.
+                (region, spec) layer — AND the Intent it was compiled from.
+                Lossless, ragvid-only, and the only thing that round-trips. The
+                numbers describe the clip they were measured on; the Intent is
+                the part that travels to a different one (see `write_look`).
     .cdl        ASC CDL. Lossy — slope/offset/power/saturation are the only
                 fields that map — but every grading tool on the planet reads
                 it. What does not map is NAMED in the <Description>, which is
@@ -28,13 +30,17 @@ import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from .errors import InputError
+from .intent import Intent
 from .region import GradeStack, Layer
 from .spec import GradeSpec
 
 LOOK_FORMAT = "ragvid-look"
 # 2 added `layers`. Version 1 files still read: they have no regions, which is
 # exactly what an empty layer list means, so there is nothing to migrate.
-LOOK_VERSION = 2
+# 3 added `intent`. Versions 1-2 still read: no key means no Intent, which is
+# the same honest None a photo match or a hand-edited spec produces.
+LOOK_VERSION = 3
 
 CUBE_NOTE = (
     "Lossless record of the grade. The accompanying .cube carries the 38 colour "
@@ -54,16 +60,25 @@ _CDL_FIELDS = frozenset(
 _NS = "urn:ASC:CDL:v1.2"
 
 
-def write_look(look: GradeStack | GradeSpec, path: str | Path) -> str:
+def write_look(
+    look: GradeStack | GradeSpec, path: str | Path, intent: Intent | None = None
+) -> str:
     """Write the full grade as JSON. Read it back with `read_look`.
 
     Takes a bare GradeSpec too, and means the flat stack by it — most grades are
     flat and a caller holding one correction should not have to wrap it.
 
     `spec` stays the base grade under its original key so a version-1 reader
-    keeps working; `layers` is additive and absent when there are none, which
-    keeps a flat grade's sidecar byte-identical to what version 1 wrote apart
-    from the version number itself.
+    keeps working; `layers` is additive and absent when there are none.
+
+    `intent` is the only PORTABLE thing in the file. Every number in `spec` was
+    derived from the source clip's measured ClipStats — including its
+    auto-balance cast correction — so handing those numbers to a differently lit
+    clip copies one clip's ANSWERS onto another clip's question. The verbs
+    survive the trip because they contain no measurement: re-compiled against
+    the new clip's stats they mean the same sentence and produce different
+    numbers, which is the whole point of the intent path. None when the grade
+    came from a photo match, a hand-edited spec or a direct-path provider.
     """
     stack = look if isinstance(look, GradeStack) else GradeStack(base=look)
     out = Path(path)
@@ -73,6 +88,7 @@ def write_look(look: GradeStack | GradeSpec, path: str | Path) -> str:
         "version": LOOK_VERSION,
         "note": CUBE_NOTE,
         "spec": json.loads(stack.base.model_dump_json()),
+        "intent": json.loads(intent.model_dump_json()) if intent else None,
     }
     if stack.layers:
         body["layers"] = [json.loads(l.model_dump_json()) for l in stack.layers]
@@ -80,17 +96,41 @@ def write_look(look: GradeStack | GradeSpec, path: str | Path) -> str:
     return str(out)
 
 
-def read_look(path: str | Path) -> GradeStack:
-    """The inverse of `write_look`. Always a GradeStack — `.base` is the spec.
+def read_look(path: str | Path) -> tuple[GradeStack, Intent | None]:
+    """The inverse of `write_look`: `(stack, intent)`. `stack.base` is the spec.
 
-    No format-version branching: a version-1 file has no `layers` key and a
-    grade with no regions has an empty one, and those are the same grade.
+    No format-version branching downwards: a version-1 file has no `layers` key
+    and a grade with no regions has an empty one, and those are the same grade;
+    a version-2 file has no `intent` key and a grade with no verbs behind it has
+    None, and those are the same grade too. A version from the FUTURE is
+    rejected rather than best-guessed — a key this reader does not know about is
+    a part of the look it would drop silently, which is the exact data-loss bug
+    this whole module exists to close.
+
+    Everything here parses a file the user picked, so every failure is an
+    InputError and a 400 rather than a traceback: this is the same funnel
+    Session.load uses, for the same reason. `ValueError` covers both
+    json's JSONDecodeError and pydantic's ValidationError.
     """
-    raw = json.loads(Path(path).read_text())
-    return GradeStack(
-        base=GradeSpec.model_validate(raw["spec"]),
-        layers=[Layer.model_validate(l) for l in raw.get("layers") or []],
-    )
+    p = Path(path)
+    try:
+        raw = json.loads(p.read_text())
+        if not isinstance(raw, dict) or raw.get("format") != LOOK_FORMAT:
+            raise InputError(str(p), "not a ragvid look file")
+        if int(raw.get("version") or 1) > LOOK_VERSION:
+            raise InputError(
+                str(p), f"look version {raw['version']} — written by a newer ragvid"
+            )
+        raw_intent = raw.get("intent")
+        return (
+            GradeStack(
+                base=GradeSpec.model_validate(raw["spec"]),
+                layers=[Layer.model_validate(l) for l in raw.get("layers") or []],
+            ),
+            Intent.model_validate(raw_intent) if raw_intent else None,
+        )
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise InputError(str(p), f"unreadable look file ({exc})") from exc
 
 
 def write_cdl(look: GradeStack | GradeSpec, path: str | Path) -> str:

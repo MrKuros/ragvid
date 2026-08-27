@@ -323,7 +323,7 @@
     <form class="ask" id="askForm">
       <input type="text" id="ask" autocomplete="off"
              placeholder="Describe the look you want — e.g. warm and nostalgic">
-      <button type="button" class="iconbtn" id="photoBtn" title="Match a photo instead (works offline)">
+      <button type="button" class="iconbtn" id="photoBtn" title="Match a photo, or load a saved look.json (works offline)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
           <rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6"/>
           <path d="M21 16l-5-5-9 8"/></svg>
@@ -450,7 +450,7 @@
 
 <input type="file" id="videoFile" hidden
        accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.gif,.mpg,.mpeg,.wmv,.m2ts">
-<input type="file" id="photoFile" hidden accept="image/*">
+<input type="file" id="photoFile" hidden accept="image/*,.json">
 
 <script>
 "use strict";
@@ -458,7 +458,7 @@ const $ = (id) => document.getElementById(id);
 // Must match server.py's API_VERSION. The HTML is re-read on every request but
 // the Python is not, so an old `ragvid serve` will happily serve this file and
 // then answer with a contract it does not implement.
-const EXPECTED_API = 12;
+const EXPECTED_API = 13;
 let S = { open: false };            // last state from the server
 let t = 0;                          // scrubber position, seconds
 let busy = false;
@@ -1325,8 +1325,14 @@ $("askForm").addEventListener("submit", (e) => {
 $("photoBtn").onclick = () => { browseMode = "image"; $("photoFile").click(); };
 $("photoFile").onchange = (e) => {
   const f = e.target.files[0]; if (!f) return;
-  upload("/api/reference", f); e.target.value = "";
+  upload(lookFile(f.name) ? "/api/look" : "/api/reference", f); e.target.value = "";
 };
+// A saved look rides in on the affordances a reference photo already has -- the
+// picker, the typed path, the drop target. It is the same request ("take the
+// look from this file, not from a sentence") and it must not cost a control:
+// applying one re-runs its verbs against THIS clip, so there is nothing to
+// configure and nothing to show.
+const lookFile = (name) => /\.json$/i.test(name);
 
 $("undoBtn").onclick = () => post("/api/undo");
 $("resetBtn").onclick = () => {
@@ -1434,6 +1440,7 @@ $("videoFile").onchange = (e) => {
 addEventListener("drop", (e) => {
   e.preventDefault();
   const f = e.dataTransfer.files[0]; if (!f) return;
+  if (S.open && lookFile(f.name)) return upload("/api/look", f);
   upload(f.type.startsWith("image/") && S.open ? "/api/reference" : "/api/project", f);
 });
 
@@ -1505,6 +1512,7 @@ function entry(icon, name, size, onclick) {
 }
 function choose(path) {
   $("browser").close();
+  if (lookFile(path)) return openPath("/api/look", path);
   if (browseMode === "lut") return openPath("/api/input_lut", path);
   openPath(browseMode === "image" ? "/api/reference" : "/api/project", path);
 }

@@ -12,9 +12,13 @@ import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from ragvid.probe import ClipStats
+from ragvid.compiler import compile_stack
+from ragvid.errors import InputError
+from ragvid.intent import Intent, Op
+from ragvid.probe import ClipStats, _stats_from_frames
 from ragvid.project import Project
 from ragvid.sidecar import read_look, write_cdl, write_look
 from ragvid.spec import RGB, EffectSpec, GradeSpec, HueBand
@@ -56,13 +60,13 @@ def _floats(el) -> list[float]:
 def test_look_json_round_trips_the_spec_field_for_field(tmp_path):
     """The whole justification for the file: everything the cube drops survives."""
     write_look(RICH, tmp_path / "out.look.json")
-    assert read_look(tmp_path / "out.look.json").base == RICH
-    assert read_look(tmp_path / "out.look.json").is_flat, "no regions were asked for"
+    assert read_look(tmp_path / "out.look.json")[0].base == RICH
+    assert read_look(tmp_path / "out.look.json")[0].is_flat, "no regions were asked for"
 
 
 def test_look_json_header_names_what_the_cube_does_not_carry(tmp_path):
     raw = json.loads(Path(write_look(RICH, tmp_path / "o.look.json")).read_text())
-    assert raw["format"] == "ragvid-look" and raw["version"] == 2
+    assert raw["format"] == "ragvid-look" and raw["version"] == 3
     assert "effects" in raw["note"] and "3D LUT" in raw["note"]
     assert "layers" not in raw, "a flat grade writes no layer list"
     assert raw["spec"]["effects"]["grain"] == 0.4
@@ -166,7 +170,7 @@ def test_export_writes_the_video_and_both_sidecars(project, tmp_path):
     look = tmp_path / "graded.look.json"
     cdl = tmp_path / "graded.cdl"
     assert look.is_file() and cdl.is_file()
-    assert read_look(look).base == RICH
+    assert read_look(look)[0].base == RICH
     assert _floats(_cc(cdl).find(f"{NS}SOPNode/{NS}Slope"))[0] == pytest.approx(1.2 * 2 ** 0.5)
 
 
@@ -190,14 +194,14 @@ def test_look_json_round_trips_the_regions_too(tmp_path):
     """The whole justification for the file, one category larger than before."""
     stack = _regional_stack()
     write_look(stack, tmp_path / "r.look.json")
-    assert read_look(tmp_path / "r.look.json") == stack
+    assert read_look(tmp_path / "r.look.json")[0] == stack
 
 
 def test_the_layer_geometry_survives_field_for_field(tmp_path):
     """A region that reloads with a different softness is a different picture,
     and nothing in the file would say so."""
     stack = _regional_stack()
-    back = read_look(write_look(stack, tmp_path / "r.look.json"))
+    back, _ = read_look(write_look(stack, tmp_path / "r.look.json"))
     for got, want in zip(back.layers, stack.layers):
         assert got.region.model_dump() == want.region.model_dump()
         assert got.spec == want.spec
@@ -206,7 +210,7 @@ def test_the_layer_geometry_survives_field_for_field(tmp_path):
 def test_a_bare_spec_still_writes_a_flat_look(tmp_path):
     """Most grades are flat and a caller holding one correction should not have
     to wrap it."""
-    assert read_look(write_look(RICH, tmp_path / "f.look.json")).base == RICH
+    assert read_look(write_look(RICH, tmp_path / "f.look.json"))[0].base == RICH
 
 
 def test_the_cdl_names_the_regions_it_cannot_carry(tmp_path):
@@ -222,3 +226,187 @@ def test_the_cdl_of_a_regional_grade_still_carries_the_base(tmp_path):
     """Naming what it dropped must not stop it exporting what it can."""
     cc = _cc(write_cdl(_regional_stack(), tmp_path / "r.cdl"))
     assert _floats(cc.find(f"{NS}SOPNode/{NS}Slope"))[0] == pytest.approx(1.2 * 2 ** 0.5)
+
+
+# ---- a look that survives being picked by a human --------------------------
+#
+# read_look parses a file the USER chose, so every failure here is something a
+# picker has to explain rather than a traceback: same funnel Session.load uses.
+
+
+@pytest.mark.parametrize("body,why", [
+    ("not json at all", "garbage"),
+    ('{"format": "ragvid-look", "version": 3}', "no spec key"),
+    ('{"format": "ragvid-look", "version": 3, "spec": {"saturation": "blue"}}', "bad spec"),
+    ('{"format": "ragvid-look", "version": 3, "spec": {}, "layers": [{"nope": 1}]}', "bad layer"),
+    ('["a", "list"]', "not an object"),
+    ('{"format": "resolve-powergrade", "version": 1, "spec": {}}', "another tool's file"),
+    ('{"format": "ragvid-look", "version": 99, "spec": {}}', "from the future"),
+])
+def test_an_unreadable_look_is_an_input_error_not_a_traceback(tmp_path, body, why):
+    """400 and reopen the picker, not 500. Every one of these reached the caller
+    as a JSONDecodeError, a KeyError or a pydantic ValidationError before."""
+    p = tmp_path / "bad.look.json"
+    p.write_text(body)
+    with pytest.raises(InputError) as exc:
+        read_look(p)
+    assert exc.value.path == str(p) and exc.value.reason
+
+
+def test_a_missing_look_file_is_an_input_error_too(tmp_path):
+    with pytest.raises(InputError):
+        read_look(tmp_path / "nothing.look.json")
+
+
+def test_a_look_from_the_future_names_its_version(tmp_path):
+    """Rejected rather than best-guessed: a key this reader does not know about
+    is a part of the look it would drop silently, which is the data-loss bug
+    this module exists to close."""
+    p = tmp_path / "v99.look.json"
+    p.write_text(json.dumps({"format": "ragvid-look", "version": 99,
+                             "spec": json.loads(RICH.model_dump_json())}))
+    with pytest.raises(InputError, match="99"):
+        read_look(p)
+
+
+# ---- the intent rides along, because it is the only portable part ----------
+
+
+INTENT = Intent(ops=[Op(op="warmth", dir="up", amount="moderate"),
+                     Op(op="contrast", dir="up", amount="moderate")])
+
+
+def test_the_intent_round_trips(tmp_path):
+    back = read_look(write_look(RICH, tmp_path / "i.look.json", INTENT))[1]
+    assert back == INTENT
+
+
+def test_a_look_with_no_intent_reads_back_as_none(tmp_path):
+    """A photo match or a hand-edited spec has no verbs behind it, and None is
+    the honest answer rather than an empty Intent that would compile to
+    identity and claim the grade did nothing."""
+    assert read_look(write_look(RICH, tmp_path / "n.look.json"))[1] is None
+
+
+def test_a_version_2_look_still_loads_and_has_no_intent(tmp_path):
+    """Hand-written rather than produced by this code, because the point is a
+    file THIS version can no longer write. Nothing to migrate: no `intent` key
+    and no verbs behind the grade are the same grade."""
+    p = tmp_path / "v2.look.json"
+    p.write_text(json.dumps({
+        "format": "ragvid-look", "version": 2, "note": "old",
+        "spec": json.loads(RICH.model_dump_json()),
+        "layers": [json.loads(l.model_dump_json()) for l in _regional_stack().layers],
+    }))
+    stack, intent = read_look(p)
+    assert intent is None
+    assert stack.base == RICH and len(stack.layers) == 2
+
+
+def test_export_carries_the_intent_into_the_sidecar(project, tmp_path):
+    """The wiring, end to end: the Project holds the Intent, and before this it
+    was written into session.json and nowhere a second machine could read it."""
+    project.set_intent(INTENT)
+    project.export(tmp_path / "graded.mp4")
+    assert read_look(tmp_path / "graded.look.json")[1] == INTENT
+
+
+# ---- the measured claim: a look is portable, its numbers are not -----------
+#
+# Every number in `spec` was derived from the exported clip's ClipStats, the
+# auto-balance cast correction included. Handing them to differently lit footage
+# applies one clip's ANSWERS to another clip's question -- a LUT copy wearing a
+# better name. The verbs carry no measurement, so they survive the trip.
+#
+# Measured on PIXELS. The reference for "what the sentence means on clip B" is
+# not clip B graded through the intent (that would be circular) but the SAME
+# SENTENCE on cast-free footage: auto-balance exists to make those two the same
+# picture, so the distance to it is exactly how much of clip A's lighting leaked
+# across. `dist` is on measurements, not on spec fields.
+
+_x = np.random.default_rng(0)
+_RAMP = np.clip(_x.uniform(0.12, 0.68, (20000, 1)) + _x.normal(0.0, 0.05, (20000, 3)), 0.06, 0.76)
+
+
+def _cast(img, gain):
+    return np.clip(img * np.array(gain, dtype=np.float64), 0.0, 1.0)
+
+
+def _stats(img) -> ClipStats:
+    return _stats_from_frames([np.round(img * 255.0).astype(np.uint8)], 640, 360, 4.0)
+
+
+def _graded(img):
+    return compile_stack(INTENT, _stats(img), balance=True).base.apply(img)
+
+
+def _warmth(o):
+    return float(o[:, 0].mean() - o[:, 2].mean())
+
+
+def test_the_intent_in_a_look_beats_its_numbers_on_a_differently_cast_clip(tmp_path):
+    """The whole justification for the `intent` key, on real pixels.
+
+    Clip A is green-fluorescent, clip B is tungsten -- opposite casts, so clip
+    A's balance correction is roughly clip B's cast again. Measured:
+
+        the sentence on cast-free footage   R-B  0.0158   hue_strength 0.0150
+        clip B through the look's INTENT    R-B  0.0195   hue_strength 0.0186
+        clip B through the look's NUMBERS   R-B  0.0856   hue_strength 0.0875
+
+    The copied numbers overshoot the warmth the sentence asked for by 5.4x, and
+    land 10.2x further from it in RMSE (0.0355 against 0.0035). The numbers path
+    is exactly what a version-2 look could do, so this is the before/after.
+    """
+    clip_a = _cast(_RAMP, (1.0, 1.06, 1.0))     # green fluorescent
+    clip_b = _cast(_RAMP, (1.06, 1.0, 0.94))    # tungsten
+    assert _stats(clip_a).hue_strength > 0.02 and _stats(clip_b).hue_strength > 0.02, \
+        "the fixtures must actually be cast, and differently"
+
+    stack_a = compile_stack(INTENT, _stats(clip_a), balance=True)
+    look = write_look(stack_a, tmp_path / "a.look.json", INTENT)
+    stack_back, intent_back = read_look(look)
+
+    target = _graded(_RAMP)                            # the sentence, no cast to fight
+    via_intent = compile_stack(intent_back, _stats(clip_b), balance=True).base.apply(clip_b)
+    via_numbers = stack_back.base.apply(clip_b)        # what a version-2 look can do
+
+    rmse = lambda o: float(np.sqrt(((o - target) ** 2).mean()))
+    assert rmse(via_intent) < 0.25 * rmse(via_numbers), (
+        f"intent {rmse(via_intent):.4f} vs numbers {rmse(via_numbers):.4f}")
+    # ... and in the one moment the sentence actually names.
+    assert abs(_warmth(via_intent) - _warmth(target)) < 0.25 * abs(
+        _warmth(via_numbers) - _warmth(target)), (
+        f"R-B target {_warmth(target):.4f}, intent {_warmth(via_intent):.4f}, "
+        f"numbers {_warmth(via_numbers):.4f}")
+    # The cast clip A was lit under must not survive into clip B's grade.
+    assert _stats(via_intent).hue_strength < 0.5 * _stats(via_numbers).hue_strength
+
+
+def test_apply_look_takes_the_intent_path_when_there_is_one(project, tmp_path):
+    """Project.apply_look is where server.py's three lines land. An Intent goes
+    through set_intent, so the grade is re-derived from THIS clip's stats."""
+    look = write_look(RICH, tmp_path / "p.look.json", INTENT)
+    project.apply_look(look)
+    assert project.intent == INTENT
+    assert project.spec != RICH, "the numbers were re-compiled, not copied"
+
+
+def test_apply_look_without_an_intent_flattens_and_says_nothing_it_cannot(project, tmp_path):
+    """Honest degradation, in refine_spec's terms: 44 numbers can only describe
+    the whole frame, so the regional layers go. The alternative on such a file
+    is not applying it at all."""
+    look = write_look(_regional_stack(), tmp_path / "f2.look.json")
+    project.apply_look(look)
+    assert project.intent is None
+    assert project.layers == []
+    assert project.spec == RICH.sanitize()
+
+
+@pytest.mark.parametrize("name", ["nope.json", "look.cube"])
+def test_apply_look_refuses_what_it_cannot_read(project, tmp_path, name):
+    """Checked at the moment the file is picked, the way _check_lut is."""
+    if name.endswith(".cube"):
+        (tmp_path / name).write_text("LUT_3D_SIZE 2\n")
+    with pytest.raises(InputError):
+        project.apply_look(tmp_path / name)

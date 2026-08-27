@@ -1066,6 +1066,68 @@ def test_the_browser_offers_cube_files(api, tmp_path):
     assert kinds == {"look.cube": "lut"}
 
 
+# ---- POST /api/look: a saved look, re-measured against THIS clip -----------
+
+
+def _look(tmp_path, name="a.look.json", intent=True):
+    """A look.json written the way an export writes one."""
+    from ragvid.intent import Intent, Op
+    from ragvid.sidecar import write_look
+
+    from ragvid.spec import GradeSpec
+
+    ops = Intent(ops=[Op(op="warmth", dir="up", amount="strong")]) if intent else None
+    return write_look(GradeSpec(temperature=900.0, saturation=1.2, rationale="warm"),
+                      tmp_path / name, ops)
+
+
+def test_a_look_with_an_intent_is_recompiled_against_this_clip(api, tmp_path):
+    """The numbers in the file were measured off whatever clip was exported. The
+    verbs are what travel, so state comes back WITH an intent and the grade is
+    the compiler's answer for this footage, not the file's."""
+    api.open_clip()
+    r = api.post("/api/look", {"path": _look(tmp_path)})
+    assert r.status == 200, r.body
+    assert r.json["planned"]
+    assert [o["op"] for o in r.json["intent"]["ops"]] == ["warmth"]
+    assert r.json["spec"]["temperature"] != 900.0, "the file's number was copied"
+
+
+def test_a_look_with_no_intent_still_applies_and_says_it_has_none(api, tmp_path):
+    """A version-2 file, a photo match or a hand-edited spec. Honest
+    degradation: the numbers land, and /api/state reports no verbs behind
+    them rather than inventing some."""
+    api.open_clip()
+    r = api.post("/api/look", {"path": _look(tmp_path, "n.look.json", intent=False)})
+    assert r.status == 200, r.body
+    assert r.json["intent"] is None
+    assert r.json["spec"]["temperature"] == 900.0
+
+
+def test_a_look_can_be_uploaded_like_every_other_file(api, tmp_path):
+    """The page has no path to a filesystem, so the picker uploads bytes."""
+    api.open_clip()
+    data = Path(_look(tmp_path, "u.look.json")).read_bytes()
+    r = api.upload("/api/look", "u.look.json", data)
+    assert r.status == 200, r.body
+    assert r.json["intent"]["ops"]
+
+
+@pytest.mark.parametrize("name,body", [
+    ("gone.look.json", None),
+    ("notes.txt", "x"),
+    ("junk.look.json", "not json"),
+])
+def test_a_look_that_cannot_be_read_is_a_400(api, tmp_path, name, body):
+    """400 and reopen the picker, not a 500 out of a JSON parser."""
+    api.open_clip()
+    if body is not None:
+        (tmp_path / name).write_text(body)
+    r = api.post("/api/look", {"path": str(tmp_path / name)})
+    assert r.status == 400, r.body
+    assert r.error["type"] == "InputError"
+
+
 def test_no_route_ever_answers_with_the_key(api):
     """The sentinel goes in through the one route that accepts it, and must not
     come back out of any of them -- not in a body, not in an error."""

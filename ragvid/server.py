@@ -42,11 +42,12 @@ MAX_UPLOAD = 512 * 1024 * 1024  # ponytail: uploads are read into memory; the
 # the server is still running the Python it was started with -- which otherwise
 # shows up as fields silently missing and routes 404ing, with nothing on screen
 # to explain it.
-API_VERSION = 12
+API_VERSION = 13
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif", ".mpg", ".mpeg", ".wmv", ".m2ts"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 LUT_EXT = {".cube"}
+LOOK_EXT = {".json"}   # a look.json written beside an export
 
 INDEX = Path(__file__).parent / "web" / "index.html"
 PLACEHOLDER = b"""<!doctype html><meta charset=utf-8><title>ragvid</title>
@@ -381,6 +382,23 @@ def r_input_lut(req, q):
     raw = body.get("format") or body.get("path")
     with LOCK:
         _project().set_input_lut(str(raw).strip() if raw else None)
+        return _mutated()
+
+
+def r_look(req, q):
+    """Apply a saved `look.json` to the clip that is open — the same SENTENCE.
+
+    Not the same numbers: those were measured off whatever clip was exported,
+    so `Project.apply_look` re-compiles the look's Intent against this one's
+    statistics. A look with no Intent in it flattens to its base spec, which the
+    library documents as the honest degradation it is.
+
+    Takes `{"path": "/abs/path/x.look.json"}` or a multipart upload, like every
+    other route that brings a file in.
+    """
+    path = _incoming_file(req, LOOK_EXT)
+    with LOCK:
+        _project().apply_look(path)
         return _mutated()
 
 
@@ -872,6 +890,7 @@ ROUTES = {
     ("POST", "/api/provider"): r_set_provider,
     ("POST", "/api/key"): r_set_key,
     ("POST", "/api/input_lut"): r_input_lut,
+    ("POST", "/api/look"): r_look,
     ("POST", "/api/export"): r_export,
     ("POST", "/api/segment/download"): r_segment_download,
     ("GET", "/api/segment/download"): r_segment_status,

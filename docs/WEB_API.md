@@ -40,7 +40,7 @@ Single user, loopback only, no auth. `ragvid serve` starts it and opens a browse
                       "text":"warmed it up"}]},
   "auto_balance": true,
   "balance": "neutralised a green cast, set the black point",
-  "api_version": 12,
+  "api_version": 13,
   "version": 8,
   "spec": { "slope": {"r":1,"g":1,"b":1}, "offset": {...}, "power": {...},
             "saturation": 1.0, "saturation_balance": 0,
@@ -208,6 +208,7 @@ All return the same state object as `GET /api/state`.
 | `POST` | `/api/project` | multipart `file`, or `{"path": "/abs/path"}` | Opens a clip, **reopening its session when there is one**. Each clip has its own state directory under the work dir, so opening a second clip does not touch the first one's history, and reopening a clip (or restarting the server) brings its grades back. A damaged session answers **409 `SessionCorrupt`** with `path` and `reason`. Uploads land in the work dir. |
 | `POST` | `/api/vibe` | `{"vibe": "gloomy"}` | Needs a provider key. Slow (network). |
 | `POST` | `/api/reference` | multipart `file`, or `{"path": "..."}` | Offline, no key, fast. |
+| `POST` | `/api/look` | multipart `file`, or `{"path": "/abs/x.look.json"}` | Applies a `look.json` written beside somebody else's export. Offline, no key, fast. It re-compiles the look's **intent** against THIS clip's statistics rather than copying its numbers: those were measured off the clip that was exported, auto-balance included, so pasting them onto differently lit footage is a LUT copy wearing a better name. A version-2 file (or any look with no intent behind it — a photo match, a hand-edited spec) has only numbers to give, so it falls back to `/api/spec` behaviour and **flattens**: the regional layers go, exactly as `refine` does on a provider that cannot constrain decoding. A file that is not a readable look is a `400`. |
 | `POST` | `/api/refine` | `{"instruction": "less blue"}` | Requires `planned`. Slow (network). |
 | `POST` | `/api/intent` | `{"intent": {"ops":[...], "strength":"full"}}` | The per-item strength path. Re-**compiles** the grade from the verbs against the cached stats — fast, no network. Send back the `intent` from `/api/state` with one `amount` changed, or with an op dropped to remove that move. A verb outside the vocabulary is a `400`. |
 | `POST` | `/api/spec` | `{"spec": {...}}` | The raw-spec path: the only way to reach a field no verb covers (`pivot`, per-band `lum`). Fast, no network. Full spec object — omitted keys reset to identity, this is not a patch. **Drops the intent**, since 44 numbers are not described by any verb list; `/api/state` then returns `"intent": null`. |

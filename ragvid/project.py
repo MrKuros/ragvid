@@ -541,6 +541,40 @@ class Project:
         stack = compile_stack(intent, self.stats, balance=self.session.auto_balance)
         return self._push(stack.base, label=label, intent=intent, layers=stack.layers)
 
+    def apply_look(self, path: str | Path) -> GradeSpec:
+        """Apply a `look.json` written beside somebody else's export to THIS clip.
+
+        The two paths are the same split refine.py describes, one file further
+        along. A look that carries an Intent goes through set_intent, which
+        re-compiles the verbs against THIS clip's measurements: the sentence is
+        portable, the numbers never were — every one of them was derived from
+        the source clip's ClipStats, including its auto-balance cast correction,
+        so copying them onto differently lit footage applies one clip's answers
+        to another clip's question. Re-compiling also rebuilds the regional
+        layers off this clip's own frame, so "darken the sky" finds this sky.
+
+        A look with no Intent behind it — a photo match, a hand-edited spec, a
+        direct-path provider — falls back to set_spec, which FLATTENS exactly as
+        refine_spec does: 44 numbers can only describe the whole frame, so the
+        Intent and any regional layer are dropped. That is honest degradation
+        rather than a bug; the alternative on such a file is not applying it.
+        """
+        from .sidecar import read_look
+
+        look = Path(path).expanduser()
+        # Validated here rather than at read time for the reason _check_lut is:
+        # one sentence at the moment the file is picked beats a parse error from
+        # inside a reader the user never asked to run.
+        if not look.is_file():
+            raise InputError(str(look), "no such look file")
+        if look.suffix.lower() != ".json":
+            raise InputError(str(look), "not a .look.json file")
+        stack, intent = read_look(look)
+        label = f"look from {look.name}"
+        if intent is not None:
+            return self.set_intent(intent, label=label)
+        return self.set_spec(stack.base, label=label)
+
     @property
     def auto_balance(self) -> bool:
         """Whether the clip is neutralised from its measurements before the look."""
@@ -759,7 +793,7 @@ class Project:
                          gpu=gpu, progress=progress, input_lut=self.input_lut,
                          layers=self.bake_layers(tmp))
         # with_name, not with_suffix: a multi-dot suffix is not accepted there.
-        write_look(self.stack, out.with_name(out.stem + ".look.json"))
+        write_look(self.stack, out.with_name(out.stem + ".look.json"), self.intent)
         write_cdl(self.stack, out.with_name(out.stem + ".cdl"))
         return out
 
