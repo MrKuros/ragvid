@@ -27,6 +27,22 @@ is on `0.x`, a middle-number bump can change the shape of a saved grade.
   put the colour in the middle and take it off both ends; that shape is not
   expressible here, and asking for it will get you one end or the other.
 
+- **"Drain the shadows but keep the highlights rich" no longer comes out flat.**
+  Naming both ends of the picture in one sentence used to leave you with almost
+  nothing: the two halves of the request cancelled each other and the result was
+  weaker than either half on its own. They now pull together. This was found by
+  asking a real model the sentence rather than by reading the code, and it took
+  a second, quieter bug with it — "drain the shadows and make it punchier" was
+  putting the punch into the shadows it had just drained.
+- **A look you made on one clip can be carried to another.** Saving a grade
+  writes down the sentence behind it, not only the numbers it produced, so
+  opening a different clip and applying that look asks the same question of the
+  new footage instead of pasting the old answer onto it. On a clip lit the
+  opposite way, the sentence lands ten times closer to what it meant than the
+  copied numbers do — those numbers overshot the warmth being asked for by more
+  than five times. Looks saved by the previous version still open; they simply
+  have no sentence behind them, and say so.
+
 ### Your work stays put
 
 - **Opening a clip you have graded before brings its grades back.** Every clip
@@ -41,6 +57,10 @@ is on `0.x`, a middle-number bump can change the shape of a saved grade.
   beside the old one and swapped in only once it is complete, so a crash or a
   full disk leaves the last good version rather than a truncated one.
 - **A damaged session says so plainly** instead of failing as an internal error.
+- **A damaged or unrelated look file says so plainly** too, instead of failing
+  as an internal error — including one written by some other tool that happens
+  to end in `.json`, and one from a newer version of ragvid than you are
+  running.
 
 If you had a project open in a previous version, it lived in a shared folder
 that is no longer read. Open the clip again and grade it; nothing else moved.
