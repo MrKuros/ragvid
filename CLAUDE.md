@@ -213,9 +213,35 @@ Semantic masks are sampled **once**, not per frame: inference is 244 ms, so a
 export. The honest consequence — a subject leaving frame keeps its grade — is
 documented in `segment.py`.
 
-Next is not a feature. The honest 1.0 blocker is that **nobody has yet graded
-real footage with this**, and the CI matrix has only just gained Windows and
-macOS — whose first run already turned up an `os.fchmod` call that made the app
+The app has now been **driven end to end through its own HTTP API** — open,
+grade, render, export, undo — over six grades covering a hue rotation, a tonal
+saturation split, a geometric region, a semantic mask, a protect and a spatial
+effect. That had never been done. What it measured:
+
+- **The preview matches the export.** Decoding the exported file and comparing
+  it against the server's own frame gives a mean of 1.24–1.47 code values
+  against a **measured codec floor of 1.02** — an ungraded H.264 re-encode at
+  the same settings. So the grade itself contributes under half a code value.
+  Grain is the exception at 2.76, and it is not a disagreement: grain is
+  per-frame noise, so the encoder mangles it and the two draws differ anyway.
+- Compile-and-push is 0.08 s; a frame is 1.0–3.2 s (the 3.2 is segmentation);
+  an export is 38–61 s for a 21 s 1080p60 clip.
+- **`bake_layers`' n² does not need the cache yet.** Its own comment names the
+  trigger — "if a deeper stack ever shows up" — and the deepest stack this pass
+  built was two layers. Measured, not assumed, and nothing was written.
+- The five **log transforms** have seen real image content for the first time,
+  via a 10-bit S-Log3 clip derived from the fixture: Rec.709 display 0.409 →
+  scene linear 0.1800 → S-Log3 code **0.4106**, inside the 0.408–0.412 the
+  `logspace.py` docstring promises, and the round trip back through
+  `bake_conversion` is **0.140 code values** below the highlight shoulder.
+
+Next is still not a feature. The honest 1.0 blocker is narrower than it was but
+it has not moved: **the only clip any of this has ever run on is
+`test_files/test.mp4`**, which is the fixture every number in the repo is
+measured from. Driving the app proves the chain; it does not prove the taste, or
+the log path against a real camera, or anything about footage that is not this
+one 21-second clip. And the CI matrix has only just gained Windows and macOS —
+whose first run already turned up an `os.fchmod` call that made the app
 unconfigurable there.
 
 ## Things that bit us, so they don't again
