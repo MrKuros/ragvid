@@ -39,12 +39,20 @@ actually measured off the footage. `intent.py`'s schema is 834 bytes against
 `GradeSpec`'s 2692.
 
 This is the load-bearing decision in the project. Measured against the older
-path where the model authored all 43 numbers: **11/11 prompts vs 5/11, 2.0×
-cheaper** (`scripts/bakeoff_intent.py`, judged by applying each spec to real
-pixels and re-measuring — not by reading spec fields). That supersedes an
-earlier 10/10-vs-8/10-at-2.8×, which was a different harness: one prompt fewer,
-and it did not measure `welded` — the fraction of the frame welded onto pure
-black — which is the moment the direct path loses three of its checks on.
+path where the model authored all the numbers itself: **14/14 prompts vs 8/14,
+1.73× cheaper** (`scripts/bakeoff_intent.py`, judged by applying each spec to
+real pixels and re-measuring — not by reading spec fields). Each figure
+supersedes rather than corrects the one before it — 25/25-vs-18/25 at 2.0×,
+and 10/10-vs-8/10 at 2.8× before that — because each is a different harness.
+This run added three prompts that name a colour or an end of the tone scale.
+
+Two things in it are worth knowing beyond the totals. **"Warm up the reds" is
+a move the direct path cannot make**, not one it missed: `llm_json_schema`
+omits `rot` deliberately, so the model reached for `hue_red.lum` and turned the
+red band by +0.0000° against +3.9658°, identically across two live runs. And
+one of direct's calls came back **429** — it spends ~5000 tokens a call against
+an 8000/minute bucket, which is the cost gap showing up as a failure mode
+rather than as a number.
 
 The reason it matters is growth. Adding regions cost six vocabulary words. On
 the old path it would have cost a schema the model could not fill — at ~200

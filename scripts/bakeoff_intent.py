@@ -2,7 +2,7 @@
 """A1's proof: direct GradeSpec vs intent+compiler, judged on graded PIXELS.
 
 The roadmap says A1 does not ship on taste (docs/ROADMAP.md, "How A1 gets
-proven"), so this script is the only thing allowed to decide it. Eleven real
+proven"), so this script is the only thing allowed to decide it. Fourteen real
 grading sentences, one real clip, both paths, and two questions per sentence:
 
     did the moment the sentence names actually move, in the right direction?
@@ -28,18 +28,35 @@ provider's own `usage` field — the roadmap's second criterion is that intent
 must be measurably cheaper, and a guess at the cost would not settle it.
 
 WHAT IT LAST MEASURED. `out/` is gitignored, so this is the only place the
-numbers survive. Groq, openai/gpt-oss-120b, 11 prompts, 22 live calls:
+numbers survive. Groq, openai/gpt-oss-120b, 14 prompts, 28 live calls:
 
                 checks    prompts clean    tokens/prompt
-    direct      18/25          5/11             5406
-    intent      25/25         11/11             2649
+    direct      28/33          8/14             5094
+    intent      35/35         14/14             2944
 
-That is the claim CLAUDE.md and CHANGELOG.md quote, and it REPLACES the earlier
-10/10-vs-8/10-at-2.8x: different harness, one more prompt, and one moment
-(`welded`) the older run did not measure at all. Two runs were taken; the only
-difference between them was prompt 1, whose check was wrong (see PROMPTS[1]).
+1.73x cheaper. Direct is judged on 33 checks rather than 35 because one of its
+calls came back 429: it spends ~5000 tokens a call against an 8000/minute
+bucket, which is the cost difference showing up as a failure mode rather than
+as a number. That is reported as an error, not as a miss.
 
-Usage:  uv run python scripts/bakeoff_intent.py [--sleep 25] [--prompts 11]
+This REPLACES 25/25-vs-18/25 at 2.0x, which replaced 10/10-vs-8/10 at 2.8x.
+Each is a different harness rather than a correction of the one before: this
+run added the three prompts below that name a colour or an end of the tone
+scale, and it is the first one taken against a compiler that composes two
+tonal saturation verbs correctly -- the bug that broke it was found BY the
+previous run of this script (see compiler._tilt_saturation).
+
+WHAT THE TWO PATHS ACTUALLY DIFFERED ON, in this run:
+  * intent alone got 'make it pop, more punch', 'drain the colour, almost black
+    and white', 'warm it up, but at half strength' and 'deeper blacks, but keep
+    the shadow detail'.
+  * 'warm up the reds' is the one direct CANNOT get, rather than missed:
+    GradeSpec.llm_json_schema deliberately omits `rot`, so the model reached for
+    hue_red.lum instead and moved the red band's hue by +0.0000 degrees against
+    the intent path's +3.9658. Reproduced identically across two live runs.
+  * direct won nothing.
+
+Usage:  uv run python scripts/bakeoff_intent.py [--sleep 25] [--prompts 14]
 """
 
 from __future__ import annotations
@@ -62,13 +79,18 @@ from ragvid.probe import (  # noqa: E402
 from ragvid.providers import get_provider  # noqa: E402
 from ragvid.refine import refine_intent, refine_spec  # noqa: E402
 from ragvid.region import GradeStack  # noqa: E402
-from ragvid.spec import LUMA, GradeSpec  # noqa: E402
+from ragvid.spec import (  # noqa: E402
+    HUE_CENTERS, HUE_FIELDS, HUE_HALFWIDTH, LUMA, GradeSpec, _hue_chroma, _smoothstep)
 from ragvid.vibe import ask_intent, plan_direct  # noqa: E402
 
 SRC = REPO / "test_files" / "test.mp4"
 FRAMES = 6           # enough moments to average over; each is a full decode
 SLEEP = 25.0         # seconds between calls. See the docstring: 8000 TPM.
-CALL_BUDGET = 25     # hard stop, counting failures. Two other agents share the key.
+CALL_BUDGET = 36     # hard stop, counting failures. Two other agents share the key.
+                     # 14 prompts x 2 = 28, and the slack is measured rather than
+                     # guessed: the first 14-prompt run stopped on a budget of 30
+                     # having completed 13 prompts, so the provider spends a few
+                     # retries of its own that this wrapper counts.
 REFINE_BUDGET = 26   # --refine needs 20 (see REFINEMENTS); the slack is for a retry.
 
 # A moment "moved" if it moved by more than this, in display units (0-1). 0.010
@@ -90,9 +112,24 @@ KEEP_SAT = 0.055
 # that discriminates at one amount and not another is exactly the trap the B3a
 # tests fell into three times. `clipped` keeps the default only because nothing
 # has ever pushed it -- source value 1.36e-05.
-_THRESH = {"sat": (MOVE, KEEP_SAT), "welded": (MOVE, 0.005)}
+_THRESH = {"sat": (MOVE, KEEP_SAT), "welded": (MOVE, 0.005),
+           # `tilt` is a RATIO of chroma between the two halves and `red_hue` is
+           # in DEGREES; neither is a display level, so neither may inherit MOVE.
+           # Both are set from the measured gap between the real mechanism and
+           # the closest thing that could fake it, rather than chosen:
+           #   tilt     real subtle +-0.0351, a global drain 0.0000, a global
+           #            warmth push +0.0213 -> 0.025 sits above the faker and
+           #            below the smallest true move.
+           #   red_hue  real subtle +1.578 degrees, a global warmth push -0.130
+           #            and the wrong sign at every amount -> 1.0, margin both ways.
+           "tilt": (0.025, 0.025), "red_hue": (1.0, 1.0)}
 
 _EPS = 1e-8
+
+# Which band `red_hue` reads, derived from the spec rather than written as 0:
+# HUE_FIELDS is the order _apply_hue_bands iterates, and a hardcoded index would
+# silently measure the wrong colour if that order ever changed.
+_RED = HUE_FIELDS.index("hue_red")
 
 
 # ---- the prompts and what each one promises about the pixels ---------------
@@ -159,6 +196,33 @@ PROMPTS: list[tuple[str, dict]] = [
      # and +0.00193. Appended, never inserted -- _report's `weaker_than` indexes
      # `rows` positionally and index 0 must stay 'warmer'.
      dict(want={"black": "down"}, keep=("welded", "white"))),
+    ("warm up the reds, leave the rest of the frame alone",                  # [11]
+     # B3b, and the PAIR is the check rather than either half. `red_hue` alone
+     # only says the reds turned; `warm` steady is what says the rest of the
+     # frame did not come with them, which is the entire claim of a hue-vs-hue
+     # move. Measured, a global white balance fails this twice over -- it turns
+     # the reds the WRONG WAY (-0.130 to -0.545 degrees) while spending
+     # +0.0075 to +0.0374 of `warm`. No live model has ever been asked for this.
+     dict(want={"red_hue": "up"}, keep=("warm", "luma"))),
+    ("drain the colour out of the shadows but keep the highlights rich",     # [12]
+     # B3c, shadow_saturation. TWO wants, because one is fakeable and the --dry
+     # run proved it: `tilt` is the one moment a global WARMTH push also raises
+     # (+0.0511 at moderate, against the real verb's +0.0848), and the canned
+     # warm answer passed this prompt outright until `sat down` was added beside
+     # it. A white balance raises `sat` (+0.0232), draining the shadows lowers it
+     # (-0.0389), so the pair cannot be satisfied by one global move.
+     #
+     # `sat` is a want and not a keep on purpose: taking the colour off the dark
+     # half MUST lower the frame mean, so demanding it hold would assert a taste
+     # against the mechanism -- the mistake the `luma` check on prompt 1 made.
+     dict(want={"tilt": "up", "sat": "down"}, keep=("luma", "warm"))),
+    ("keep the colour out of the highlights",                                # [13]
+     # B3c, the other end. Harder to fake in this direction -- every move that
+     # raises `tilt` for the wrong reason RAISES it, and this asks for a fall,
+     # while a compiler that ignored the tilt and drained globally leaves it at
+     # +0.0000 -- but it carries `sat down` too, so the two B3c prompts are
+     # judged on the same footing rather than one being easier than the other.
+     dict(want={"tilt": "down", "sat": "down"}, keep=("luma",))),
 ]
 
 
@@ -212,12 +276,21 @@ def moments(v: np.ndarray) -> dict[str, float]:
     hi, lo = v.max(axis=1), v.min(axis=1)
     luma = v @ LUMA
     warm = v[:, 0] - v[:, 2]
+    sat = (hi - lo) / np.maximum(hi, _EPS)
     bright = luma >= 0.5
     dark = ~bright
+    # spec's own hue maths, not a re-derivation: _hue_chroma is what apply() keys
+    # the six bands off, so "the reds" here is the same set of pixels a
+    # red-targeted verb aims at, weighted the same way.
+    hue, chroma = _hue_chroma(v)
+    d = ((hue - HUE_CENTERS[_RED] + 180.0) % 360.0) - 180.0
+    wred = chroma * _smoothstep(np.clip(1.0 - np.abs(d) / HUE_HALFWIDTH, 0.0, 1.0))
+    rad = np.radians(hue)
+    chb, chd = chroma[bright].mean(), chroma[dark].mean()
     return {
         "luma": float(luma.mean()),
         "warm": float(warm.mean()),
-        "sat": float(np.mean((hi - lo) / np.maximum(hi, _EPS))),
+        "sat": float(sat.mean()),
         "spread": float(luma.std()),
         "black": float(np.percentile(luma, 1)),
         "white": float(np.percentile(luma, 99)),
@@ -232,6 +305,38 @@ def moments(v: np.ndarray) -> dict[str, float]:
         # verbs would then be unmeasurable rather than passing by accident.
         "split": float(warm[bright].mean() - warm[dark].mean())
         if bright.any() and dark.any() else 0.0,
+        # B3c. Colour in the bright half over colour in the dark half. A RATIO,
+        # not a difference, and that is the whole design: the saturation step is
+        # `luma + (x - luma) * s`, which scales chroma by exactly `s` and leaves
+        # luma untouched, so a GLOBAL move multiplies both halves by the same
+        # number, cannot move a single pixel across the crossover, and cancels
+        # out of the ratio exactly. Measured on this clip, a global drain moves
+        # it +0.0000 / -0.0000 / +0.0000 at the three amounts while
+        # `shadow_saturation down` moves it +0.0361 / +0.0848 / +0.1541.
+        #
+        # The difference version -- sat(bright) - sat(dark) -- was tried first
+        # and is CONFOUNDED: `sat` is (hi-lo)/hi, so shrinking chroma everywhere
+        # shrinks the gap between the halves too, and a global drain scored
+        # +0.0132 / +0.0290 / +0.0483 against the real verb's +0.0172 / +0.0375
+        # / +0.0621. It would have passed for the wrong mechanism at every
+        # amount.
+        "tilt": float(chb / chd) if bright.any() and dark.any() and chd > _EPS else 0.0,
+        # B3b. The chroma-weighted circular mean hue of the RED band, in degrees.
+        # A rotation is a move along this axis by construction, and `warm` in
+        # `keep` is what a global white balance cannot survive: measured, warming
+        # the reds moves this +1.578 / +3.966 / +8.018 while moving `warm` by
+        # -0.0007 / -0.0021 / -0.0058, and a global warmth push moves it the
+        # WRONG WAY, -0.130 / -0.304 / -0.545, while moving `warm` +0.0075 /
+        # +0.0187 / +0.0374.
+        #
+        # Red, not green, because the clip decides what is measurable: red and
+        # yellow are 41.3% and 58.2% of this frame's chroma and green is 0.35%.
+        # A green-targeted rotation moved green_warm by +0.0019 at subtle --
+        # under MOVE, i.e. a correct answer would have been scored a failure.
+        # Any other clip needs this constant re-checked.
+        "red_hue": float(np.degrees(np.arctan2((wred * np.sin(rad)).sum(),
+                                               (wred * np.cos(rad)).sum())))
+        if wred.sum() > _EPS else 0.0,
     }
 
 
